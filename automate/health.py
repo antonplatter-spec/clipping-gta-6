@@ -10,7 +10,8 @@ service cached, and the health checks that raise and resolve dashboard alerts.
                       recorders, checked_at}     (None fields = never checked; nothing here calls yt-dlp)
     check_all(now=None) -> [{key, action: "raised" | "resolved", level, message}]   (also recorded as a `health` run)
     gb_text(gb) -> "29,6 GB" (German, one decimal)
-    store_live(profile, data, error=None) / forget_live(profile)     the live service's cache (also kept in meta)
+    store_live(profile, data, error=None) / forget_live(profile)     the live service's cache (also kept in meta); an
+                                     error (a failed tick, or streams that can't be reached) raises live.service
 
 Alert keys (stable; messages German and say what to do): disk.low, tools.missing, tools.voice, key.anthropic_missing,
 key.fish_missing, budget.reached, live.not_recording, live.stalled, live.analysis_failed, live.service,
@@ -197,7 +198,7 @@ def store_live(profile, data, error=None):
         else:
             cache[profile] = {"streams": data.get("streams") or [], "issues": data.get("issues") or {},
                               "stalled": data.get("stalled") or [], "restarted": data.get("restarted") or [],
-                              "recorders": int(data.get("recorders") or 0), "checked_at": time.time(), "error": None}
+                              "recorders": int(data.get("recorders") or 0), "checked_at": time.time(), "error": error}
         store.set_meta("live.status", cache)
 
 
@@ -264,10 +265,12 @@ def _live_checks(put, now):
             restarted += entry.get("restarted") or []
         if "analysis_failed" in issues:
             failed.append(issues["analysis_failed"].split(": ", 1)[-1])
-    put("live.service", bool(stale), "warning",
-        "Der Live-Dienst hat " + (f"für {_names(stale)} " if stale else "") + "länger keine Streams geprüft"
-        + (f" ({'; '.join(errors)[:300]})" if errors else "") + ". Unter System siehst du, ob yt-dlp und ffmpeg "
-        "installiert sind; die Server-Logs liegen unter logs/automate/.", {"profiles": stale, "errors": errors})
+    put("live.service", bool(stale or errors), "warning",
+        ("Der Live-Dienst hat " + (f"für {_names(stale)} " if stale else "") + "länger keine Streams geprüft"
+         if stale else "Der Live-Dienst erreicht die Streams nicht")
+        + (f" ({'; '.join(errors)[:300]})" if errors else "") + ". Prüfe die Internetverbindung; unter System siehst "
+        "du, ob yt-dlp und ffmpeg installiert sind; die Server-Logs liegen unter logs/automate/.",
+        {"profiles": stale, "errors": errors})
     put("live.not_recording", bool(missed), "error",
         f"Live-Streams mit GTA 6 werden nicht aufgenommen: {_names(missed)}. Häufige Ursachen: yt-dlp oder ffmpeg "
         "fehlt (siehe System) oder die Höchstzahl gleichzeitiger Aufnahmen (max_recorders) ist erreicht.",

@@ -43,7 +43,7 @@ Public (API):
 Worker / scheduler side:
     run_job(run) ; settle_parent(job_id) ; enqueue_live_chunks(profile, ready) -> [ids]
     close_live_chunks(profile, ready) -> [clipper jobs] ; run_scan(run_id, profile, trigger, cancel=None) -> summary
-    youtube_id(url) ; watch_url(vid) ; trailing_json(text) ; profile_config(profile)
+    youtube_id(url) ; watch_url(vid) ; trailing_json(text) ; profile_config(profile) ; yt_dlp_detail(text)
 """
 import hashlib
 import importlib
@@ -109,8 +109,8 @@ KEY_REJECTED = ("Anthropic hat den gespeicherten API-Schlüssel abgelehnt (ungü
 BILLING = ("Das Anthropic-Konto hat kein Guthaben mehr oder sein Ausgabenlimit erreicht "
            "(console.anthropic.com → Billing).")
 BILLING_RETRY_S = 3600
-YTDLP_MISSING = ("yt-dlp ist nicht installiert, deshalb kann kein Video geladen werden. Unter System steht, wie du es "
-                 "installierst (z. B. „uv run python -m clipper setup --install“).")
+YTDLP_MISSING = ("yt-dlp ist nicht installiert, deshalb kann kein Video geladen werden. Es gehört zu den Python-Paketen: "
+                 "Server beenden und mit ./start.sh neu starten (Details unter System).")
 
 
 # ---------------------------------------------------------------- errors
@@ -198,6 +198,13 @@ def trailing_json(text):
             except ValueError:
                 continue
     raise ValueError("keine JSON-Ausgabe gefunden")
+
+
+def yt_dlp_detail(text, limit=180):
+    """yt-dlp's last error line without its "please report this issue" boilerplate, shortened for a message."""
+    line = ([x.strip() for x in str(text or "").splitlines() if x.strip()] or [""])[-1]
+    line = re.split(r";?\s*please report this issue", line, flags=re.I)[0].strip()
+    return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
 
 
 def _tail(res, n=1):
@@ -1796,10 +1803,22 @@ def run_scan(rid, profile, trigger, cancel=None):
         store.raise_alert(f"scan.failed.{profile}", "warning", f"Die Suche nach neuen Videos ({profile}) ist "
                           f"fehlgeschlagen: {err}", {"run_id": rid})
         return summary
-    store.resolve_alert(f"scan.failed.{profile}")
     videos = data.get("videos") or []
     errors = data.get("errors") or []
     summary.update(checked=len(videos), off_topic=int(data.get("skipped_off_topic") or 0), errors=errors)
+    if errors and not videos and not summary["off_topic"]:
+        # not one source answered (no network, YouTube's bot check, a broken yt-dlp): say so, not "nothing new"
+        first = str((errors[0] or {}).get("error") if isinstance(errors[0], dict) else errors[0])
+        known = _fetch_error(first, scan=False)
+        err = known.message if not known.retryable or known.slow else f"yt-dlp meldet: {yt_dlp_detail(first)}"
+        summary["message"] = f"Keine Quelle erreichbar ({len(errors)} von {len(errors)}): {err}"
+        store.finish_run(rid, False, summary)
+        store.raise_alert(f"scan.failed.{profile}", "warning",
+                          f"Die Suche nach neuen Videos ({profile}) hat keine einzige Quelle erreicht: {err} Prüfe die "
+                          "Internetverbindung; meldet YouTube eine Bot-Prüfung, hilft meist ein yt-dlp-Update (siehe "
+                          "System).", {"run_id": rid, "errors": len(errors)})
+        return summary
+    store.resolve_alert(f"scan.failed.{profile}")
     fresh = [v for v in videos if not v.get("processed")]
     fresh.sort(key=lambda v: str(v.get("source") or "").startswith("search:"))  # creators first, then searches
     limit = int(store.get_setting("prefs.sources_per_day"))

@@ -187,5 +187,24 @@ class RunBridgeTests(unittest.TestCase):
         self.assertEqual(out, want)
 
 
+class LiveProbeTests(unittest.TestCase):
+    def test_an_unreachable_platform_is_told_apart_from_an_offline_stream(self):
+        from automate import bridge_ext_pipeline as ext
+
+        def run(stderr, rc=1):
+            return mock.patch.object(ext.subprocess, "run", return_value=subprocess.CompletedProcess([], rc, "", stderr))
+        with run("ERROR: [twitch:stream] xqc: The channel is not currently live"):
+            self.assertIsNone(ext._unreachable("https://www.twitch.tv/xqc"))
+        with run("ERROR: [twitch:stream] xqc: Unable to download JSON metadata: <urlopen error Tunnel connection "
+                 "failed: 403 Forbidden>"):
+            self.assertIn("Tunnel connection failed", ext._unreachable("https://www.twitch.tv/xqc"))
+        with run("ERROR: [youtube] x: Sign in to confirm you’re not a bot"):
+            self.assertIn("not a bot", ext._unreachable("https://www.youtube.com/@x/live"))
+        with run("", rc=0):
+            self.assertIsNone(ext._unreachable("https://kick.com/xqc"))
+        with mock.patch.object(ext.subprocess, "run", side_effect=subprocess.TimeoutExpired("yt-dlp", 60)):
+            self.assertIn("Zeitüberschreitung", ext._unreachable("https://kick.com/xqc"))
+
+
 if __name__ == "__main__":
     unittest.main()

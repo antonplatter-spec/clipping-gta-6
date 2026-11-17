@@ -145,6 +145,28 @@ class ScanTests(PipelineCase):
         pipeline.request_scan("gta6", wait=True)
         self.assertIsNotNone(store.get_alert("scan.failed.gta6")["resolved_at"])
 
+    def test_a_scan_that_reaches_no_source_is_a_failed_run_with_an_alert(self):
+        proxy = ("ERROR: [youtube:tab] @KaiCenat/videos: Unable to download API page: ('Unable to connect to proxy', "
+                 "OSError('Tunnel connection failed: 403 Forbidden'))")
+        self.clip.watch = {"videos": [], "skipped_off_topic": 0,
+                           "errors": [{"source": "Kai Cenat", "error": proxy}, {"source": "search: GTA 6", "error": proxy}]}
+        pipeline.request_scan("gta6", wait=True)
+        run = store.last_run("scan", "gta6")
+        self.assertFalse(run["ok"])
+        self.assertIn("Keine Quelle erreichbar (2 von 2)", run["summary"]["message"])
+        alert = store.get_alert("scan.failed.gta6")
+        self.assertIsNone(alert["resolved_at"])
+        self.assertIn("Internetverbindung", alert["message"])
+        self.assertIn("yt-dlp meldet: ERROR: [youtube:tab] @KaiCenat/videos: Unable to download API page", alert["message"])
+        self.assertEqual(pipeline.yt_dlp_detail("ERROR: x: boom; please report this issue on  https://github.com/…"),
+                         "ERROR: x: boom")
+        # one source answering (even with nothing new) is a working scan: the alert goes
+        self.clip.watch = {"videos": [{"id": "AAAAAAAAAAA", "processed": True, "source": "Kai Cenat"}],
+                           "skipped_off_topic": 0, "errors": [{"source": "search: GTA 6", "error": proxy}]}
+        pipeline.request_scan("gta6", wait=True)
+        self.assertTrue(store.last_run("scan", "gta6")["ok"])
+        self.assertIsNotNone(store.get_alert("scan.failed.gta6")["resolved_at"])
+
     def test_two_scans_of_a_profile_never_overlap(self):
         lock = pipeline._scan_locks["gta6"]
         lock.acquire()
@@ -214,6 +236,23 @@ class LiveServiceTests(PipelineCase):
         self.assertFalse(run["ok"])
         self.assertIn("yt-dlp ist nicht installiert", run["summary"]["message"])
         self.assertIn("yt-dlp", health._cache()["gta6"]["error"])
+
+    def test_streams_that_cannot_be_reached_are_a_failed_run_and_an_alert_not_offline(self):
+        store.set_settings({"automation.live_enabled": True})
+        proxy = "ERROR: [twitch:stream] xqc: Unable to download JSON metadata: Tunnel connection failed: 403 Forbidden"
+        self.clip.live_ticks = [{**self.tick_data([]), "probe_error": proxy}, self.tick_data([])]
+        scheduler.live_tick()
+        run = store.list_runs("live_watch")[0]
+        self.assertFalse(run["ok"])
+        self.assertIn("Plattformen nicht erreichbar", run["summary"]["message"])
+        health.check_all()
+        alert = store.get_alert("live.service")
+        self.assertIsNone(alert["resolved_at"])
+        self.assertIn("erreicht die Streams nicht", alert["message"])
+        self.assertIn("Tunnel connection failed", alert["message"])
+        scheduler.live_tick()  # reachable again (offline is no error)
+        health.check_all()
+        self.assertIsNotNone(store.get_alert("live.service")["resolved_at"])
 
     def test_profiles_without_active_streams_are_not_watched(self):
         for s in store.list_streams("gta6"):

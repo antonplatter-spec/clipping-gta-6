@@ -11,7 +11,9 @@
                 exactly `clipper live watch --chunk N` (live.watch + cleanup) and `clipper live health`, sharing ONE
                 probe of the streams (each probe is a yt-dlp call per stream); `streams` = live.status() rows with
                 `recording` re-read after the watch. A stalled recorder is replaced without a gap (live.restart) at
-                most once per RESTART_COOLDOWN_S.
+                most once per RESTART_COOLDOWN_S. `probe_error`: when no stream came back live, one more probe asks
+                why; a network / bot-check / proxy failure is returned here (clipper's probe reads every failure as
+                "offline", which would hide that the PC can't reach the platforms at all), else None.
 """
 import json
 import shutil
@@ -22,6 +24,10 @@ from importlib import metadata
 from automate import bridge
 
 RESTART_COOLDOWN_S = 30 * 60
+UNREACHABLE = ("unable to connect", "connection refused", "failed to resolve", "name or service not known",
+               "temporary failure in name resolution", "timed out", "proxyerror", "tunnel connection failed",
+               "network is unreachable", "sign in to confirm", "not a bot", "http error 429", "http error 5",
+               "certificate verify failed", "unable to download")
 TOOLS = ("ffmpeg", "ffprobe", "yt-dlp", "whisper-cli", "whisperkit-cli", "demucs", "espeak-ng", "say")
 VERSION_ARGS = {"ffmpeg": ["-version"], "ffprobe": ["-version"], "yt-dlp": ["--version"], "espeak-ng": ["--version"]}
 
@@ -100,6 +106,20 @@ def _stalled(live, now):
     return out
 
 
+def _unreachable(url):
+    """The reason a platform can't be reached at all (yt-dlp's last error line), or None (offline is no error)."""
+    try:
+        res = subprocess.run(["yt-dlp", "-J", "--no-warnings", "--skip-download", "--no-playlist", "--", url],
+                             capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return "yt-dlp: Zeitüberschreitung"
+    if res.returncode == 0:
+        return None
+    lines = [x.strip() for x in res.stderr.splitlines() if x.strip()]
+    last = lines[-1] if lines else ""
+    return last[:300] if any(k in last.lower() for k in UNREACHABLE) else None
+
+
 @bridge.op("live_tick")
 def live_tick(payload, cfg):
     from clipper import cleanup, live
@@ -142,7 +162,8 @@ def live_tick(payload, cfg):
             except SystemExit:
                 continue
     ready = live.ready_jobs(True)
-    return {"started": started, "ready": ready, "transcribing": sorted(set(live.ready_jobs()) - set(ready)),
+    probe_error = _unreachable(streams[0]["url"]) if streams and not any(s.get("live") for s in streams) else None
+    return {"probe_error": probe_error, "started": started, "ready": ready, "transcribing": sorted(set(live.ready_jobs()) - set(ready)),
             "cleaned": {"files": cleaned["files"], "gb": cleaned["gb"]},
             "streams": [{"name": s.get("name"), "url": s.get("url"), "live": bool(s.get("live")),
                          "on_topic": bool(s.get("on_topic")), "recording": bool(s.get("recording")),

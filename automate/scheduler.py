@@ -274,10 +274,15 @@ def _live_profile(profile, chunk, trigger, stop):
         return {"message": msg}
     new = pipeline.enqueue_live_chunks(profile, data.get("ready"))
     closed = pipeline.close_live_chunks(profile, data.get("ready"))
-    health.store_live(profile, data)
+    unreachable = data.get("probe_error")
+    if unreachable:
+        unreachable = pipeline.yt_dlp_detail(unreachable)
+    health.store_live(profile, data, error=f"Streams nicht erreichbar: {unreachable}" if unreachable else None)
     streams = data.get("streams") or []
     live = [s for s in streams if s.get("live") and s.get("on_topic")]
     parts = [f"{len(live)} von {len(streams)} Stream(s) live mit GTA 6" if streams else "Keine Streams"]
+    if unreachable:
+        parts = [f"Live-Check: Plattformen nicht erreichbar ({unreachable})"]
     if data.get("started"):
         parts.append(f"Aufnahme gestartet: {', '.join(data['started'])}")
     if data.get("restarted"):
@@ -292,7 +297,7 @@ def _live_profile(profile, chunk, trigger, stop):
     summary = {"message": ", ".join(parts), "started": data.get("started") or [], "new_jobs": new,
                "closed": closed, "recorders": data.get("recorders"), "issues": data.get("issues") or {},
                "restarted": data.get("restarted") or []}
-    store.finish_run(rid, True, summary)
+    store.finish_run(rid, not unreachable, summary)
     return summary
 
 

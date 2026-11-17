@@ -24,7 +24,7 @@ class SystemReportTests(PipelineCase):
                          (True, "6.1.1", None))
         self.assertFalse(tools["yt-dlp"]["ok"])
         self.assertTrue(tools["yt-dlp"]["required"])
-        self.assertIn("uv tool install yt-dlp", tools["yt-dlp"]["hint"])
+        self.assertIn("uv lock --upgrade-package yt-dlp", tools["yt-dlp"]["hint"])  # a project dependency now
         self.assertTrue(tools["parakeet"]["ok"])
         self.assertNotIn("whisper.cpp", tools)
         self.assertFalse(tools["demucs"]["required"])
@@ -70,6 +70,12 @@ class SystemReportTests(PipelineCase):
 
 
 class CheckAllTests(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(health.shutil, "disk_usage", return_value=mock.Mock(free=500e9, total=1000e9))
+        p.start()  # the machine's real free space must not decide whether disk.low is raised
+        self.addCleanup(p.stop)
+
     def active(self):
         return {a["key"]: a for a in store.list_alerts()}
 
