@@ -26,6 +26,16 @@ GTA Clipper turns GTA 6 streams and uploads into ready-to-post vertical Shorts. 
 
 > ⭐ **If it saves you hours of scrubbing through streams, give it a star.** It's the main way other clippers find it.
 
+## Automatik: a local server instead of an agent session
+
+Prefer a dashboard to a chat? The `automate` package runs the clipper as a private server on your own PC, started with one command. A scheduler scans your creators and records live streams around the clock, workers run the clipper, and the **Claude API** (instead of Claude Code) makes the editorial calls: which moments, which hooks and titles. A web dashboard (German, login with password + 2FA) is where you enter the API keys, connect YouTube, manage sources and the schedule, approve or edit picks, preview every hook variant, copy titles or upload straight to YouTube, and watch API costs against a daily limit.
+
+```bash
+./start.sh   # installs Python and the packages with uv, then serves the dashboard on http://localhost:8765
+```
+
+**Install guide (German): [docs/INSTALLATION.md](docs/INSTALLATION.md)**: Linux, macOS (Apple Silicon) and Windows via WSL2, first-run setup, YouTube connection, autostart, phone access on the home network, updates, backups and troubleshooting. The Claude Code / Codex workflow below works as before; just don't run its schedules (`clipper schedule`) next to the server.
+
 ## Why this clipper
 
 - **Get the clips before anyone else.** Most clippers wait for the stream to end and scrub the VOD. This records your Twitch, Kick and YouTube creators the moment they go live on GTA 6, in gapless 30-minute chunks, and clips each finished chunk within about two hours. Your Shorts can be up while the stream is still going.

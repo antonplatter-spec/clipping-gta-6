@@ -7,7 +7,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 JOBS = ROOT / "jobs"
-PROFILES = ROOT / "profiles"
+# CLIPPER_PROFILES_DIR (here) and CLIPPER_CONFIG (load) point the CLI at the automate server's overlay in data/runtime/,
+# built from its database; unset = the repo's own files.
+PROFILES = Path(os.environ["CLIPPER_PROFILES_DIR"]) if os.environ.get("CLIPPER_PROFILES_DIR") else ROOT / "profiles"
 DEFAULT_PROFILE = "gta6"
 PROFILE = DEFAULT_PROFILE  # the active profile, set by load()
 
@@ -72,7 +74,7 @@ def load(path=None, profile=None):
         names = sorted(p.name for p in PROFILES.iterdir() if p.is_dir()) if PROFILES.is_dir() else []
         raise SystemExit(f"no profile '{profile}' (have: {', '.join(names) or 'none'})")
     PROFILE = profile
-    path = Path(path) if path else ROOT / "watchlist.yaml"
+    path = Path(path or os.environ.get("CLIPPER_CONFIG") or ROOT / "watchlist.yaml")
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     over = PROFILES / profile / "profile.yaml"

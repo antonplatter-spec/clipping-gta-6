@@ -500,8 +500,8 @@ class LinuxPortTests(unittest.TestCase):
         from clipper import setup
         def plan(asr):
             with mock.patch.object(setup, "IS_MAC", False), mock.patch.object(setup.shutil, "which", return_value=None), \
-                    mock.patch.object(setup.sys, "prefix", "/venv"), mock.patch.object(setup, "uses_whisper",
-                                                                                    return_value=asr == "whisper"):
+                    mock.patch.object(setup.sys, "prefix", "/venv"), mock.patch.object(setup, "uv_managed", return_value=False), \
+                    mock.patch.object(setup, "uses_whisper", return_value=asr == "whisper"):
                 return [" ".join(c) for c in setup.linux_plan(list(setup.APT), ["onnx_asr"], True)[0]]
         flat = plan("parakeet")
         self.assertTrue(any(c.startswith("sudo apt-get install -y") and "ffmpeg" in c for c in flat))
@@ -509,6 +509,18 @@ class LinuxPortTests(unittest.TestCase):
         self.assertTrue(any("onnx-asr" in c for c in flat))
         self.assertFalse(any("whisper.cpp" in c for c in flat))
         self.assertTrue(any("whisper.cpp" in c for c in plan("whisper")))
+
+    def test_uv_venv_gets_uv_commands_instead_of_pip(self):
+        from unittest import mock
+        from clipper import setup
+        with mock.patch.object(setup, "IS_MAC", False), mock.patch.object(setup.shutil, "which", return_value=None), \
+                mock.patch.object(setup.sys, "prefix", "/venv"), mock.patch.object(setup, "uv_managed", return_value=True), \
+                mock.patch.object(setup, "uses_whisper", return_value=False):
+            plan, lines = setup.linux_plan(list(setup.APT), ["onnx_asr"], True)
+        self.assertFalse(any("pip" in part for cmd in plan for part in cmd))  # a uv venv has no pip
+        self.assertTrue(any(c[:2] == ["sudo", "apt-get"] for c in plan))
+        self.assertTrue(any("uv sync" in line and "onnx-asr" in line for line in lines))
+        self.assertTrue(any("./start.sh --stimmen" in line for line in lines))
 
     def test_systemd_timer_written_on_linux(self):
         import tempfile

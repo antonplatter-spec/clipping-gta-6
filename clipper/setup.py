@@ -1,4 +1,5 @@
 """Check and install everything the clipper needs, and install its agent commands for Claude Code and Codex."""
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,8 @@ LOCAL_BIN = Path("~/.local/bin").expanduser()
 FAST_MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
 PIP = {"yaml": "pyyaml", "PIL": "pillow", "numpy": "numpy", "onnx_asr": "onnx-asr[cpu,hub]==0.12.0"}
 MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
+UV_VOICES = ("demucs (voice separation, optional; PyTorch, ~3 GB on Linux): ./start.sh --stimmen "
+             "(or `uv sync --extra stimmen`)")
 COMMANDS = [(ROOT / ".claude/commands", Path("~/.claude/commands").expanduser()),
             (ROOT / ".codex/prompts", Path("~/.codex/prompts").expanduser())]
 
@@ -28,6 +31,17 @@ def _has_module(name):
         return True
     except ImportError:
         return False
+
+
+def uv_managed():
+    """A venv made by `uv sync` has no pip and uv owns its packages: a pip install there fails, and the next
+    `uv sync` would remove it again, so missing Python packages are a `uv sync` (or start.sh) away."""
+    return sys.prefix != sys.base_prefix and (ROOT / "uv.lock").exists() and importlib.util.find_spec("pip") is None
+
+
+def uv_lines(mods, demucs):
+    lines = [f"Python packages missing ({', '.join(sorted(PIP.get(m, m) for m in mods))}): run `uv sync` in {ROOT}"]
+    return (lines if mods else []) + ([UV_VOICES] if demucs else [])
 
 
 def uses_whisper():
@@ -85,6 +99,9 @@ def linux_plan(tools, mods, demucs):
                      f"  python3 -m venv {ROOT / '.venv'} && {ROOT / '.venv/bin/python'} -m clipper setup --install")
         return plan, lines
     pip = [m for m in mods] + (["yt-dlp"] if not shutil.which("yt-dlp") else [])
+    if uv_managed():
+        lines += uv_lines(pip, demucs)
+        pip, demucs = [], False
     if pip:
         plan.append([sys.executable, "-m", "pip", "install", *sorted(PIP.get(m, m) for m in pip)])
     if demucs:  # CPU wheels keep torch small on a machine without an NVIDIA card
@@ -114,10 +131,13 @@ def run(install=False, dry_run=False):
             lines.append("Homebrew is missing: install it from https://brew.sh, then rerun setup.")
         else:
             plan.append(["brew", "install", *pkgs])
-    if mods and IS_MAC:
-        plan.append([sys.executable, "-m", "pip", "install", *sorted(PIP[m] for m in mods)])
-    if demucs and IS_MAC:
-        plan.append([sys.executable, "-m", "pip", "install", "demucs"])
+    if IS_MAC and uv_managed():
+        lines += uv_lines(mods, demucs)
+    elif IS_MAC:
+        if mods:
+            plan.append([sys.executable, "-m", "pip", "install", *sorted(PIP[m] for m in mods)])
+        if demucs:
+            plan.append([sys.executable, "-m", "pip", "install", "demucs"])
     names = BREW if IS_MAC else {**APT, "yt-dlp": ""}
     if uses_whisper() and not IS_MAC:
         names["whisper-cli"] = ""
