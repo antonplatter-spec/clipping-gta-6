@@ -1,6 +1,8 @@
 """automate.autostart: the generated systemd unit / LaunchAgent / WSL batch file, and the commands install, remove,
 status and restart run (a fake runner and a temp home: nothing is enabled on this machine)."""
+import contextlib
 import fcntl
+import io
 import json
 import os
 import plistlib
@@ -77,6 +79,7 @@ class UnitTextTests(unittest.TestCase):
         for line in ("Restart=on-failure", "KillMode=process", "WantedBy=default.target", "Type=simple"):
             self.assertIn(line, lines)
         self.assertTrue(any(ln.startswith("TimeoutStopSec=") for ln in lines))
+        self.assertIn("Documentation=file:///home/alex/mein%%20clipper/docs/INSTALLATION.md", lines)
 
     def test_plist(self):
         data = plistlib.loads(autostart.plist_bytes(Path("/Users/alex/mein clipper"), "/opt/homebrew/bin:/usr/bin",
@@ -287,7 +290,7 @@ class MainTests(TempHome):
                 mock.patch("builtins.print") as out:
             self.assertEqual(autostart.main([]), 0)
         out.assert_called_once_with("Autostart: nicht eingerichtet")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             autostart.main(["start"])
 
 

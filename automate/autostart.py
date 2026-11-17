@@ -166,7 +166,7 @@ def unit_text(root, path):
     env_path = path.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
     return f"""[Unit]
 Description=GTA Clipper – Automatik (Dashboard, Zeitplan, Worker)
-Documentation=file://{str(root / "docs" / "INSTALLATION.md").replace("%", "%%")}
+Documentation={(root / "docs" / "INSTALLATION.md").as_uri().replace("%", "%%")}
 
 [Service]
 Type=simple
