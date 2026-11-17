@@ -99,11 +99,12 @@ def _split_host(value):
 
 
 def machine_names():
-    """This machine's host names and IP addresses (for --host 0.0.0.0); no packets are sent."""
+    """This machine's host name (+ .local) and IP addresses (for --host 0.0.0.0); no packets are sent. No
+    getfqdn(): a reverse-DNS answer could put a name someone else controls on the allow-list."""
     names = set()
     try:
         hn = socket.gethostname()
-        names |= {hn.lower(), f"{hn.lower()}.local", socket.getfqdn().lower()}
+        names |= {hn.lower(), f"{hn.lower()}.local"}
         names |= set(socket.gethostbyname_ex(hn)[2])
     except OSError:
         pass

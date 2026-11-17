@@ -199,9 +199,12 @@ def overview():
     today = store.usage_today()
     tools_ok, missing = tools_state()
     free, _ = _disk_gb(paths.jobs_dir() if paths.jobs_dir().exists() else paths.ROOT)
+    # waiting_approval jobs at stage "render" wait for their own renders (auto approval), not for the owner
+    for_owner = sum(1 for j in store.list_jobs(status="waiting_approval", limit=10000)[0] if j["stage"] == "approval") \
+        if statuses["waiting_approval"] else 0
     return {
         "jobs": {"waiting": groups["waiting"], "running": groups["running"], "failed": groups["failed"],
-                 "waiting_approval": statuses["waiting_approval"],
+                 "waiting_approval": for_owner,
                  "done_today": store.count_jobs(status=list(store.JOB_GROUPS["done"]), finished_since=_day_start())},
         "automation": automation_block(s),
         "live": {"streams": [{k: x.get(k) for k in ("id", "name", "url", "profile", "platform", *LIVE_KEYS)}

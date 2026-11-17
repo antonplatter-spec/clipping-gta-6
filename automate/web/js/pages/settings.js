@@ -451,7 +451,15 @@ const WATCH_FIELDS = [
 function Weights({ form, set, base, errors, disabled }) {
   const sum = WEIGHTS.reduce((s, [p]) => s + (Number(form[p]) || 0), 0);
   const ok = Math.abs(sum - 1) < 0.005;
-  const normalize = () => { if (sum > 0) WEIGHTS.forEach(([p]) => set(p, Math.round(((Number(form[p]) || 0) / sum) * 100) / 100)); };
+  // whole percents that add up to exactly 100 (largest remainder): plain rounding gave e.g. 36/18/18/18/9 = 99 %
+  const normalize = () => {
+    if (sum <= 0) return;
+    const raw = WEIGHTS.map(([p]) => ((Number(form[p]) || 0) / sum) * 100);
+    const pct = raw.map(Math.floor);
+    const order = raw.map((r, i) => [r - pct[i], i]).sort((a, b) => b[0] - a[0]);
+    for (let k = 0; k < 100 - pct.reduce((a, b) => a + b, 0); k += 1) pct[order[k][1]] += 1;
+    WEIGHTS.forEach(([p], i) => set(p, pct[i] / 100));
+  };
   return html`<div class="weights">
     ${WEIGHTS.map(([p, label, help]) => html`<div class="weight" key=${p}>
       <label for=${`w-${p}`}><span style="font-weight:600">${label}</span><br /><span class="muted small">${help}</span></label>

@@ -263,7 +263,7 @@ function RecentJobs({ jobs }) {
     actions=${html`<${Button} size="sm" variant="ghost" href="#/jobs" iconRight="chevron-right">Alle Jobs<//>`}>
     ${!jobs.length ? html`<${Empty} icon="list-todo" title="Noch keine Jobs">Starte oben eine Suche oder clippe eine Video-URL direkt.<//>`
       : html`<div class="job-cards" style="padding:0 18px">${jobs.map((j) => html`<button type="button" class="job-card" key=${j.id} onClick=${() => navigate(`/jobs?job=${j.id}`)}>
-          <div class="row-between" style="flex-wrap:nowrap"><span class="job-title clamp-2">${j.title || `Job #${j.id}`}</span><${JobStatusBadge} status=${j.status} /></div>
+          <div class="row-between" style="flex-wrap:nowrap"><span class="job-title clamp-2">${j.title || `Job #${j.id}`}</span><${JobStatusBadge} status=${j.status} stage=${j.stage} /></div>
           <span class="muted small">#${j.id} · ${JOB_KIND[j.kind] || j.kind} · ${JOB_STAGE[j.stage] || '–'} · <${Rel} ts=${j.updated_at} /></span>
           ${(j.status === 'failed' && j.error) ? html`<span class="small clamp-2" style="color:var(--red)">${j.error}</span>` : j.progress && html`<span class="job-progress">${j.progress}</span>`}
         </button>`)}</div>
@@ -272,7 +272,7 @@ function RecentJobs({ jobs }) {
           <tbody>${jobs.map((j) => html`<tr class="is-clickable" key=${j.id} onClick=${() => navigate(`/jobs?job=${j.id}`)}>
             <td class="td-title"><a href=${`#/jobs?job=${j.id}`} onClick=${(e) => e.stopPropagation()} class="job-title">${j.title || `Job #${j.id}`}</a>
               <div class="muted small">#${j.id} · ${JOB_KIND[j.kind] || j.kind}${j.channel ? ` · ${j.channel}` : ''}</div></td>
-            <td class="nowrap"><${JobStatusBadge} status=${j.status} /><div class="muted small"><${Rel} ts=${j.updated_at} /></div></td>
+            <td class="nowrap"><${JobStatusBadge} status=${j.status} stage=${j.stage} /><div class="muted small"><${Rel} ts=${j.updated_at} /></div></td>
             <td><div class="small">${JOB_STAGE[j.stage] || '–'}</div>${(j.status === 'failed' ? j.error : j.progress) && html`<div class="small clamp-2" style=${j.status === 'failed' ? 'color:var(--red)' : 'color:var(--muted)'}>${j.status === 'failed' ? j.error : j.progress}</div>`}</td>
           </tr>`)}</tbody></table></div>`}
   <//>`;

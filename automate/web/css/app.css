@@ -260,7 +260,8 @@ mark.kw { background: var(--mark-bg); color: inherit; border-radius: 3px; paddin
   color: var(--text); font-weight: 560; font-size: 13.5px; cursor: pointer; white-space: nowrap;
   text-decoration: none; transition: background 0.12s, border-color 0.12s, color 0.12s; user-select: none;
 }
-.btn:hover { background: var(--surface-3); text-decoration: none; }
+/* not on disabled buttons: a disabled primary kept its white text on this light grey (unreadable) */
+.btn:hover:not(:disabled) { background: var(--surface-3); text-decoration: none; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn.is-busy { opacity: 0.8; cursor: progress; }
 .btn-sm { height: 30px; padding: 0 10px; font-size: 12.5px; gap: 5px; }
@@ -272,6 +273,7 @@ mark.kw { background: var(--mark-bg); color: inherit; border-radius: 3px; paddin
 .btn-danger { background: transparent; border-color: color-mix(in srgb, var(--red) 55%, transparent); color: var(--red); }
 .btn-danger:hover:not(:disabled) { background: var(--red-bg); }
 .modal .btn-danger { background: var(--red); color: var(--on-accent); border-color: var(--red); }
+.modal .btn-danger:hover:not(:disabled) { background: var(--red); filter: brightness(1.1); }
 .btn-approve { background: var(--green); border-color: var(--green); color: var(--on-accent); }
 .btn-approve:hover:not(:disabled) { filter: brightness(1.08); background: var(--green); }
 .btn-claude { background: var(--orange-bg); border-color: color-mix(in srgb, var(--orange) 45%, transparent); color: var(--orange); }

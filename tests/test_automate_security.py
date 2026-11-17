@@ -51,6 +51,10 @@ class TotpTests(unittest.TestCase):
         self.assertEqual(parse_qs(parsed.query)["issuer"], ["GTA Clipper"])
         svg = security.qr_svg(uri)
         self.assertTrue(svg.startswith("<svg") and "viewBox" in svg)
+        # the dashboard shows it as an <img> data: URL, which renders only with the SVG namespace
+        self.assertIn('xmlns="http://www.w3.org/2000/svg"', svg.split(">", 1)[0])
+        import xml.etree.ElementTree as ET
+        self.assertEqual(ET.fromstring(svg).tag, "{http://www.w3.org/2000/svg}svg")
 
 
 class CodeTokenMaskTests(unittest.TestCase):

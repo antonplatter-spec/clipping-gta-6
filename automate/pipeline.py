@@ -43,7 +43,7 @@ Public (API):
 Worker / scheduler side:
     run_job(run) ; settle_parent(job_id) ; enqueue_live_chunks(profile, ready) -> [ids]
     close_live_chunks(profile, ready) -> [clipper jobs] ; run_scan(run_id, profile, trigger, cancel=None) -> summary
-    youtube_id(url) ; trailing_json(text) ; profile_config(profile)
+    youtube_id(url) ; watch_url(vid) ; trailing_json(text) ; profile_config(profile)
 """
 import hashlib
 import importlib
@@ -208,6 +208,12 @@ def _tail(res, n=1):
     return " · ".join(x[:300] for x in pick) or f"Exit-Code {res.returncode}"
 
 
+def watch_url(vid):
+    """The full watch URL for `clipper fetch`: a video id may start with "-", which a bare id would turn into an
+    option for clipper's argument parser (every positional argument also goes after "--" for the same reason)."""
+    return f"https://www.youtube.com/watch?v={vid}"
+
+
 def youtube_id(url):
     """The 11-character video id of a YouTube URL or a bare id (clipper's own rule), else None."""
     url = (url or "").strip()
@@ -362,8 +368,8 @@ def _ensure_sources(run, parent, data):
                              "„URL laden“ mit demselben Abschnitt neu.", retryable=False)
         run.progress(f"Quellvideo wurde aufgeräumt – lade {cj} neu …", force=True)
         run.event(f"source.mp4 von {cj} fehlt (aufgeräumt): lade es neu", "warning")
-        res = run.clipper(["fetch", cj] + (["--section", section] if section else []), timeout=T_FETCH,
-                          stall=STALL_FETCH, progress=_fetch_progress)
+        res = run.clipper(["fetch", *(["--section", section] if section else []), "--", watch_url(cj)],
+                          timeout=T_FETCH, stall=STALL_FETCH, progress=_fetch_progress)
         if res.returncode != 0 or not (jd / "source.mp4").exists():
             raise _fetch_error(res, scan=False)
 
@@ -412,7 +418,8 @@ def sync_waiting_alerts():
         limit = float(store.get_setting("claude.daily_limit_eur") or 0)
         spent = costs.spent_today_eur()
         store.raise_alert("budget.reached", "warning",
-                          f"Das Claude-Tageslimit von {limit:.2f} € ist erreicht ({spent:.2f} € heute). "
+                          f"Das Claude-Tageslimit von {costs.eur_text(limit)} ist erreicht ({costs.eur_text(spent)} "
+                          f"heute). "
                           + (f"{daily} Job(s) warten und laufen morgen automatisch weiter" if daily else
                              "Neue Auswahlen warten bis morgen")
                           + " – oder erhöhe das Limit unter „Kosten & Schlüssel“.",
@@ -780,8 +787,8 @@ def _stage_fetch(run, job):
         if section:
             run.event(f"Langes Video ({(info.get('duration') or 0) / 60:.0f} Min.): lade nur {section}")
     run.progress("Lade Video …", force=True)
-    res = run.clipper(["fetch", vid] + (["--section", section] if section else []), timeout=T_FETCH,
-                      stall=STALL_FETCH, progress=_fetch_progress)
+    res = run.clipper(["fetch", *(["--section", section] if section else []), "--", watch_url(vid)],
+                      timeout=T_FETCH, stall=STALL_FETCH, progress=_fetch_progress)
     if res.returncode != 0:
         raise _fetch_error(res, scan)
     try:
@@ -826,7 +833,7 @@ def _stage_analyze(run, job):
         dur = max(60.0, _section_seconds(b) - _section_seconds(a))
     timeout = min(T_ANALYZE_MAX, T_ANALYZE_BASE + T_ANALYZE_PER_S * dur)
     run.progress("Analysiere: extrahiere den Ton …", force=True)
-    res = run.clipper(["analyze", cj], timeout=timeout, progress=_analyze_progress)
+    res = run.clipper(["analyze", "--", cj], timeout=timeout, progress=_analyze_progress)
     if res.returncode != 0:
         raise _analyze_error(res)
     if _read_json(jd / "candidates.json") is None:
@@ -1042,7 +1049,7 @@ def settle_parent(job_id):
 def _live_done_quiet(run, job):
     """`clipper live done` for a chunk that ends without clips; a failure is left to the live service's sweep."""
     try:
-        res = run.clipper(["live", "done", job["clipper_job"]], timeout=T_LIVE_DONE)
+        res = run.clipper(["live", "done", "--", job["clipper_job"]], timeout=T_LIVE_DONE)
         if res.returncode == 0:
             store.add_job_event(job["id"], "Live-Aufnahme freigegeben (live done)")
     except (StageError, Canceled):
@@ -1054,7 +1061,7 @@ def _stage_finished(run, job):
     if job["kind"] == "live_chunk" and not result.get("live_done"):
         run.progress("Gibt die Live-Aufnahme frei …", force=True)
         if (_job_dir(job["clipper_job"])).is_dir():
-            res = run.clipper(["live", "done", job["clipper_job"]], timeout=T_LIVE_DONE)
+            res = run.clipper(["live", "done", "--", job["clipper_job"]], timeout=T_LIVE_DONE)
             if res.returncode != 0:
                 raise StageError(f"„clipper live done“ fehlgeschlagen: {_tail(res)}")
         result["live_done"] = True
@@ -1183,6 +1190,8 @@ def _stage_render(run, job):
         raise StageError(f"Der Clip ist nicht freigegeben (Status: {pick['status']})", retryable=False)
     parent = store.get_job(pick["job_id"])
     store.transition_pick(pick["id"], ("approved",), "rendering")
+    picks_file = paths.tmp_dir() / f"render-{job['id']}.json"
+    run.reap(["render", "--picks", str(picks_file)])  # a render a killed server left running: stop it first
     folder = _adopt_leftovers(run, job, pick, "en")
     if folder:
         return _finish_with_video(run, job, pick, folder, "en")
@@ -1198,7 +1207,6 @@ def _stage_render(run, job):
         allow_say = ["--allow-say"]
         run.event("Kein Fish-Audio-Schlüssel: das Voiceover spricht die Systemstimme", "warning")
     paths.ensure_data_dir()
-    picks_file = paths.tmp_dir() / f"render-{job['id']}.json"
     picks_file.write_text(json.dumps([data], indent=2, ensure_ascii=False), encoding="utf-8")
     out_dir = _export_dir(pick["profile"])
     params.update(out=_snapshot([out_dir]), picks_file=str(picks_file))
@@ -1207,8 +1215,8 @@ def _stage_render(run, job):
     hooks = data.get("hooks") or [data.get("hook", "")]
     top = int(store.get_setting("render.top_hooks") or 0)
     run.progress("Rendere: schneide den Clip …", force=True)
-    res = run.clipper(["render", parent["clipper_job"], "--picks", str(picks_file), "--out", str(out_dir)] + allow_say,
-                      timeout=T_RENDER, stall=STALL_RENDER,
+    res = run.clipper(["render", "--picks", str(picks_file), "--out", str(out_dir), *allow_say, "--",
+                       parent["clipper_job"]], timeout=T_RENDER, stall=STALL_RENDER,
                       progress=_render_progress(min(len(hooks), top) if top else len(hooks)))
     if res.returncode == 3:
         raise StageError(VOICE_KEY_MISSING, retryable=False)
@@ -1244,6 +1252,8 @@ def _stage_dub(run, job):
         raise StageError(FISH_MISSING, retryable=False)
     parent = store.get_job(pick["job_id"])
     cj, idx = parent["clipper_job"], str(pick["idx"])
+    tr_file = paths.tmp_dir() / f"dub-{job['id']}.json"
+    run.reap(["dub", "render", "--pick", idx, "--lang", lang, "--translation", str(tr_file)])
     folder = _adopt_leftovers(run, job, pick, lang)
     if folder:
         return _finish_with_video(run, job, pick, folder, lang)
@@ -1251,7 +1261,7 @@ def _stage_dub(run, job):
     _ensure_sources(run, parent, data)
     if "segments" not in result:
         run.progress(f"Synchronisation ({lang}): erkenne Zeilen und Sprecher …", force=True)
-        res = run.clipper(["dub", "segments", cj, "--pick", idx], timeout=T_DUB_SEGMENTS)
+        res = run.clipper(["dub", "segments", "--pick", idx, "--", cj], timeout=T_DUB_SEGMENTS)
         if res.returncode != 0:
             raise StageError(f"Zeilen für die Synchronisation nicht ermittelt: {_tail(res)}", retryable=True)
         try:
@@ -1268,7 +1278,6 @@ def _stage_dub(run, job):
         result["translation"] = tr
         run.update(result=result)
     paths.ensure_data_dir()
-    tr_file = paths.tmp_dir() / f"dub-{job['id']}.json"
     tr_file.write_text(json.dumps(result["translation"], ensure_ascii=False, indent=1), encoding="utf-8")
     today = date.today()
     dirs = [paths.exports_dir() / f"{pick['profile']}-{lang}" / d.isoformat() for d in (today, today + timedelta(1))]
@@ -1276,7 +1285,7 @@ def _stage_dub(run, job):
     run.update(params=params)
     job = run.job
     run.progress(f"Synchronisation ({lang}): klone die Stimmen und rendere …", force=True)
-    res = run.clipper(["dub", "render", cj, "--pick", idx, "--lang", lang, "--translation", str(tr_file)],
+    res = run.clipper(["dub", "render", "--pick", idx, "--lang", lang, "--translation", str(tr_file), "--", cj],
                       timeout=T_DUB_RENDER, stall=STALL_RENDER, progress=_dub_progress(lang))
     if res.returncode != 0:
         text = f"{res.stderr}\n{res.stdout}"
@@ -1868,7 +1877,7 @@ def close_live_chunks(profile, ready):
             stale.append((job, cj))
     if not stale:
         return []
-    res = runtime.run_clipper(["live", "done", *[cj for _, cj in stale]], profile, timeout=T_LIVE_DONE)
+    res = runtime.run_clipper(["live", "done", "--", *[cj for _, cj in stale]], profile, timeout=T_LIVE_DONE)
     if res.returncode != 0:
         log.warning("live done for %s failed: %s", [cj for _, cj in stale], _tail(res))
         return []

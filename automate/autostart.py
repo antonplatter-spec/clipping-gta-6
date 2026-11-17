@@ -2,7 +2,7 @@
 (German output; exit 1 when something failed).
 
     Linux     a systemd user service (~/.config/systemd/user/gta-clipper.service), enabled for the next boot and
-              started at once; `loginctl enable-linger` so it runs without anyone logged in (tried without sudo,
+              (re)started at once; `loginctl enable-linger` so it runs without anyone logged in (tried without sudo,
               else the sudo command is printed). Logs: `journalctl --user -u gta-clipper` and logs/automate/.
     macOS     a LaunchAgent (~/Library/LaunchAgents/com.gtaclipper.server.plist): starts at login, relaunched after
               a crash. Logs: logs/automate/launchd.log and server.log.
@@ -21,9 +21,11 @@ watcher of their own; `install` and `status` warn while they exist.
 
 Everything takes `home` and `run` (subprocess.run's signature) so tests use a temp dir and a fake runner:
     detect() -> "linux" | "mac" | "wsl" | "other"
-    unit_text(root, path) -> str          plist_bytes(root, path, log) -> bytes          wsl_cmd(root, distro) -> str
+    unit_text(root, path, args=()) -> str    plist_bytes(root, path, log, args=()) -> bytes
+    wsl_cmd(root, distro, args=()) -> str     (args: extra server flags, e.g. ["--host", "0.0.0.0"])
     old_schedules(home, kind) -> [Path]    service_path(home, kind) -> Path | None        server_running() -> dict|None
-    install / remove / status / restart(kind=None, home=None, run=subprocess.run, root=ROOT) -> (ok: bool, text: str)
+    install(kind=None, home=None, run=subprocess.run, root=ROOT, args=()) -> (ok: bool, text: str)
+    remove / status / restart(kind=None, home=None, run=subprocess.run) -> (ok, text)
 """
 import argparse
 import fcntl
@@ -94,14 +96,12 @@ def old_schedules(home=None, kind=None):
 def server_running():
     """{pid, url, started_at} of the server holding the data dir's lock, or None (nothing is created)."""
     lock = paths.data_dir() / "server.lock"
-    try:
-        f = open(lock, encoding="utf-8")
-    except OSError:
+    if not lock.is_file():
         return None
-    with f:
+    with open(lock, encoding="utf-8") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError:  # held: the server is up
             try:
                 return json.loads(f.read() or "{}") or {"pid": None}
             except ValueError:
@@ -160,9 +160,20 @@ def systemd_quote(arg):
     return s
 
 
-def unit_text(root, path):
+def _command(root, args):
+    return ["/bin/sh", str(Path(root) / "start.sh"), *SERVICE_ARGS, *map(str, args)]
+
+
+def _dashboard_url(args):
+    args = list(args)
+    port = next((args[i + 1] for i, a in enumerate(args[:-1]) if a == "--port"), None)
+    port = port or next((a.split("=", 1)[1] for a in args if a.startswith("--port=")), "8765")
+    return f"http://localhost:{port}"
+
+
+def unit_text(root, path, args=()):
     root = Path(root)
-    cmd = " ".join(systemd_quote(a) for a in ["/bin/sh", root / "start.sh", *SERVICE_ARGS])
+    cmd = " ".join(systemd_quote(a) for a in _command(root, args))
     env_path = path.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
     return f"""[Unit]
 Description=GTA Clipper – Automatik (Dashboard, Zeitplan, Worker)
@@ -186,11 +197,11 @@ WantedBy=default.target
 """
 
 
-def plist_bytes(root, path, log):
+def plist_bytes(root, path, log, args=()):
     root = Path(root)
     return plistlib.dumps({
         "Label": LABEL,
-        "ProgramArguments": ["/bin/sh", str(root / "start.sh"), *SERVICE_ARGS],
+        "ProgramArguments": _command(root, args),
         "WorkingDirectory": str(root),
         "EnvironmentVariables": {"PATH": path, "PYTHONUNBUFFERED": "1"},
         "RunAtLoad": True,
@@ -204,15 +215,15 @@ def plist_bytes(root, path, log):
     })
 
 
-def wsl_cmd(root, distro):
+def wsl_cmd(root, distro, args=()):
     """The Windows batch file for the Startup folder (CRLF, ASCII only: cmd.exe reads it in the OEM code page)."""
     root = str(root)
+    flags = " ".join(f'"{a}"' if any(c in str(a) for c in ' &|<>^"') else str(a) for a in [*SERVICE_ARGS, *args])
     lines = ["@echo off",
              "rem GTA Clipper - Automatik: starts the server in WSL at every Windows login.",
              "rem Created by: python -m automate.autostart install (remove it with: ... autostart remove).",
              "rem The minimized window IS the server: closing it stops the server.",
-             f'start "GTA Clipper" /min wsl.exe -d "{distro}" --cd "{root}" --exec /bin/sh "{root}/start.sh" '
-             + " ".join(SERVICE_ARGS)]
+             f'start "GTA Clipper" /min wsl.exe -d "{distro}" --cd "{root}" --exec /bin/sh "{root}/start.sh" {flags}']
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -268,7 +279,7 @@ def _linger(run, user):
     return (res.stdout or "").strip() == "yes"
 
 
-def _install_linux(home, run, root):
+def _install_linux(home, run, root, args):
     ok, why = _systemd_ready(run)
     if not ok:
         return False, ("systemd-Benutzerdienste sind hier nicht verfügbar"
@@ -276,9 +287,11 @@ def _install_linux(home, run, root):
                        + " Unter WSL: siehe docs/INSTALLATION.md, Abschnitt „Dauerbetrieb“.")
     unit = service_path(home, "linux")
     unit.parent.mkdir(parents=True, exist_ok=True)
-    unit.write_text(unit_text(root, service_path_env(home, "linux", uv_dir=_uv_dir())), encoding="utf-8")
+    unit.write_text(unit_text(root, service_path_env(home, "linux", uv_dir=_uv_dir()), args), encoding="utf-8")
     lines = [f"Autostart eingerichtet: {unit}"]
-    for cmd in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", UNIT]):
+    # restart, not `enable --now`: a second install (new flags) must replace a running server, a first one starts it
+    for cmd in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", UNIT],
+                ["systemctl", "--user", "restart", UNIT]):
         res = _run(run, cmd)
         if res.returncode != 0:
             return False, "\n".join(lines + [f"Fehler bei „{' '.join(cmd)}“: {_out(res)}"])
@@ -294,7 +307,7 @@ def _install_linux(home, run, root):
             lines.append("Läuft auch ohne Anmeldung (loginctl enable-linger ist eingeschaltet).")
         else:
             lines.append(f"Damit er auch ohne Anmeldung läuft, einmal ausführen: sudo loginctl enable-linger {user}")
-    lines += ["", "Dashboard: http://localhost:8765 (nach ein paar Sekunden)",
+    lines += ["", f"Dashboard: {_dashboard_url(args)} (nach ein paar Sekunden)",
               "Status:    uv run python -m automate.autostart status",
               f"Live-Log:  journalctl --user -u {UNIT.removesuffix('.service')} -f   (und logs/automate/server.log)"]
     return True, "\n".join(lines + _old_warning(home, "linux"))
@@ -344,21 +357,21 @@ def _domain():
     return f"gui/{os.getuid()}"
 
 
-def _install_mac(home, run, root):
+def _install_mac(home, run, root, args):
     plist = service_path(home, "mac")
     log = paths.logs_dir() / "launchd.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     plist.parent.mkdir(parents=True, exist_ok=True)
     _run(run, ["launchctl", "bootout", f"{_domain()}/{LABEL}"])  # a previous version, if any
-    plist.write_bytes(plist_bytes(root, service_path_env(home, "mac", uv_dir=_uv_dir()), log))
+    plist.write_bytes(plist_bytes(root, service_path_env(home, "mac", uv_dir=_uv_dir()), log, args))
     _run(run, ["launchctl", "enable", f"{_domain()}/{LABEL}"])
     res = _run(run, ["launchctl", "bootstrap", _domain(), str(plist)])
     if res.returncode != 0:
         return False, f"Autostart-Datei geschrieben ({plist}), aber launchctl meldete: {_out(res)}"
     lines = [f"Autostart eingerichtet: {plist}",
-             "Der Server startet ab jetzt bei deiner Anmeldung und nach einem Absturz von selbst neu. Der Mac muss "
-             "dafür angemeldet und wach bleiben (Systemeinstellungen → Energie).",
-             "", "Dashboard: http://localhost:8765 (nach ein paar Sekunden)",
+             ("Der Server startet ab jetzt bei deiner Anmeldung und nach einem Absturz von selbst neu. Der Mac muss "
+              "dafür angemeldet und wach bleiben (Systemeinstellungen → Energie)."),
+             "", f"Dashboard: {_dashboard_url(args)} (nach ein paar Sekunden)",
              "Status:    uv run python -m automate.autostart status",
              f"Log:       {log} und {paths.logs_dir() / 'server.log'}"]
     if server_running():
@@ -402,22 +415,22 @@ def _restart_mac(home, run):
 
 # ---------------------------------------------------------------- Windows (WSL2)
 
-def _wsl_manual(root, distro):
+def _wsl_manual(root, distro, args):
     return ("So richtest du es von Hand ein: Windows-Taste + R → shell:startup → dort eine Datei „GTA Clipper.cmd“ "
-            "mit diesem Inhalt anlegen:\n\n" + wsl_cmd(root, distro).replace("\r\n", "\n"))
+            "mit diesem Inhalt anlegen:\n\n" + wsl_cmd(root, distro, args).replace("\r\n", "\n"))
 
 
-def _install_wsl(home, run, root):
+def _install_wsl(home, run, root, args):
     distro = os.environ.get("WSL_DISTRO_NAME") or "Ubuntu"
     startup = _wsl_startup_dir(run)
     if startup is None or not startup.is_dir():
-        return False, "Den Windows-Autostart-Ordner habe ich nicht gefunden. " + _wsl_manual(root, distro)
+        return False, "Den Windows-Autostart-Ordner habe ich nicht gefunden. " + _wsl_manual(root, distro, args)
     target = startup / WSL_FILE
-    target.write_bytes(wsl_cmd(root, distro).encode("ascii", errors="replace"))
+    target.write_bytes(wsl_cmd(root, distro, args).encode("ascii", errors="replace"))
     lines = [f"Autostart eingerichtet: {target}",
-             f"Ab der nächsten Windows-Anmeldung startet ein minimiertes Fenster „GTA Clipper“ den Server in WSL "
-             f"({distro}). Das Fenster ist der Server: offen lassen. Damit er rund um die Uhr läuft, darf Windows "
-             "nicht in den Energiesparmodus gehen.",
+             (f"Ab der nächsten Windows-Anmeldung startet ein minimiertes Fenster „GTA Clipper“ den Server in WSL "
+              f"({distro}). Das Fenster ist der Server: offen lassen. Damit er rund um die Uhr läuft, darf Windows "
+              "nicht in den Energiesparmodus gehen."),
              "Jetzt sofort starten: ./start.sh (oder dich ab- und wieder anmelden)."]
     return True, "\n".join(lines + _old_warning(home, "wsl"))
 
@@ -457,29 +470,31 @@ ACTIONS = {
 }
 
 
-def _do(action, kind, home, run, root):
-    kind = kind or detect()
-    table = ACTIONS.get(kind)
-    if table is None:
-        return False, "Autostart gibt es nur unter Linux, macOS und Windows mit WSL2."
-    fn = table[action]
-    return fn(home, run, root) if action == "install" else fn(home, run)
+def _table(kind):
+    return ACTIONS.get(kind or detect())
 
 
-def install(kind=None, home=None, run=subprocess.run, root=ROOT):
-    return _do("install", kind, home, run, root)
+UNSUPPORTED = (False, "Autostart gibt es nur unter Linux, macOS und Windows mit WSL2.")
 
 
-def remove(kind=None, home=None, run=subprocess.run, root=ROOT):
-    return _do("remove", kind, home, run, root)
+def install(kind=None, home=None, run=subprocess.run, root=ROOT, args=()):
+    table = _table(kind)
+    return table["install"](home, run, root, list(args)) if table else UNSUPPORTED
 
 
-def status(kind=None, home=None, run=subprocess.run, root=ROOT):
-    return _do("status", kind, home, run, root)
+def remove(kind=None, home=None, run=subprocess.run):
+    table = _table(kind)
+    return table["remove"](home, run) if table else UNSUPPORTED
 
 
-def restart(kind=None, home=None, run=subprocess.run, root=ROOT):
-    return _do("restart", kind, home, run, root)
+def status(kind=None, home=None, run=subprocess.run):
+    table = _table(kind)
+    return table["status"](home, run) if table else UNSUPPORTED
+
+
+def restart(kind=None, home=None, run=subprocess.run):
+    table = _table(kind)
+    return table["restart"](home, run) if table else UNSUPPORTED
 
 
 def main(argv=None):
@@ -489,8 +504,15 @@ def main(argv=None):
     p.add_argument("action", nargs="?", default="status", choices=("install", "remove", "status", "restart"),
                    help="install = einrichten und starten, remove = entfernen und beenden, status = anzeigen "
                         "(Standard), restart = neu starten (z. B. nach einem Update)")
+    p.add_argument("server_args", nargs=argparse.REMAINDER,
+                   help="nur bei install: weitere Server-Optionen für ./start.sh, z. B. --host 0.0.0.0 --port 8765")
     args = p.parse_args(argv)
-    ok, text = {"install": install, "remove": remove, "status": status, "restart": restart}[args.action]()
+    if args.server_args and args.action != "install":
+        p.error("Server-Optionen gehen nur mit install.")
+    if args.action == "install":
+        ok, text = install(args=args.server_args)
+    else:
+        ok, text = {"remove": remove, "status": status, "restart": restart}[args.action]()
     print(text)
     return 0 if ok else 1
 

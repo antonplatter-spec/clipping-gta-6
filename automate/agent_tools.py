@@ -436,7 +436,7 @@ def view_frame(ctx, inp):
         raise ToolError(f"the video of job {name} is gone (deleted by cleanup): use its contact sheets "
                         "(sheet=...) instead")
     if inp.get("grid"):
-        res = _clipper(ctx, ["frame", str(d), f"{float(sec):.2f}"], "frame")
+        res = _clipper(ctx, ["frame", "--", str(d), f"{float(sec):.2f}"], "frame")
         last = (res.stdout.strip().splitlines() or [""])[-1].strip()
         if res.returncode != 0 or not last or not Path(last).exists():
             raise ToolError(f"no frame at {sec} s: " + (res.stderr.strip().splitlines() or ["ffmpeg failed"])[-1])
@@ -474,7 +474,7 @@ def find_line(ctx, inp):
     if not _num(hours) or hours <= 0:
         raise ToolError("hours must be a positive number")
     hours = min(float(hours), 72.0)
-    res = _clipper(ctx, ["find", pattern, "--hours", f"{hours:g}"], "find")
+    res = _clipper(ctx, ["find", "--hours", f"{hours:g}", "--", pattern], "find")  # a pattern may start with "-"
     if res.returncode != 0:
         raise ToolError("find failed: " + (res.stderr.strip().splitlines() or ["?"])[-1])
     hits = [x.split("\t") for x in res.stdout.splitlines() if x.count("\t") >= 4]

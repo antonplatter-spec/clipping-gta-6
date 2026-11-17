@@ -80,7 +80,7 @@ fi
 if ! uv sync --python ">=3.11,<3.14" $extra; then
     echo "" >&2
     echo "Die Python-Pakete ließen sich nicht installieren (Meldung oben). Häufig: keine Internetverbindung oder zu" >&2
-    echo "wenig Speicherplatz. Mehr dazu in docs/INSTALLATION.md unter „Fehlersuche“." >&2
+    echo "wenig Speicherplatz. Mehr dazu in docs/INSTALLATION.md, Abschnitt Fehlersuche." >&2
     exit 1
 fi
 

@@ -18,6 +18,7 @@
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import struct
 import time
@@ -80,7 +81,7 @@ def totp_now(secret, t=None):
 
 def verify_totp(secret, code, last_counter=None, t=None):
     code = "".join(str(code or "").split())
-    if len(code) != TOTP_DIGITS or not code.isdigit() or not secret:
+    if not re.fullmatch(f"[0-9]{{{TOTP_DIGITS}}}", code) or not secret:  # ASCII digits only (isdigit takes ٣ too)
         return None
     key = _key(secret)
     now = int((time.time() if t is None else t) // TOTP_STEP)
@@ -98,8 +99,15 @@ def otpauth_uri(username, secret, issuer="GTA Clipper"):
 
 
 def qr_svg(text):
+    """A standalone SVG document. It needs the SVG namespace: the dashboard shows it as an <img> (data: URL), and an
+    image without xmlns doesn't render (segno's svg_inline() leaves it out, being meant for inline HTML)."""
+    import io
+
     import segno
-    return segno.make(text, error="m").svg_inline(scale=5, border=4, dark="#000", light="#fff", omitsize=True)
+    out = io.BytesIO()
+    segno.make(text, error="m").save(out, kind="svg", xmldecl=False, svgns=True, nl=False, scale=5, border=4,
+                                     dark="#000", light="#fff", omitsize=True)
+    return out.getvalue().decode("utf-8")
 
 
 def _norm_code(code):

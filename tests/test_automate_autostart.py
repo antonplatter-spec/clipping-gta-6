@@ -93,6 +93,19 @@ class UnitTextTests(unittest.TestCase):
         self.assertEqual(data["EnvironmentVariables"]["PATH"], "/opt/homebrew/bin:/usr/bin")
         self.assertTrue(data["StandardErrorPath"].endswith("launchd.log"))
 
+    def test_server_args(self):
+        args = ["--host", "0.0.0.0", "--port", "8800"]
+        unit = autostart.unit_text(Path("/srv/clipper"), "/usr/bin", args)
+        self.assertIn("ExecStart=/bin/sh /srv/clipper/start.sh --no-browser --host 0.0.0.0 --port 8800",
+                      unit.splitlines())
+        plist = plistlib.loads(autostart.plist_bytes(Path("/srv/clipper"), "/usr/bin", Path("/tmp/l.log"), args))
+        self.assertEqual(plist["ProgramArguments"][2:], ["--no-browser", *args])
+        self.assertTrue(autostart.wsl_cmd("/srv/clipper", "Ubuntu", args).rstrip().endswith(
+            "--no-browser --host 0.0.0.0 --port 8800"))
+        self.assertEqual(autostart._dashboard_url(args), "http://localhost:8800")
+        self.assertEqual(autostart._dashboard_url(["--port=9000"]), "http://localhost:9000")
+        self.assertEqual(autostart._dashboard_url([]), "http://localhost:8765")
+
     def test_wsl_cmd(self):
         text = autostart.wsl_cmd("/home/alex/mein clipper", "Ubuntu-24.04")
         self.assertTrue(text.endswith("\r\n"))
@@ -152,11 +165,13 @@ class LinuxTests(TempHome):
         run = FakeRun({("loginctl", "show-user"): (0, "no\n")})
         ok, text = autostart.install("linux", self.home, run, self.root)
         self.assertTrue(ok, text)
+        self.assertIn("http://localhost:8765", text)
         unit = self.home / ".config/systemd/user/gta-clipper.service"
         self.assertIn(f'ExecStart=/bin/sh "{self.root}/start.sh" --no-browser', unit.read_text(encoding="utf-8"))
         self.assertIn("/opt/uv/bin", unit.read_text(encoding="utf-8"))
         self.assertTrue(run.ran("systemctl", "--user", "daemon-reload"))
-        self.assertTrue(run.ran("systemctl", "--user", "enable", "--now", "gta-clipper.service"))
+        self.assertTrue(run.ran("systemctl", "--user", "enable", "gta-clipper.service"))
+        self.assertTrue(run.ran("systemctl", "--user", "restart", "gta-clipper.service"))  # a re-install applies
         self.assertTrue(run.ran("loginctl", "enable-linger", "alex"))
         self.assertIn("sudo loginctl enable-linger alex", text)  # enable-linger "worked" but Linger still says no
         self.assertNotIn("ACHTUNG", text)
@@ -188,8 +203,8 @@ class LinuxTests(TempHome):
         self.assertFalse(run.ran("systemctl", "--user", "enable"))
 
     def test_install_missing_systemctl(self):
-        ok, text = autostart.install("linux", self.home, FakeRun({("systemctl",): FileNotFoundError("systemctl")}),
-                                     self.root)
+        ok, _ = autostart.install("linux", self.home, FakeRun({("systemctl",): FileNotFoundError("systemctl")}),
+                                  self.root)
         self.assertFalse(ok)
 
     def test_enable_failure_is_reported(self):
@@ -292,6 +307,12 @@ class MainTests(TempHome):
         out.assert_called_once_with("Autostart: nicht eingerichtet")
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             autostart.main(["start"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            autostart.main(["status", "--host", "0.0.0.0"])  # server flags only with install
+        with mock.patch.object(autostart, "install", return_value=(False, "x")) as inst, \
+                mock.patch("builtins.print"):
+            self.assertEqual(autostart.main(["install", "--host", "0.0.0.0"]), 1)
+        inst.assert_called_once_with(args=["--host", "0.0.0.0"])
 
 
 if __name__ == "__main__":

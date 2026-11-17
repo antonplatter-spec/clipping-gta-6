@@ -386,6 +386,7 @@ class UsageAlertRunLoginTests(TempData):
                          set(settings.DEFAULT_PRICES))
         self.assertEqual([c["value"] for c in settings.schema()["claude.model"]["choices"]],
                          ["claude-sonnet-5-5", "claude-opus-5-5"])  # costing rows only, not selectable
+        self.assertLessEqual(settings.schema()["claude.daily_limit_eur"]["step"], 0.01)  # 2,75 € must be enterable
 
     def test_db_retention_keeps_active_jobs_and_the_newest_runs(self):
         now = time.time()
@@ -495,6 +496,12 @@ class ImporterTests(TempData):
     def test_import_is_idempotent_and_never_resurrects_deleted_rows(self):
         env = self.root / ".env"
         env.write_text("FISH_API_KEY=fish-key-1234567890\nCLIPPER_TOP_HOOKS=2\n# ANTHROPIC_API_KEY=sk-ant-x\n")
+        self.assertEqual(importer.run(env_file=env)["secrets"], [])  # no login yet: keys wait for the setup
+        self.assertIsNone(store.get_secret("fish_api_key"))
+        store.create_user("owner", "scrypt$x", "BASE32", totp_enabled=True)
+        for c in store.list_creators("gta6"):  # (the first run already took the creators)
+            store.delete_creator(c["id"])
+        store.set_meta("import.creators.gta6", None)
         first = importer.run(env_file=env)
         repo_creators = importer._yaml(paths.repo_profiles_dir() / "gta6" / "creators.yaml")["creators"]
         self.assertEqual(first["creators"]["gta6"], len(repo_creators))

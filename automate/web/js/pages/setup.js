@@ -1,7 +1,7 @@
 // First-run wizard: Konto → 2FA → Wiederherstellungscodes → Schlüssel → Systemcheck → Quellen → Automatik.
 // Account and 2FA are mandatory; every later step can be skipped (and reopened any time at #/einrichtung/…).
 import * as api from '../api.js';
-import { html, useState, useEffect, navigate, useData, useTitle, cx, fmt, toast } from '../lib.js';
+import { html, useState, useEffect, navigate, useData, useTitle, cx, fmt, toast, setQuery } from '../lib.js';
 import {
   Button, TextField, FormError, Callout, Loading, ErrorState, Toggle, Icon, CopyButton,
 } from '../ui.js';
@@ -20,7 +20,18 @@ const STEPS = [
 ];
 
 // Survives re-renders and route changes (not a reload: the QR secret and the codes are never stored).
-const pending = { setup: null, username: '', codes: null };
+const pending = { setup: null, username: '', codes: null, token: readToken() };
+
+// The one-time setup code the server prints in its terminal (and puts in the link it opens). Kept for this tab only
+// (sessionStorage), so a reload mid-setup doesn't ask for it again; dropped once the setup is done.
+const TOKEN_KEY = 'automate.setup_token';
+function readToken() {
+  try { return sessionStorage.getItem('automate.setup_token') || ''; } catch { return ''; }
+}
+function keepToken(t) {
+  pending.token = t;
+  try { if (t) sessionStorage.setItem(TOKEN_KEY, t); else sessionStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
+}
 
 function Stepper({ current }) {
   const idx = STEPS.findIndex((s) => s.id === current);
@@ -48,6 +59,10 @@ function WizardNav({ step, canSkip = true, nextLabel = 'Weiter', nextDisabled, o
 
 export function SetupPage({ route, state }) {
   useTitle('Einrichtung');
+  // the link from the terminal carries the code: take it, then drop it from the address bar (and the history)
+  useEffect(() => {
+    if (route.query.token) { keepToken(route.query.token.trim()); setQuery({ token: '' }); }
+  }, [route.query.token]);
   let step = route.parts[1] || 'konto';
   if (!STEPS.some((s) => s.id === step)) step = 'konto';
   let redirect = null;
@@ -82,6 +97,8 @@ export function SetupPage({ route, state }) {
 // ---------------------------------------------------------------------------------------------------------------
 
 function AccountStep({ state }) {
+  const [token, setToken] = useState(pending.token || '');
+  useEffect(() => { if (pending.token) setToken(pending.token); }, [pending.token]);  // a link opened later wins
   const [username, setUsername] = useState(pending.username || '');
   const [password, setPassword] = useState('');
   const [repeat, setRepeat] = useState('');
@@ -96,11 +113,12 @@ function AccountStep({ state }) {
   const submit = async (e) => {
     e.preventDefault();
     setTouched(true);
-    if (password.length < 10 || password !== repeat || !username.trim()) return;
+    if (password.length < 10 || password !== repeat || !username.trim() || !token.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      pending.setup = await api.setup({ username: username.trim(), password });
+      keepToken(token.trim());
+      pending.setup = await api.setup({ username: username.trim(), password, token: pending.token });
       pending.username = username.trim();
       go('2fa');
     } catch (err) {
@@ -113,6 +131,10 @@ function AccountStep({ state }) {
     ${state.setup_step === 'totp' && html`<${Callout} tone="info" title="Die Einrichtung wurde unterbrochen.">
       Das Konto existiert schon, aber 2FA ist noch nicht bestätigt. Gib Benutzername und Passwort noch einmal ein – es gibt dann einen neuen QR-Code.<//>`}
     <${FormError} error=${error && !error.fields ? error : null} />
+    <${TextField} label="Einrichtungs-Code" value=${token} onInput=${setToken} autocomplete="off" autocapitalize="characters"
+      spellcheck="false" required inputClass="mono" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" error=${fields.token}
+      help=${pending.token && token === pending.token ? 'Aus dem Link übernommen, den der Server beim Start geöffnet hat.'
+        : 'Steht im Terminal, in dem „uv run python -m automate“ läuft (Zeile „Einrichtungs-Code“). Nur wer diesen Code hat, kann das Konto anlegen.'} />
     <${TextField} label="Benutzername" value=${username} onInput=${setUsername} autocomplete="username" autocapitalize="off"
       spellcheck="false" required error=${fields.username} autofocus />
     <div class="form-grid">
@@ -124,7 +146,7 @@ function AccountStep({ state }) {
     <div class="row-between">
       <span class="muted small">Schritt 1 von ${STEPS.length} · Pflicht</span>
       <${Button} type="submit" variant="primary" iconRight="chevron-right" busy=${busy}
-        disabled=${!username.trim() || !password || !repeat}>Konto anlegen<//>
+        disabled=${!username.trim() || !password || !repeat || !token.trim()}>Konto anlegen<//>
     </div>
   </form>`;
 }
@@ -136,13 +158,21 @@ function TotpStep() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.setupConfirm({ code });
+      const res = await api.setupConfirm({ code, token: pending.token });
       pending.codes = res.recovery_codes || [];
       pending.setup = null;
+      keepToken('');
       const st = await refreshSession();
       if (st && !st.authenticated) sessionStore.set({ state: { ...st, authenticated: true }, error: null });
       go('codes');
     } catch (err) {
+      if (err.code === 'setup_restart' || err.code === 'setup_token_invalid' || err.code === 'setup_token_missing') {
+        toast.error(err.message);  // started over elsewhere, or the server restarted with a new code: back to step 1
+        pending.setup = null;
+        if (err.code !== 'setup_restart') keepToken('');
+        go('konto');
+        return;
+      }
       setError(err);
     } finally {
       setBusy(false);

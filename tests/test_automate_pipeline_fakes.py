@@ -70,6 +70,13 @@ class FakeClipper:
         self.render_active = self.render_max = 0
         self.seen_audio = None
 
+    @staticmethod
+    def after_dashes(args):
+        """The positionals after "--": job ids and video URLs may start with "-", so the pipeline must pass every
+        one of them there (argparse would read "-abc..." as an option otherwise)."""
+        assert "--" in args, f"positional arguments without a '--' separator: {args}"
+        return args[args.index("--") + 1:]
+
     def args_of(self, command):
         key = command.split()
         return [c for c in self.calls if c[:len(key)] == key]
@@ -96,7 +103,9 @@ class FakeClipper:
         return getattr(self, "_" + key.replace(" ", "_"))(args, emit, profile)
 
     def _fetch(self, args, emit, profile):
-        vid = args[1]
+        url, = self.after_dashes(args)
+        assert url.startswith("https://www.youtube.com/watch?v="), url  # a full URL, never a bare id
+        vid = url.rsplit("=", 1)[1]
         jd = paths.jobs_dir() / vid
         jd.mkdir(parents=True, exist_ok=True)
         section = args[args.index("--section") + 1] if "--section" in args else None
@@ -113,7 +122,7 @@ class FakeClipper:
                                                                   indent=2) + "\n", "", 0.1)
 
     def _analyze(self, args, emit, profile):
-        jd = paths.jobs_dir() / args[1]
+        jd = paths.jobs_dir() / self.after_dashes(args)[0]
         self.seen_audio = (jd / "audio.wav").exists()
         emit("[analyze] transcribing locally (parakeet) ...")
         (jd / "audio.wav").write_bytes(b"wav")
@@ -143,6 +152,7 @@ class FakeClipper:
         return entries
 
     def _render(self, args, emit, profile):
+        self.after_dashes(args)
         pick = json.loads(Path(args[args.index("--picks") + 1]).read_text())[0]
         out = Path(args[args.index("--out") + 1])
         with self.lock:
@@ -166,10 +176,12 @@ class FakeClipper:
                 self.render_active -= 1
 
     def _dub_segments(self, args, emit, profile):
+        self.after_dashes(args)
         return ProcResult(0, json.dumps({"segments": [{"i": 0, "s": 0.0, "e": 2.0, "text": "run!", "spk": 0}],
                                          "english": {}, "template": {}}, indent=2), "[dub] separating ...", 0.1)
 
     def _dub_render(self, args, emit, profile):
+        self.after_dashes(args)
         lang = args[args.index("--lang") + 1]
         tr = json.loads(Path(args[args.index("--translation") + 1]).read_text())
         out = paths.exports_dir() / f"{profile}-{lang}" / date.today().isoformat()
@@ -183,11 +195,11 @@ class FakeClipper:
                                                               indent=2), "", 0.1)
 
     def _live_done(self, args, emit, profile):
-        for cj in args[2:]:
+        for cj in self.after_dashes(args):
             jd = paths.jobs_dir() / cj
             if jd.is_dir():
                 (jd / "live_done").write_text("x")
-        return ProcResult(0, json.dumps(args[2:]), "", 0.1)
+        return ProcResult(0, json.dumps(self.after_dashes(args)), "", 0.1)
 
     def _cleanup(self, args, emit, profile):
         return ProcResult(0, json.dumps({"dry_run": "--dry-run" in args, "files": 1, "gb": 1.5, "jobs": ["old"]},
@@ -279,7 +291,9 @@ def make_agent():
         mod.calls.append({"job_id": job_id, "max_picks": max_picks, "avoid_openers": list(avoid_openers),
                           "params": dict(job.get("params") or {})})
         if log:
-            log("lese die Kandidaten")
+            for line in ("Claude liest das Transkript (um 11 s)", "Claude sieht sich ein Bild bei 12 s an",
+                         "Claude prüft einen Entwurf", "Auswahl angenommen: 2 Pick(s) nach 4 Anfragen (0.05 €)"):
+                log(line)
         item = mod.script.pop(0) if mod.script else None
         if isinstance(item, BaseException):
             raise item

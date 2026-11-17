@@ -6,23 +6,33 @@ the DB stores only its sha256. Every authenticated request slides the expiry (wr
 session is valid only while the account's 2FA is confirmed; logout deletes it; a password change or a new 2FA
 secret deletes every other session.
 
-Setup (only while no account with confirmed 2FA exists): POST /setup creates the account with a fresh TOTP secret
-(inside one write transaction, so two browsers can't both create one) and sets a setup cookie; POST /setup/confirm
-with a valid code enables 2FA, returns the recovery codes once and logs in. An unconfirmed account can be set up
-again (frontend: reload mid-setup) by the browser holding the setup cookie, by anyone repeating its username and
-password, or by anyone once it has been idle for SETUP_ABANDONED_S; `python -m automate reset-login` deletes the
-account (and its sessions) so the setup starts over.
+Setup (only while no account with confirmed 2FA exists) needs the one-time setup code: whoever reaches the server
+first must not own the install (with --host 0.0.0.0 that may be anyone on the Wi-Fi). `python -m automate` issues a
+fresh code whenever it starts with the setup open, and `reset-login` issues one; only its sha256 is stored (meta
+"setup.token"), the code itself is printed in the terminal and put in the dashboard link the server opens. POST
+/setup {username, password, token} creates (or, for the code's holder, re-creates) the account with a fresh TOTP
+secret inside one write transaction and sets a setup cookie; POST /setup/confirm {code, token} needs that cookie as
+well, enables 2FA, returns the recovery codes once, logs in and invalidates the setup code. Failures (wrong setup
+code, wrong TOTP code, a setup request after setup) count per client and globally. Keys in the repo's .env are
+imported only once the setup is complete (importer.run), so nothing is handed to an account before it is proven.
 
 Login: constant-time checks (a dummy hash for unknown names), one generic error, failures counted per username and
 per client in login_attempts (RATE_WINDOW_S window; German wait time on 429), TOTP codes can't be replayed
-(totp_last_counter, compared and written in one transaction), recovery codes work once.
+(totp_last_counter, compared and written in one transaction), recovery codes work once; anything odd in the second
+factor counts as a failed attempt.
 
     authenticate(request, response=None) -> {"token_hash", "session", "user"} | None
-    setup_step(user) -> "account" | "totp" | None
+    setup_step(user) -> "account" | "totp" | None ; setup_open() -> bool
+    issue_setup_token() -> the new setup code (plain; print it, never log it) ; clear_setup_token()
+    setup_url(base_url, token) -> the dashboard link that carries the code
 """
+import base64
+import hashlib
 import hmac
+import logging
 import math
 import re
+import secrets
 import time
 
 from fastapi import APIRouter, Body, Request, Response
@@ -30,16 +40,23 @@ from fastapi import APIRouter, Body, Request, Response
 from .. import __version__, security, store
 from .common import ApiError, Form, conflict, invalid, public
 
+log = logging.getLogger("automate.api")
+
 COOKIE = "automate_session"
 SETUP_COOKIE = "automate_setup"
 SESSION_TTL_S = 14 * 86400
 TOUCH_S = 300
-SETUP_ABANDONED_S = 15 * 60
 TOTP_PENDING_S = 15 * 60
 RATE_WINDOW_S = 15 * 60
-LIMIT_USER, LIMIT_CLIENT, LIMIT_ACCOUNT, LIMIT_SETUP = 8, 20, 8, 10
+LIMIT_USER, LIMIT_CLIENT, LIMIT_ACCOUNT, LIMIT_SETUP, LIMIT_SETUP_ALL = 8, 20, 8, 10, 40
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,100}$")
+CODE_RE = re.compile(r"[0-9]{6}")  # ASCII digits only: str.isdigit() also takes e.g. Arabic-Indic digits
 BAD_LOGIN = "Benutzername, Passwort oder Code ist falsch."
+SETUP_TOKEN_META = "setup.token"
+BAD_SETUP_TOKEN = ("Der Einrichtungs-Code stimmt nicht. Er steht im Terminal, in dem der Server läuft (Zeile "
+                   "„Einrichtungs-Code“); nach jedem Neustart gilt ein neuer.")
+NO_SETUP_TOKEN = ("Es gibt keinen gültigen Einrichtungs-Code. Starte den Server mit „uv run python -m automate“ neu – "
+                  "der Code steht dann im Terminal.")
 
 router = APIRouter()
 _dummy_hash = []
@@ -68,6 +85,41 @@ def setup_step(user):
     if user is None or not user.get("password_hash"):
         return "account"
     return None if user.get("totp_enabled") else "totp"
+
+
+def setup_open():
+    return setup_step(store.get_user()) is not None
+
+
+def _norm_setup_token(token):
+    return re.sub(r"[^A-Z0-9]", "", str(token or "").upper())
+
+
+def _setup_token_hash(token):
+    return hashlib.sha256(_norm_setup_token(token).encode("ascii", "ignore")).hexdigest()
+
+
+def issue_setup_token():
+    """A new setup code (100 random bits, typed from the terminal as XXXX-XXXX-XXXX-XXXX-XXXX); replaces any older
+    one. Only its hash is stored."""
+    raw = base64.b32encode(secrets.token_bytes(15)).decode("ascii")[:20]
+    store.set_meta(SETUP_TOKEN_META, {"hash": _setup_token_hash(raw), "at": time.time()})
+    return "-".join(raw[i:i + 4] for i in range(0, 20, 4))
+
+
+def clear_setup_token():
+    store.set_meta(SETUP_TOKEN_META, None)
+
+
+def setup_url(base_url, token):
+    return f"{base_url.rstrip('/')}/#/einrichtung?token={token}"
+
+
+def _setup_token_ok(token):
+    stored = (store.get_meta(SETUP_TOKEN_META) or {}).get("hash")
+    if not stored:
+        return None  # nothing to compare with: the server wasn't started through `python -m automate`
+    return hmac.compare_digest(stored, _setup_token_hash(token)) and len(_norm_setup_token(token)) == 20
 
 
 def authenticate(request, response=None):
@@ -102,7 +154,7 @@ def _state(user, authenticated):
     return {"setup_required": step is not None, "authenticated": bool(authenticated),
             "username": user["username"] if authenticated else None,
             "totp_enabled": bool(authenticated and user.get("totp_enabled")), "version": __version__,
-            "setup_step": step}
+            "setup_step": step, "setup_token_required": step is not None}
 
 
 def _totp_setup(username, secret):
@@ -151,14 +203,23 @@ def _check_password(password, user):
 
 def second_factor(user_id, code):
     """'totp' | 'recovery' | None. Checks and consumes the TOTP step or the recovery code in one write transaction,
-    so the same code can't log in twice even in parallel requests."""
+    so the same code can't log in twice even in parallel requests. Any error in here is a failed check (never a 500
+    that would tell a correct password apart from a wrong one)."""
+    try:
+        return _second_factor(user_id, code)
+    except Exception:
+        log.warning("second factor check failed", exc_info=True)
+        return None
+
+
+def _second_factor(user_id, code):
     code = (code or "").strip()
     digits = "".join(code.split())
     with store.transaction():
         u = store.get_user()
         if u is None or u["id"] != user_id or not u.get("totp_secret"):
             return None
-        if digits.isdigit() and len(digits) == security.TOTP_DIGITS:
+        if CODE_RE.fullmatch(digits):
             counter = security.verify_totp(u["totp_secret"], digits, u.get("totp_last_counter"))
             if counter is None:
                 return None
@@ -200,65 +261,83 @@ def get_state(request: Request, response: Response):
     return _state(user, auth is not None)
 
 
-def _may_restart(user, request, username, password, pending, now):
-    if not user.get("password_hash"):
-        return True  # reset-login
-    cookie = request.cookies.get(SETUP_COOKIE)
-    if pending and cookie and TOKEN_RE.match(cookie) and hmac.compare_digest(security.hash_token(cookie),
-                                                                              pending.get("token_hash") or ""):
-        return True
-    if not pending or now - float(pending.get("at") or 0) > SETUP_ABANDONED_S:
-        return True
-    return username == user["username"] and security.verify_password(password, user["password_hash"])
+def _setup_keys(request):
+    return [(f"setup.client:{client_key(request)}", LIMIT_SETUP), ("setup.all", LIMIT_SETUP_ALL)]
+
+
+def _setup_done(keys):
+    _record(keys, False)
+    return conflict("setup_done", "Die Einrichtung ist schon abgeschlossen. Bitte anmelden.")
+
+
+def _check_setup_token(form, keys):
+    """The setup code from the body; a wrong or missing one is a counted failure (403)."""
+    token = form.str("token", max_len=100)
+    ok = _setup_token_ok(token) if token else False
+    if ok is None:
+        raise ApiError(409, "setup_token_missing", NO_SETUP_TOKEN)
+    if not ok:
+        _record(keys, False)
+        raise ApiError(403, "setup_token_invalid", BAD_SETUP_TOKEN,
+                       fields={"token": "Der Einrichtungs-Code stimmt nicht." if token else
+                               "Bitte den Einrichtungs-Code aus dem Terminal eingeben."})
 
 
 @router.post("/setup")
 @public
 def setup(request: Request, response: Response, body: dict | None = Body(None)):
-    keys = [(f"setup.client:{client_key(request)}", LIMIT_SETUP)]
+    keys = _setup_keys(request)
     _rate_limit(keys)
+    if not setup_open():  # before any password hashing: a finished install answers at once (and counts it)
+        raise _setup_done(keys)
     form = Form(body)
     username = _username(form)
-    pw_hash = _new_password(form, "password")
+    pw = form.body.get("password")
+    if not isinstance(pw, str) or not pw:
+        form.error("password", "Bitte ein Passwort eingeben.")
+    elif len(pw) < security.MIN_PASSWORD:  # hash_password's length rules, checked before any scrypt work
+        form.error("password", f"Das Passwort muss mindestens {security.MIN_PASSWORD} Zeichen lang sein.")
+    elif len(pw) > security.MAX_PASSWORD:
+        form.error("password", f"Das Passwort darf höchstens {security.MAX_PASSWORD} Zeichen lang sein.")
+    form.check()
+    _check_setup_token(form, keys)
+    pw_hash = _new_password(form, "password")  # scrypt only for the holder of the setup code
     form.check()
     secret = security.new_totp_secret()
     token, token_hash = security.new_session_token()
-    refused = False
     with store.transaction():
         user = store.get_user()
-        now = time.time()
         if user is not None and setup_step(user) is None:
-            raise conflict("setup_done", "Die Einrichtung ist schon abgeschlossen. Bitte anmelden.")
-        if user is not None and not _may_restart(user, request, username, body.get("password"),
-                                                 store.get_meta("setup.pending"), now):
-            refused = True
-        elif user is not None:
+            raise _setup_done(keys)
+        if user is not None:  # the code's holder starts over (reload mid-setup, another browser)
             store.update_user(user["id"], username=username, password_hash=pw_hash, totp_secret=secret,
                               totp_enabled=False, totp_last_counter=0, recovery_codes=[])
             uid = user["id"]
         else:
             uid = store.create_user(username, pw_hash, secret)
-        if not refused:
-            store.delete_user_sessions(uid)
-            store.set_meta("setup.pending", {"token_hash": token_hash, "user_id": uid, "at": now})
-    if refused:
-        _record(keys, False)
-        raise conflict("setup_in_progress",
-                       "Die Einrichtung wurde schon in einem anderen Browser begonnen. Gib dort weiter den Code ein, "
-                       "oder hier denselben Benutzernamen und dasselbe Passwort. Sonst geht es nach 15 Minuten ohne "
-                       "Bestätigung wieder, oder im Terminal mit „uv run python -m automate reset-login“.")
+        store.delete_user_sessions(uid)
+        store.set_meta("setup.pending", {"token_hash": token_hash, "user_id": uid, "at": time.time()})
     _set_cookie(request, response, SETUP_COOKIE, token, 3600, path="/api/setup")
     return _totp_setup(username, secret)
+
+
+def _setup_cookie_ok(request, pending):
+    cookie = request.cookies.get(SETUP_COOKIE)
+    return bool(pending and cookie and TOKEN_RE.match(cookie)
+                and hmac.compare_digest(security.hash_token(cookie), pending.get("token_hash") or ""))
 
 
 @router.post("/setup/confirm")
 @public
 def setup_confirm(request: Request, response: Response, body: dict | None = Body(None)):
-    keys = [(f"setup.client:{client_key(request)}", LIMIT_SETUP)]
+    keys = _setup_keys(request)
     _rate_limit(keys)
+    if not setup_open():
+        raise _setup_done(keys)
     form = Form(body)
     code = form.str("code", required=True, max_len=16, label="Der Code")
     form.check()
+    _check_setup_token(form, keys)
     result = None
     with store.transaction():
         user = store.get_user()
@@ -266,12 +345,19 @@ def setup_confirm(request: Request, response: Response, body: dict | None = Body
         if step == "account":
             raise conflict("setup_not_started", "Bitte zuerst Benutzername und Passwort festlegen.")
         if step is None:
-            raise conflict("setup_done", "Die Einrichtung ist schon abgeschlossen. Bitte anmelden.")
-        counter = security.verify_totp(user["totp_secret"], code, None)
+            raise _setup_done(keys)
+        if not _setup_cookie_ok(request, store.get_meta("setup.pending")):
+            _record(keys, False)
+            raise conflict("setup_restart", "Die Einrichtung wurde in einem anderen Browser (neu) begonnen oder ist "
+                                            "abgelaufen. Bitte hier Benutzername und Passwort noch einmal eingeben – "
+                                            "es gibt dann einen neuen QR-Code.")
+        digits = "".join(code.split())
+        counter = security.verify_totp(user["totp_secret"], digits, None) if CODE_RE.fullmatch(digits) else None
         if counter is not None:
             plain, hashed = security.new_recovery_codes()
             store.update_user(user["id"], totp_enabled=True, totp_last_counter=counter, recovery_codes=hashed)
             store.set_meta("setup.pending", None)
+            clear_setup_token()
             user = store.get_user()
             _start_session(request, response, user)
             result = {"recovery_codes": plain}
@@ -280,7 +366,19 @@ def setup_confirm(request: Request, response: Response, body: dict | None = Body
         raise ApiError(422, "invalid_code", "Der Code stimmt nicht. Prüfe die Uhrzeit des Handys und nimm den "
                                             "aktuellen Code.", fields={"code": "Der Code stimmt nicht."})
     _clear_cookie(request, response, SETUP_COOKIE, path="/api/setup")
+    _import_after_setup()
     return result
+
+
+def _import_after_setup():
+    """The repo's .env keys go into the DB only now that the owner is proven (importer.run skips them before)."""
+    from .. import importer
+    try:
+        summary = importer.run()
+        if summary.get("secrets"):
+            log.info("after setup, imported from .env: %s", summary["secrets"])
+    except Exception:
+        log.exception("import after setup failed")
 
 
 @router.post("/login")

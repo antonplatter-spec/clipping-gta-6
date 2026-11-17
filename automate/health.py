@@ -9,6 +9,7 @@ service cached, and the health checks that raise and resolve dashboard alerts.
     live_status() -> {streams: [{id, name, url, profile, platform, live, on_topic, recording, title, checked_at}],
                       recorders, checked_at}     (None fields = never checked; nothing here calls yt-dlp)
     check_all(now=None) -> [{key, action: "raised" | "resolved", level, message}]   (also recorded as a `health` run)
+    gb_text(gb) -> "29,6 GB" (German, one decimal)
     store_live(profile, data, error=None) / forget_live(profile)     the live service's cache (also kept in meta)
 
 Alert keys (stable; messages German and say what to do): disk.low, tools.missing, tools.voice, key.anthropic_missing,
@@ -228,6 +229,11 @@ def live_status():
 
 # ---------------------------------------------------------------- health checks
 
+def gb_text(value):
+    """German, with one decimal (29.6 free must not read "30 GB" next to a 30 GB minimum)."""
+    return f"{float(value):.1f} GB".replace(".", ",").replace(",0 GB", " GB")
+
+
 def _names(items):
     return ", ".join(items[:8]) + (f" und {len(items) - 8} weitere" if len(items) > 8 else "")
 
@@ -294,8 +300,8 @@ def check_all(now=None):
         disk = _disk()
         low = disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]
         put("disk.low", low, "error" if low and disk["free_gb"] < 5 else "warning",
-            f"Nur noch {disk['free_gb'] or 0:.0f} GB frei auf der Festplatte (empfohlen mindestens "
-            f"{disk['min_free_gb']:.0f} GB). Alte Quellvideos löscht das Aufräumen automatisch; lösche sonst alte "
+            f"Nur noch {gb_text(disk['free_gb'] or 0)} frei auf der Festplatte (empfohlen mindestens "
+            f"{gb_text(disk['min_free_gb'])}). Alte Quellvideos löscht das Aufräumen automatisch; lösche sonst alte "
             "Exporte unter exports/ oder senke min_free_gb in den Analyse-Einstellungen.", disk)
 
         rep = system_report(refresh=bool({"tools.missing", "tools.voice"} & before))  # an install shows at once

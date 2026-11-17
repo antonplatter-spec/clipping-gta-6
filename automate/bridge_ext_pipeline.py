@@ -71,7 +71,7 @@ def probe_video(payload, cfg):
     if not url:
         raise ValueError("url fehlt")
     try:
-        res = subprocess.run(["yt-dlp", "-J", "--skip-download", "--no-playlist", "--no-warnings", url],
+        res = subprocess.run(["yt-dlp", "-J", "--skip-download", "--no-playlist", "--no-warnings", "--", url],
                              capture_output=True, text=True, timeout=150)
     except FileNotFoundError:
         return {"ok": False, "error": "No such file or directory: 'yt-dlp'"}

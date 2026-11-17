@@ -208,7 +208,7 @@ class LiveServiceTests(PipelineCase):
         self.clip.live_ticks = [self.tick_data([cj]),
                                 runtime.BridgeError("[Errno 2] No such file or directory: 'yt-dlp'")]
         scheduler.live_tick()
-        self.assertEqual(self.clip.args_of("live done"), [["live", "done", cj]])
+        self.assertEqual(self.clip.args_of("live done"), [["live", "done", "--", cj]])
         scheduler.live_tick()
         run = store.list_runs("live_watch")[0]
         self.assertFalse(run["ok"])
@@ -226,7 +226,7 @@ class HousekeepingTests(PipelineCase):
     def test_cleanup_run_is_recorded_once_a_day(self):
         summary = scheduler.run_cleanup(dry_run=True)
         self.assertEqual(self.clip.args_of("cleanup"), [["cleanup", "--dry-run"]])
-        self.assertIn("1 Quelldatei(en) würde löschen (1.5 GB)", summary["message"])
+        self.assertIn("1 Quelldatei(en) würde löschen (1,5 GB)", summary["message"])
         self.assertTrue(store.last_run("cleanup")["ok"])
         self.assertFalse(scheduler._cleanup_due(time.time()))
         self.assertTrue(scheduler._cleanup_due(time.time() + 25 * 3600))

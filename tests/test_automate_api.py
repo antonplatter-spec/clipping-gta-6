@@ -16,8 +16,8 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from automate import db, paths, runtime, security, server, store
-from automate.api import PUBLIC_ROUTES
+from automate import db, importer, paths, runtime, security, server, store
+from automate.api import PUBLIC_ROUTES, auth
 
 PASSWORD = "correct horse battery"
 CSRF = {"X-Requested-With": "automate"}
@@ -109,6 +109,7 @@ class ApiCase(unittest.TestCase):
         self.addCleanup(self.bridge.stop)
         self.app = server.create_app(background=False)
         self.anon = TestClient(self.app, base_url=BASE, headers=CSRF)
+        self.token = auth.issue_setup_token()  # what `python -m automate` prints while the setup is open
 
     def fake_bridge(self, op, payload, profile, **kw):
         if op == "resolve_creator":
@@ -159,15 +160,17 @@ class ApiCase(unittest.TestCase):
 class AuthFlowTests(ApiCase):
     def test_setup_confirm_login_logout_with_real_totp_codes(self):
         st = self.anon.get("/api/state").json()
-        self.assertEqual((st["setup_required"], st["setup_step"], st["authenticated"]), (True, "account", False))
-        r = self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD})
+        self.assertEqual((st["setup_required"], st["setup_step"], st["authenticated"], st["setup_token_required"]),
+                         (True, "account", False, True))
+        r = self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD, "token": self.token})
         self.assertEqual(r.status_code, 200, r.text)
         setup = r.json()
         self.assertTrue(setup["otpauth_uri"].startswith("otpauth://totp/GTA%20Clipper:owner?secret="))
         self.assertIn("<svg", setup["qr_svg"])
         self.assertEqual(self.anon.get("/api/state").json()["setup_step"], "totp")
         self.assertEqual(self.anon.get("/api/overview").status_code, 401)  # no session before 2FA is confirmed
-        r = self.anon.post("/api/setup/confirm", json={"code": security.totp_now(setup["totp_secret"])})
+        r = self.anon.post("/api/setup/confirm", json={"code": security.totp_now(setup["totp_secret"]),
+                                                       "token": self.token.lower().replace("-", " ")})  # as typed
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(len(r.json()["recovery_codes"]), 10)
         cookie = next(h for h in r.headers.get_list("set-cookie") if h.startswith("automate_session="))
@@ -178,10 +181,12 @@ class AuthFlowTests(ApiCase):
         self.assertIsNone(store.get_session(token))  # stored hashed only
         self.assertIsNotNone(store.get_session(security.hash_token(token)))
         st = self.anon.get("/api/state").json()
-        self.assertEqual((st["authenticated"], st["username"], st["totp_enabled"], st["setup_required"]),
-                         (True, "owner", True, False))
+        self.assertEqual((st["authenticated"], st["username"], st["totp_enabled"], st["setup_required"],
+                          st["setup_token_required"]), (True, "owner", True, False, False))
+        self.assertIsNone(store.get_meta("setup.token"))  # used up
         self.assertEqual(self.anon.get("/api/overview").status_code, 200)
-        self.assertEqual(self.anon.post("/api/setup", json={"username": "x", "password": PASSWORD}).status_code, 409)
+        r = self.anon.post("/api/setup", json={"username": "x", "password": PASSWORD, "token": self.token})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "setup_done"))
 
         self.assertEqual(self.anon.post("/api/logout").json(), {"ok": True})
         self.assertIsNone(store.get_session(security.hash_token(token)))
@@ -197,41 +202,70 @@ class AuthFlowTests(ApiCase):
 
     def test_https_requests_get_a_secure_cookie(self):
         c = TestClient(self.app, base_url="https://localhost:8765", headers=CSRF)
-        secret = c.post("/api/setup", json={"username": "owner", "password": PASSWORD}).json()["totp_secret"]
-        r = c.post("/api/setup/confirm", json={"code": security.totp_now(secret)})
+        secret = c.post("/api/setup", json={"username": "owner", "password": PASSWORD,
+                                            "token": self.token}).json()["totp_secret"]
+        r = c.post("/api/setup/confirm", json={"code": security.totp_now(secret), "token": self.token})
         cookie = next(h for h in r.headers.get_list("set-cookie") if h.startswith("automate_session="))
         self.assertIn("secure", cookie.lower())
 
     def test_setup_validation_and_wrong_confirm_code(self):
-        r = self.anon.post("/api/setup", json={"username": "", "password": "short"})
+        r = self.anon.post("/api/setup", json={"username": "", "password": "short", "token": self.token})
         self.assertEqual(r.status_code, 422)
         self.assertEqual(set(r.json()["error"]["fields"]), {"username", "password"})
         self.assertIn("10 Zeichen", r.json()["error"]["fields"]["password"])
-        self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD})
-        r = self.anon.post("/api/setup/confirm", json={"code": "123456"})
+        self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD, "token": self.token})
+        r = self.anon.post("/api/setup/confirm", json={"code": "123456", "token": self.token})
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (422, "invalid_code"))
         self.assertIn("code", r.json()["error"]["fields"])
+        r = self.anon.post("/api/setup/confirm", json={"code": "١٢٣٤٥٦", "token": self.token})  # non-ASCII digits
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (422, "invalid_code"))
         self.assertFalse(store.get_user()["totp_enabled"])
 
-    def test_a_half_finished_setup_can_be_restarted_but_not_hijacked(self):
-        first = self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD}).json()
-        again = self.anon.post("/api/setup", json={"username": "owner2", "password": PASSWORD + "!"})  # same browser
-        self.assertEqual(again.status_code, 200)
-        self.assertNotEqual(again.json()["totp_secret"], first["totp_secret"])
-        self.assertEqual(store.get_user()["username"], "owner2")
-        other = TestClient(self.app, base_url=BASE, headers=CSRF)
-        r = other.post("/api/setup", json={"username": "intruder", "password": "another password"})
-        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "setup_in_progress"))
-        r = other.post("/api/setup", json={"username": "owner2", "password": PASSWORD + "!"})  # knows the password
-        self.assertEqual(r.status_code, 200)
-        store.set_meta("setup.pending", {**store.get_meta("setup.pending"), "at": time.time() - 16 * 60})
-        third = TestClient(self.app, base_url=BASE, headers=CSRF)  # abandoned for 15 minutes: anyone may restart
-        r = third.post("/api/setup", json={"username": "me", "password": "a fresh password"})
-        self.assertEqual(r.status_code, 200)
-        conf = third.post("/api/setup/confirm", json={"code": security.totp_now(r.json()["totp_secret"])})
-        self.assertEqual(conf.status_code, 200)
-        old = self.anon.post("/api/setup/confirm", json={"code": security.totp_now(first["totp_secret"])})
-        self.assertEqual(old.status_code, 409)
+    def test_setup_needs_the_terminal_code_and_confirm_needs_the_same_browser(self):
+        for body, field in (({}, "Bitte den Einrichtungs-Code"), ({"token": "ABCD-EFGH-IJKL-MNOP-QRST"}, "stimmt nicht")):
+            r = self.anon.post("/api/setup", json={"username": "mallory", "password": PASSWORD, **body})
+            self.assertEqual((r.status_code, r.json()["error"]["code"]), (403, "setup_token_invalid"))
+            self.assertIn(field, r.json()["error"]["fields"]["token"])
+            self.assertIn("Terminal", r.json()["error"]["message"])
+        self.assertIsNone(store.get_user())  # nothing was created, no password was hashed
+        first = self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD,
+                                                   "token": self.token}).json()
+        other = TestClient(self.app, base_url=BASE, headers=CSRF)  # no setup code: no restart, at any time
+        with mock.patch("automate.api.auth.time.time", return_value=time.time() + 3600):
+            r = other.post("/api/setup", json={"username": "intruder", "password": "another password"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(store.get_user()["username"], "owner")
+        r = other.post("/api/setup/confirm", json={"code": security.totp_now(first["totp_secret"]),
+                                                   "token": self.token})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "setup_restart"))  # not its setup cookie
+        self.assertFalse(store.get_user()["totp_enabled"])
+        again = other.post("/api/setup", json={"username": "owner", "password": PASSWORD + "!", "token": self.token})
+        self.assertEqual(again.status_code, 200)  # the code's holder may start over in another browser
+        old = self.anon.post("/api/setup/confirm", json={"code": security.totp_now(again.json()["totp_secret"]),
+                                                         "token": self.token})
+        self.assertEqual(old.status_code, 409)  # the first browser's cookie is no longer the pending one
+        r = other.post("/api/setup/confirm", json={"code": security.totp_now(again.json()["totp_secret"]),
+                                                   "token": self.token})
+        self.assertEqual(r.status_code, 200, r.text)
+        store.set_meta("setup.token", None)
+        store.delete_user()
+        r = self.anon.post("/api/setup", json={"username": "a", "password": PASSWORD, "token": self.token})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "setup_token_missing"))
+
+    def test_setup_failures_are_capped_per_client_and_globally(self):
+        self.make_user()  # setup done: refused at once, before any password hashing, and counted
+        with mock.patch.object(security, "hash_password", side_effect=AssertionError("no scrypt")):
+            codes = [self.anon.post("/api/setup", json={"username": "x", "password": PASSWORD}).status_code
+                     for _ in range(auth.LIMIT_SETUP + 1)]
+        self.assertEqual(codes, [409] * auth.LIMIT_SETUP + [429])
+        store.delete_user()
+        db.conn().execute("DELETE FROM login_attempts")
+        clients = iter(f"10.0.0.{i}" for i in range(1000))
+        with mock.patch.object(auth, "client_key", side_effect=lambda request: next(clients)):
+            codes = [self.anon.post("/api/setup/confirm", json={"code": "000000", "token": "WRONG"}).status_code
+                     for _ in range(auth.LIMIT_SETUP_ALL + 1)]
+        self.assertEqual(codes[-1], 429)  # a new client address per request doesn't help
+        self.assertEqual(set(codes[:-1]), {403})
 
     def test_two_simultaneous_setups_create_one_account(self):
         results, barrier = [], threading.Barrier(2)
@@ -239,14 +273,15 @@ class AuthFlowTests(ApiCase):
         def go(name):
             c = TestClient(self.app, base_url=BASE, headers=CSRF)
             barrier.wait()
-            results.append(c.post("/api/setup", json={"username": name, "password": PASSWORD + name}).status_code)
+            results.append(c.post("/api/setup", json={"username": name, "password": PASSWORD + name,
+                                                      "token": self.token}).status_code)
             db.close()
         threads = [threading.Thread(target=go, args=(n,)) for n in ("alice", "bobby")]
         for t in threads:
             t.start()
         for t in threads:
             t.join(30)
-        self.assertEqual(sorted(results), [200, 409])
+        self.assertEqual(sorted(results), [200, 200])  # both hold the code: the later one replaces the first
         self.assertEqual(db.conn().execute("SELECT COUNT(*) FROM users").fetchone()[0], 1)
 
     def test_login_is_rate_limited_per_username_and_per_client(self):
@@ -333,24 +368,72 @@ class AuthFlowTests(ApiCase):
         self.assertIsNone(store.get_session(c.token_hash))
 
     def test_reset_login_command_restarts_the_setup(self):
+        from io import StringIO
         from automate import __main__ as cli
         c = self.client()
+        auth.clear_setup_token()  # the setup is done: no code exists
         with mock.patch("builtins.input", return_value="nein"), mock.patch("sys.stdout"):
             self.assertEqual(cli.reset_login([]), 1)
         self.assertEqual(c.get("/api/overview").status_code, 200)
-        with mock.patch("builtins.input", return_value="RESET"), mock.patch("sys.stdout"):
+        store.set_secret("anthropic_api_key", "sk-ant-api03-kept-key-0123456789")
+        out = StringIO()
+        with mock.patch("builtins.input", return_value="RESET"), mock.patch("sys.stdout", out):
             self.assertEqual(cli.reset_login([]), 0)
+        text = out.getvalue()
+        self.assertIn("BLEIBEN erhalten", text)  # says clearly that keys and YouTube stay
         self.assertEqual(c.get("/api/overview").status_code, 401)
         self.assertIsNone(store.get_user())  # the row is gone, not just emptied
         self.assertIsNone(store.get_session(c.token_hash))
+        self.assertTrue(store.secret_info("anthropic_api_key")["set"])
         st = self.anon.get("/api/state").json()
         self.assertEqual((st["setup_required"], st["setup_step"]), (True, "account"))
         login = self.anon.post("/api/login", json={"username": "owner", "password": PASSWORD,
                                                     "code": security.totp_now(self.secret)})
         self.assertEqual(login.status_code, 401)
-        r = TestClient(self.app, base_url=BASE, headers=CSRF).post(
-            "/api/setup", json={"username": "neu", "password": PASSWORD})
+        fresh = TestClient(self.app, base_url=BASE, headers=CSRF)
+        r = fresh.post("/api/setup", json={"username": "neu", "password": PASSWORD})
+        self.assertEqual(r.status_code, 403)  # no code, no setup: the next visitor can't take the keys
+        code = text.split("Einrichtungs-Code: ")[1].split()[0]
+        self.assertIn(f"/#/einrichtung?token={code}", text)
+        r = fresh.post("/api/setup", json={"username": "neu", "password": PASSWORD, "token": code})
         self.assertEqual(r.status_code, 200)
+
+    def test_reset_login_can_also_wipe_the_keys_and_youtube(self):
+        from automate import __main__ as cli
+        self.client()
+        store.set_secret("anthropic_api_key", "sk-ant-api03-kept-key-0123456789")
+        aid = store.add_account("youtube", "Kanal", connected=True, credentials={"refresh_token": "1//x"})
+        with mock.patch("sys.stdout"), mock.patch("automate.youtube.revoke", return_value=True) as revoke:
+            self.assertEqual(cli.reset_login(["--yes", "--wipe-keys"]), 0)
+        self.assertFalse(store.secret_info("anthropic_api_key")["set"])
+        a = store.get_account(aid, with_credentials=True)
+        self.assertEqual((a["connected"], a["credentials"]), (False, None))
+        revoke.assert_called_once()
+
+    def test_env_keys_are_imported_only_once_the_login_is_set_up(self):
+        env = self.root / ".env"
+        env.write_text("ANTHROPIC_API_KEY=sk-ant-api03-from-dotenv-0123456789\n")
+        with mock.patch.object(paths, "ROOT", self.root):
+            importer.run()  # first start: nobody has proven to own this install yet
+            self.assertFalse(store.secret_info("anthropic_api_key")["set"])
+            secret = self.anon.post("/api/setup", json={"username": "owner", "password": PASSWORD,
+                                                        "token": self.token}).json()["totp_secret"]
+            self.assertFalse(store.secret_info("anthropic_api_key")["set"])
+            r = self.anon.post("/api/setup/confirm", json={"code": security.totp_now(secret), "token": self.token})
+            self.assertEqual(r.status_code, 200)
+        self.assertEqual(store.get_secret("anthropic_api_key"), "sk-ant-api03-from-dotenv-0123456789")
+
+    def test_login_second_factor_oddities_are_counted_failures_not_errors(self):
+        self.make_user()
+        anon = TestClient(self.app, base_url=BASE, headers=CSRF, raise_server_exceptions=False)
+        for pw in ("wrong password!!", PASSWORD):  # Arabic-Indic digits: same answer whether the password is right
+            r = anon.post("/api/login", json={"username": "owner", "password": pw, "code": "١٢٣٤٥٦"})
+            self.assertEqual((r.status_code, r.json()["error"]["code"]), (401, "invalid_credentials"))
+        with mock.patch.object(security, "verify_totp", side_effect=TypeError("boom")):
+            r = anon.post("/api/login", json={"username": "owner", "password": PASSWORD, "code": "123456"})
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(store.recent_failures("login.user:owner", time.time() - 60), 3)
+        self.assertIsNone(security.verify_totp(self.secret, "١٢٣٤٥٦"))
 
 
 # ---------------------------------------------------------------- security layer
@@ -406,6 +489,36 @@ class SecurityTests(ApiCase):
                          "http://localhost:9000/api/social/youtube/callback")
         self.assertEqual(server.ServerConfig(public_url="http://192.168.1.20:8765").redirect_uri(),
                          "http://localhost:8765/api/social/youtube/callback")  # Google refuses IPs / plain http
+
+    def test_lan_names_come_from_the_machine_not_from_reverse_dns(self):
+        with mock.patch("socket.gethostname", return_value="Gamer-PC"), \
+                mock.patch("socket.getfqdn", return_value="evil.example"), \
+                mock.patch("socket.gethostbyname_ex", return_value=("gamer-pc", [], ["192.168.1.20"])):
+            names = server.machine_names()
+        self.assertIn("gamer-pc", names)
+        self.assertIn("gamer-pc.local", names)
+        self.assertIn("192.168.1.20", names)
+        self.assertNotIn("evil.example", names)
+
+    def test_serve_prints_a_setup_code_and_trusts_proxy_headers_only_behind_a_public_url(self):
+        import uvicorn
+        from io import StringIO
+        from automate import __main__ as cli
+        seen = []
+
+        def config(app, **kw):
+            seen.append(kw)
+            return mock.MagicMock()
+        for argv, proxied in ((["--port", "18999", "--no-browser"], False),
+                              (["--port", "18999", "--no-browser", "--public-url", "https://clips.example.de"], True)):
+            out = StringIO()
+            with mock.patch.object(uvicorn, "Config", side_effect=config), mock.patch.object(uvicorn, "Server"), \
+                    mock.patch("sys.stdout", out), mock.patch.object(cli, "_setup_logging",
+                                                                     return_value=self.root / "server.log"):
+                self.assertEqual(cli.serve(argv), 0)
+            self.assertEqual(seen[-1]["proxy_headers"], proxied)
+            code = out.getvalue().split("Einrichtungs-Code: ")[1].split()[0]
+            self.assertTrue(auth._setup_token_ok(code))  # each start: a fresh code, the old one is void
 
     def test_cross_origin_and_cross_site_requests_are_refused(self):
         c = self.client()
@@ -613,6 +726,8 @@ class OverviewJobTests(ApiCase):
                                                              "recording": True, "title": "GTA 6 RP",
                                                              "checked_at": 5.0}], "recorders": 1}
         store.create_job("source", "gta6")
+        store.create_job("source", "gta6", status="waiting_approval", stage="approval")  # waits for the owner
+        store.create_job("source", "gta6", status="waiting_approval", stage="render")  # waits for its renders only
         done = store.create_job("source", "gta6")
         store.update_job(done, status="done")
         failed = store.create_job("render", "gta6")
@@ -622,7 +737,7 @@ class OverviewJobTests(ApiCase):
         store.add_account("youtube", "Main", connected=True, credentials={"access_token": "a"})
         with mock.patch("subprocess.Popen", side_effect=AssertionError("no subprocess in /api/overview")):
             d = self.c.get("/api/overview").json()
-        self.assertEqual(d["jobs"], {"waiting": 1, "running": 0, "failed": 1, "waiting_approval": 0, "done_today": 1})
+        self.assertEqual(d["jobs"], {"waiting": 3, "running": 0, "failed": 1, "waiting_approval": 1, "done_today": 1})
         self.assertEqual(d["live"]["recorders"], 1)
         self.assertEqual(d["live"]["streams"][0]["recording"], True)
         self.assertEqual(len(d["live"]["streams"]), 1)
@@ -630,7 +745,7 @@ class OverviewJobTests(ApiCase):
                                       "tools_ok": True, "sources": 2})
         self.assertEqual(d["automation"]["next_scan_at"], 1900000000.0)
         self.assertEqual([a["key"] for a in d["alerts"]], ["disk.low"])
-        self.assertEqual(len(d["recent_jobs"]), 3)
+        self.assertEqual(len(d["recent_jobs"]), 5)
         self.assertEqual(set(d["costs"]), {"today_eur", "limit_eur", "tokens_today"})
         self.health.system_report.assert_not_called()
         system = self.c.get("/api/system").json()  # computes the report and caches the tool state

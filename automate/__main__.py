@@ -3,8 +3,11 @@
     serve (default)  [--host 127.0.0.1] [--port 8765] [--no-browser] [--public-url URL]
                      dashboard + API + background services; one instance per data dir (lock file); Ctrl+C or
                      SIGTERM shut it down cleanly (jobs' subprocesses stop, detached live recorders keep going)
-    reset-login [--yes]   forget password, 2FA and sessions so the dashboard's setup wizard runs again (the way back
-                     in when both password and 2FA are lost: shell access on this PC is the proof of ownership)
+    reset-login [--yes] [--wipe-keys]   delete the account (password, 2FA, sessions) and print a new setup code so
+                     the dashboard's setup wizard runs again (the way back in when both password and 2FA are lost:
+                     shell access on this PC is the proof of ownership); keys and YouTube tokens stay unless --wipe-keys
+    serve prints a one-time setup code (and opens the dashboard with it) whenever the setup is open: only the code's
+    holder can create the login (api/auth.py)
     doctor           health.system_report() in German; exit 1 when something required is missing
     import-yaml      import creators/streams/prefs/.env from the repo files again (only adds what's missing)
 """
@@ -168,9 +171,16 @@ def serve(argv):
               f"„uv run python -m automate --port {args.port + 1}“.", file=sys.stderr)
         return 1
     log_file = _setup_logging()
+    from .api import auth
+    open_url, setup_lines = url, ""
+    if auth.setup_open():  # whoever has this code (from this terminal) sets up the login; nobody else can
+        token = auth.issue_setup_token()
+        open_url = auth.setup_url(url, token)
+        setup_lines = (f"\n  Einrichtung: {open_url}\n  Einrichtungs-Code: {token}\n"
+                       f"  (Der Code gilt bis zum Abschluss der Einrichtung; nach einem Neustart gilt ein neuer.)\n")
     print(f"\nGTA Clipper – Automatik {__version__}\n"
-          f"  Dashboard: {url}\n  Daten:     {paths.data_dir()}\n  Log:       {log_file}\n"
-          f"  Beenden mit Strg+C.\n")
+          f"  Dashboard: {url}\n  Daten:     {paths.data_dir()}\n  Log:       {log_file}\n{setup_lines}"
+          f"  Beenden mit Strg+C.\n", flush=True)
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         others = ", ".join(f"http://{h}" for h in cfg.allowed_hosts()
                            if h.rsplit(":", 1)[0].strip("[]") not in ("localhost", "127.0.0.1", "::1"))
@@ -180,10 +190,13 @@ def serve(argv):
               "Portweiterleitung ins Internet." + (f"\n  Im Netz erreichbar unter: {others}" if others else "") + "\n",
               file=sys.stderr)
     if not args.no_browser and _display_likely():
-        _open_browser_when_up(url, args.host, args.port)
+        _open_browser_when_up(open_url, args.host, args.port)
+    # X-Forwarded-* only behind the reverse proxy a --public-url implies: otherwise any local client could pick its
+    # own address (and with it its own login rate-limit bucket)
+    proxied = bool(args.public_url)
     config = uvicorn.Config(create_app(config=cfg), host=args.host, port=args.port, log_config=None,
-                            proxy_headers=True, forwarded_allow_ips="127.0.0.1", server_header=False,
-                            timeout_graceful_shutdown=10, lifespan="on")
+                            proxy_headers=proxied, forwarded_allow_ips="127.0.0.1" if proxied else None,
+                            server_header=False, timeout_graceful_shutdown=10, lifespan="on")
     # uvicorn shuts down gracefully on SIGINT/SIGTERM, then raises the signal again: end quietly instead of with a
     # KeyboardInterrupt traceback (Ctrl+C) or a kill by the default SIGTERM action
     previous = signal.signal(signal.SIGTERM, _stopped)
@@ -209,19 +222,47 @@ def _stopped(signum, frame):
 
 # ---------------------------------------------------------------- maintenance
 
+def _running_url():
+    """The dashboard URL of a server running on this data dir (its lock file), else the default."""
+    try:
+        info = json.loads((paths.data_dir() / "server.lock").read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        info = {}
+    return info.get("url") or "http://localhost:8765"
+
+
+def _wipe_keys():
+    from . import settings, social, store
+    for name in settings.SECRETS:
+        store.set_secret(name, None)
+    for a in store.list_accounts():
+        if a.get("has_credentials") or a.get("connected"):
+            social.disconnect(a["id"])  # revokes at Google (best effort) and forgets the tokens
+
+
 def reset_login(argv):
     p = argparse.ArgumentParser(prog="python -m automate reset-login",
                                 description="Login zurücksetzen (Passwort, 2FA, Sitzungen).")
     p.add_argument("--yes", action="store_true", help="ohne Rückfrage")
+    p.add_argument("--wipe-keys", action="store_true",
+                   help="auch alle API-Schlüssel löschen und YouTube-Verbindungen trennen")
     args = p.parse_args(argv)
     from . import store
+    from .api import auth
     user = store.get_user()
     if user is None or not user.get("password_hash"):
-        print("Es gibt kein eingerichtetes Konto – beim nächsten Öffnen des Dashboards startet die Einrichtung.")
+        token = auth.issue_setup_token()
+        print("Es gibt kein eingerichtetes Konto – die Einrichtung ist offen.\n"
+              f"  Einrichtung: {auth.setup_url(_running_url(), token)}\n  Einrichtungs-Code: {token}")
         return 0
-    print(f"Das setzt den Login „{user['username']}“ zurück: Passwort, 2FA und Wiederherstellungscodes werden "
-          f"gelöscht, alle Sitzungen abgemeldet. Quellen, Videos, Schlüssel und Einstellungen bleiben erhalten. "
-          f"Danach legst du im Dashboard ein neues Konto mit neuer 2FA an.")
+    kept = ("API-Schlüssel (Anthropic, Fish Audio, Google-OAuth-Client) und verbundene YouTube-Konten werden "
+            "GELÖSCHT bzw. getrennt." if args.wipe_keys else
+            "API-Schlüssel (Anthropic, Fish Audio, Google-OAuth-Client) und verbundene YouTube-Konten BLEIBEN "
+            "erhalten – wer die Einrichtung abschließt, kann sie benutzen. Mit --wipe-keys werden sie auch "
+            "gelöscht.")
+    print(f"Das setzt den Login „{user['username']}“ zurück: Konto, Passwort, 2FA und Wiederherstellungscodes werden "
+          f"gelöscht, alle Sitzungen abgemeldet. Quellen, Videos und Einstellungen bleiben erhalten. {kept} "
+          f"Danach legst du im Dashboard mit dem neuen Einrichtungs-Code ein neues Konto mit neuer 2FA an.")
     if not args.yes:
         try:
             answer = input("Zum Bestätigen RESET eingeben: ")
@@ -234,8 +275,13 @@ def reset_login(argv):
         store.delete_user(user["id"])  # its sessions go with it
         store.set_meta("setup.pending", None)
         store.set_meta("totp.pending", None)
-    print("Login zurückgesetzt. Öffne das Dashboard und lege das Konto neu an (ein laufender Server muss dafür nicht "
-          "neu starten).")
+        token = auth.issue_setup_token()
+    if args.wipe_keys:
+        _wipe_keys()
+    print("Login zurückgesetzt" + (", Schlüssel gelöscht und YouTube getrennt" if args.wipe_keys else "")
+          + ". Ein laufender Server muss nicht neu starten.\n"
+          f"  Einrichtung: {auth.setup_url(_running_url(), token)}\n  Einrichtungs-Code: {token}\n"
+          "  (Startest du den Server neu, gilt der Code, den er dann im Terminal zeigt.)")
     return 0
 
 

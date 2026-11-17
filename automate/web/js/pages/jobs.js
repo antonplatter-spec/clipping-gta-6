@@ -49,7 +49,7 @@ export function JobsPage({ route }) {
               <td class="td-title"><a href=${`#/jobs?job=${j.id}`} class="job-title" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); open(j.id); }}>${j.title || hostOf(j.source_url) || `Job #${j.id}`}</a>
                 <div class="muted small truncate">#${j.id}${j.channel ? ` · ${j.channel}` : ''}${j.profile ? ` · ${j.profile}` : ''}</div></td>
               <td class="nowrap">${JOB_KIND[j.kind] || j.kind}</td>
-              <td><${JobStatusBadge} status=${j.status} />${j.attempts > 1 ? html`<div class="muted small">${j.attempts}. Versuch</div>` : ''}</td>
+              <td><${JobStatusBadge} status=${j.status} stage=${j.stage} />${j.attempts > 1 ? html`<div class="muted small">${j.attempts}. Versuch</div>` : ''}</td>
               <td><div class="small">${JOB_STAGE[j.stage] || '–'}</div>
                 ${j.status === 'failed' && j.error ? html`<div class="small truncate" style="color:var(--red);max-width:320px">${j.error}</div>`
                   : j.progress && html`<div class="job-progress truncate" style="max-width:320px">${j.status === 'running' && html`<${Spinner} size=${11} />`}${j.progress}</div>`}</td>
@@ -57,7 +57,7 @@ export function JobsPage({ route }) {
               <td class="td-num muted small">${duration(j)}</td>
             </tr>`)}</tbody></table></div>
           <div class="job-cards" style="padding:0 16px">${items.map((j) => html`<button type="button" class="job-card" key=${j.id} onClick=${() => open(j.id)}>
-            <div class="row-between"><span class="job-title truncate">${j.title || `Job #${j.id}`}</span><${JobStatusBadge} status=${j.status} /></div>
+            <div class="row-between"><span class="job-title truncate">${j.title || `Job #${j.id}`}</span><${JobStatusBadge} status=${j.status} stage=${j.stage} /></div>
             <span class="muted small">#${j.id} · ${JOB_KIND[j.kind] || j.kind} · ${JOB_STAGE[j.stage] || '–'} · <${Rel} ts=${j.created_at} /></span>
             ${(j.status === 'failed' && j.error) ? html`<span class="small" style="color:var(--red)">${j.error}</span>` : j.progress && html`<span class="job-progress">${j.progress}</span>`}
           </button>`)}</div>`}
@@ -101,7 +101,7 @@ function JobDrawer({ id, onClose, onChanged }) {
       ${canRetry && html`<${Button} variant="primary" icon="rotate-ccw" busy=${busy === 'retry'} onClick=${() => act('retry')}>Erneut versuchen<//>`}
       <${Button} variant="ghost" onClick=${onClose}>Schließen<//>`}>
     ${job.error && !j ? html`<${ErrorState} error=${job.error} onRetry=${job.reload} />` : !j ? html`<${Loading} lines=${10} />` : html`
-      <div class="row"><${JobStatusBadge} status=${j.status} /><${Badge} tone="muted">${JOB_KIND[j.kind] || j.kind}<//>
+      <div class="row"><${JobStatusBadge} status=${j.status} stage=${j.stage} /><${Badge} tone="muted">${JOB_KIND[j.kind] || j.kind}<//>
         <${Badge} tone="muted">${JOB_STAGE[j.stage] || '–'}<//>${j.profile && html`<${Badge} tone="muted">${j.profile}<//>`}</div>
       ${j.progress && ACTIVE.has(j.status) && html`<p class="job-progress">${j.status === 'running' && html`<${Spinner} size=${12} />`}${j.progress}</p>`}
       ${j.error && html`<${Callout} tone=${j.status === 'skipped' ? 'info' : 'danger'} title=${j.status === 'skipped' ? 'Übersprungen' : 'Fehler'}>${j.error}<//>`}
@@ -129,7 +129,7 @@ function JobDrawer({ id, onClose, onChanged }) {
         <div class="list">${j.children.map((c) => html`<div class="list-row" key=${c.id}>
           <div class="list-main"><a class="list-title" href=${`#/jobs?job=${c.id}`}>#${c.id} · ${JOB_KIND[c.kind] || c.kind}</a>
             <span class="list-sub">${c.progress || c.error || JOB_STAGE[c.stage] || ''}</span></div>
-          <${JobStatusBadge} status=${c.status} /></div>`)}</div></section>`}
+          <${JobStatusBadge} status=${c.status} stage=${c.stage} /></div>`)}</div></section>`}
       <${EventLog} events=${j.events || []} live=${j.status === 'running'} />`}
   <//>`;
 }

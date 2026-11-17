@@ -165,7 +165,7 @@ def run_cleanup(trigger="schedule", dry_run=False, profile=None):
         return summary
     files, gb = int(data.get("files") or 0), float(data.get("gb") or 0)
     verb = "würde löschen" if dry_run else "gelöscht"
-    msg = (f"{files} Quelldatei(en) {verb} ({gb:.1f} GB)" if files else "Nichts zu löschen") \
+    msg = (f"{files} Quelldatei(en) {verb} ({health.gb_text(gb)})" if files else "Nichts zu löschen") \
         + (f", {pruned} alte Hilfsdatei(en) entfernt" if pruned else "")
     summary = {"message": msg, **data, "tmp_files": pruned, "db_rows": db_rows}
     store.finish_run(rid, True, summary)
@@ -288,7 +288,7 @@ def _live_profile(profile, chunk, trigger, stop):
         parts.append(f"{len(data['transcribing'])} Stück(e) in Analyse")
     cleaned = data.get("cleaned") or {}
     if cleaned.get("files"):
-        parts.append(f"{cleaned['files']} alte Datei(en) gelöscht ({float(cleaned.get('gb') or 0):.1f} GB)")
+        parts.append(f"{cleaned['files']} alte Datei(en) gelöscht ({health.gb_text(cleaned.get('gb') or 0)})")
     summary = {"message": ", ".join(parts), "started": data.get("started") or [], "new_jobs": new,
                "closed": closed, "recorders": data.get("recorders"), "issues": data.get("issues") or {},
                "restarted": data.get("restarted") or []}

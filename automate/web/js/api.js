@@ -18,8 +18,9 @@
 //
 // Additions to the spec (backend please implement; each is also marked "ADDITION" where it is documented):
 //  1. Error body may carry `fields` (per-field 422 messages) and, for PATCH /api/picks/{id}, `check_report`.
-//  2. GET /api/state: `setup_step` is "account" | "totp" | null. POST /api/setup may be called again while the
-//     account's 2FA is not yet confirmed (replaces that unconfirmed account), so a reload mid-setup can recover.
+//  2. GET /api/state: `setup_step` is "account" | "totp" | null, `setup_token_required` (bool). POST /api/setup may
+//     be called again while the account's 2FA is not yet confirmed (replaces that unconfirmed account), so a reload
+//     mid-setup can recover. Both setup calls carry the one-time setup code (`token`) from the server's terminal.
 //  3. POST /api/account/totp/confirm returns `{recovery_codes}` (new codes; the old ones stop working).
 //  4. GET /api/overview: `automation.scan_running` (bool) and `ready.sources` (number of active creators+streams
 //     in enabled profiles). POST /api/automation returns the `automation` block. POST /api/scan starts the scan in
@@ -177,6 +178,9 @@ export function itemsOf(res) {
  * @property {string} version          automate.__version__
  * @property {"account"|"totp"|null} setup_step  ADDITION: "account" = no user yet; "totp" = user created but 2FA
  *   not confirmed (POST /api/setup again restarts the 2FA step); null = setup done
+ * @property {boolean} setup_token_required  true while the setup is open: POST /api/setup and /api/setup/confirm
+ *   need the one-time setup code the server prints in its terminal (and puts in the link it opens:
+ *   `/#/einrichtung?token=<code>`). Nothing else about the code is ever returned.
  */
 
 /** GET /api/state — no session needed. @returns {Promise<State>} */
@@ -190,17 +194,22 @@ export const getState = () => request('GET', '/state', { redirect401: false });
  */
 
 /**
- * POST /api/setup — first run only. Password ≥ 10 characters (422 with `fields.password` otherwise),
- * username 1–64 characters (`fields.username`).
- * @param {{username: string, password: string}} body
+ * POST /api/setup — first run only (after setup → 409 `setup_done`). Password ≥ 10 characters (422 with
+ * `fields.password` otherwise), username 1–64 characters (`fields.username`). `token` = the setup code from the
+ * terminal (any case, dashes/spaces ignored); missing or wrong → 403 `setup_token_invalid` with `fields.token`;
+ * no code issued (server not started through `python -m automate`) → 409 `setup_token_missing`. The code's holder
+ * may call this again while 2FA is unconfirmed (replaces that account, new QR); sets the setup cookie.
+ * @param {{username: string, password: string, token: string}} body
  * @returns {Promise<TotpSetup>}
  */
 export const setup = (body) => request('POST', '/setup', { body, redirect401: false });
 
 /**
- * POST /api/setup/confirm — confirms the first TOTP code, finishes the account, sets the session cookie.
- * Wrong code → 422 `{code: "invalid_code", fields: {code}}`.
- * @param {{code: string}} body
+ * POST /api/setup/confirm — confirms the first TOTP code, finishes the account, sets the session cookie and voids
+ * the setup code. Needs the same `token` and the setup cookie of the browser that called POST /api/setup (another
+ * browser started over, or the cookie expired → 409 `setup_restart`: back to step 1).
+ * Wrong code → 422 `{code: "invalid_code", fields: {code}}`; wrong setup code → 403 `setup_token_invalid`.
+ * @param {{code: string, token: string}} body
  * @returns {Promise<{recovery_codes: string[]}>} 10 one-time codes, shown once
  */
 export const setupConfirm = (body) => request('POST', '/setup/confirm', { body, redirect401: false });

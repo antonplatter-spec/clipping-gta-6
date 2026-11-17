@@ -186,7 +186,7 @@ function LimitCard({ c, onSaved }) {
   return html`<${Card} title="Tageslimit" icon="gauge" subtitle="Schützt vor Überraschungen auf der Rechnung.">
     <form class="stack" onSubmit=${save}>
       <${FormError} error=${error && !error.fields ? error : null} />
-      <${TextField} label="Tageslimit in Euro" type="number" min="0" step="0.5" value=${limit} onInput=${setLimit} inputClass="input-num"
+      <${TextField} label="Tageslimit in Euro" type="number" min="0" step="0.01" value=${limit} onInput=${setLimit} inputClass="input-num"
         error=${f['claude.daily_limit_eur']} help="0 = kein Limit. Ist es erreicht, warten Claude-Schritte bis morgen („Wartet auf Budget“); alles andere läuft weiter." />
       <${TextField} label="Wechselkurs: 1 US-Dollar in Euro" type="number" min="0.01" step="0.01" value=${rate} onInput=${setRate} inputClass="input-num"
         error=${f['claude.usd_to_eur']} help="Anthropic rechnet in US-Dollar ab. Der Kurs wird nur zur Anzeige und fürs Limit genutzt." />

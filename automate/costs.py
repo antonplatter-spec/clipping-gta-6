@@ -18,6 +18,7 @@ write costs 2x input). "Today" is the local day of this PC (`local_day()`), the 
     spent_today_eur() -> float
     budget_left_eur() -> float | None                None = no limit (claude.daily_limit_eur == 0)
     budget_ok() -> bool                              False once today's spend reached the limit
+    eur_text(eur) -> "0,27 €"                        German money for messages shown in the dashboard
 """
 import logging
 import time
@@ -120,3 +121,7 @@ def budget_left_eur():
 def budget_ok():
     left = budget_left_eur()
     return left is None or left > 0
+
+
+def eur_text(eur):
+    return f"{float(eur):.2f} €".replace(".", ",")

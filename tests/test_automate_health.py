@@ -86,6 +86,8 @@ class CheckAllTests(PipelineCase):
         self.assertIn("System", active["tools.missing"]["message"])
         self.assertIn("Kosten & Schlüssel", active["key.anthropic_missing"]["message"])
         self.assertIn("GB frei", active["disk.low"]["message"])
+        self.assertEqual((health.gb_text(29.6), health.gb_text(30), health.gb_text(1.25)),
+                         ("29,6 GB", "30 GB", "1,2 GB"))  # 29.6 free next to a 30 GB minimum must not read "30 GB"
         self.assertEqual(health.check_all(), [])  # nothing new the second time
         run = store.last_run("health")
         self.assertIn("aktiv", run["summary"]["message"])

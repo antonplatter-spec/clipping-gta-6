@@ -12,7 +12,9 @@ Never overwrites DB state:
     and creators the owner deleted are not brought back. File order becomes insertion order (= the CLI's order);
   - prefs.yaml -> prefs.* settings and schedule_time -> schedule.scan_times, once, only keys without a stored value;
   - .env (default ROOT/.env) -> secrets fish_api_key / anthropic_api_key and setting render.top_hooks
-    (CLIPPER_TOP_HOOKS), once, only when unset there;
+    (CLIPPER_TOP_HOOKS), once, only when unset there, and only once the dashboard login is set up (account with
+    confirmed 2FA; api/auth.py runs this again right after the setup): keys are never waiting in the DB for whoever
+    completes the setup first;
   - price rows a release adds to settings.DEFAULT_PRICES -> a stored claude.prices, once per row (meta
     "prices.defaults" lists the rows already offered): rows the owner edited stay, a row the owner deleted after it
     was offered stays deleted.
@@ -143,6 +145,11 @@ def _new_price_rows(summary):
     store.set_meta("prices.defaults", sorted(offered | set(new)))
 
 
+def _owner_set_up():
+    user = store.get_user()
+    return bool(user and user.get("password_hash") and user.get("totp_enabled"))
+
+
 def run(force=False, env_file=None):
     summary = {"profiles": [], "creators": {}, "streams": {}, "settings": [], "secrets": [], "skipped": []}
     repo = paths.repo_profiles_dir()
@@ -154,6 +161,7 @@ def run(force=False, env_file=None):
         _import_list(name, "creators", force, summary)
         _import_list(name, "streams", force, summary)
     _import_prefs(force, summary)
-    _import_env(Path(env_file) if env_file else paths.ROOT / ".env", force, summary)
+    if force or _owner_set_up():
+        _import_env(Path(env_file) if env_file else paths.ROOT / ".env", force, summary)
     _new_price_rows(summary)
     return summary

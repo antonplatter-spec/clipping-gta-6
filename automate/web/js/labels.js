@@ -13,6 +13,8 @@ export const JOB_STATUS = {
   skipped: { label: 'Übersprungen', tone: 'neutral' },
   canceled: { label: 'Abgebrochen', tone: 'muted' },
 };
+/** waiting_approval at stage render: every pick is decided, the approved ones are rendering */
+export const JOB_STATUS_RENDERING = { label: 'Clips werden gerendert', tone: 'running' };
 
 export const JOB_GROUPS = [
   { id: '', label: 'Alle' },

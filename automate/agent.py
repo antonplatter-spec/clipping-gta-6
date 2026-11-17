@@ -176,7 +176,8 @@ def _api_error(e, model):
 
 def _budget_message():
     limit = store.get_setting("claude.daily_limit_eur")
-    return (f"Das Tageslimit für Claude ist erreicht ({costs.spent_today_eur():.2f} € von {float(limit):.2f} €). "
+    return (f"Das Tageslimit für Claude ist erreicht ({costs.eur_text(costs.spent_today_eur())} von "
+            f"{costs.eur_text(limit)}). "
             "Der Job läuft am nächsten Tag weiter oder sobald das Limit erhöht wird.")
 
 
@@ -525,7 +526,7 @@ def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
                     outcome = "accepted"
                     usage = sess.totals()
                     ctx.say(f"Auswahl angenommen: {len(out.picks)} Pick(s) nach {turns} Anfragen "
-                            f"({usage['cost_eur']:.2f} €)" if out.picks else
+                            f"({costs.eur_text(usage['cost_eur'])})" if out.picks else
                             f"Kein Clip aus dieser Quelle: {out.no_clip_reason}")
                     return Selection(picks=out.picks, reasons=out.reasons, click_triggers=out.click_triggers,
                                      no_clip_reason=out.no_clip_reason, check_report=out.check_report, turns=turns,

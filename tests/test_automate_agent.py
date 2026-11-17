@@ -788,7 +788,10 @@ class ToolTests(TempData):
                   "live-xqc-1\txQc\t21:04:10\t812.2-815.0s\t(footage deleted) Oh my god he's behind me!\n")
         with mock.patch.object(runtime, "run_clipper", return_value=runtime.ProcResult(0, stdout, "", 0.1)) as rc:
             out = T.run_tool(ctx, "find_line", {"pattern": "he's behind me", "hours": 3})
-        self.assertEqual(rc.call_args.args[0], ["find", "he's behind me", "--hours", "3"])
+        self.assertEqual(rc.call_args.args[0], ["find", "--hours", "3", "--", "he's behind me"])
+        with mock.patch.object(runtime, "run_clipper", return_value=runtime.ProcResult(0, "", "", 0.1)) as rc:
+            T.run_tool(ctx, "find_line", {"pattern": "-x?behind", "hours": 3})  # looks like an option to argparse
+        self.assertEqual(rc.call_args.args[0][-2:], ["--", "-x?behind"])
         self.assertIn(f"{JOB} (this job) · Kai Cenat Live", out.content)
         self.assertIn("live-xqc-1 · xQc · 21:04:10 · 812.2-815.0s · (footage deleted)", out.content)
         self.assertTrue(T.run_tool(ctx, "find_line", {"pattern": "[" }).is_error)

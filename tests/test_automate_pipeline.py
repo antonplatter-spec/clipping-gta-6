@@ -37,6 +37,16 @@ class Helpers(PipelineCase):
 
 
 class LifecycleTests(Helpers):
+    def test_a_video_id_starting_with_a_dash_goes_through_every_stage(self):
+        jid = self.gated("https://youtu.be/-k9QxYzAbCd")  # clipper's argparse would take "-k9..." for an option
+        self.assertEqual(self.job(jid)["status"], "waiting_approval", self.job(jid)["error"])
+        self.assertEqual(self.clip.args_of("fetch"), [["fetch", "--", "https://www.youtube.com/watch?v=-k9QxYzAbCd"]])
+        self.assertEqual(self.clip.args_of("analyze"), [["analyze", "--", "-k9QxYzAbCd"]])
+        pipeline.approve_pick(self.picks(jid)[0]["id"])
+        self.drive()
+        self.assertEqual(self.clip.args_of("render")[0][-2:], ["--", "-k9QxYzAbCd"])
+        self.assertEqual(store.list_videos()[1], 1)
+
     def test_url_job_manual_approval_then_render_stores_video_and_variants(self):
         jid = self.gated()
         job = self.job(jid)
@@ -44,7 +54,7 @@ class LifecycleTests(Helpers):
         self.assertEqual(job["clipper_job"], "AAAAAAAAAAA")
         self.assertEqual(job["title"], "Probed GTA 6 title")  # probed before the download
         self.assertIn("2 von 2 Clips offen", job["progress"])
-        self.assertEqual(self.clip.args_of("fetch"), [["fetch", "AAAAAAAAAAA"]])  # short video: no section
+        self.assertEqual(self.clip.args_of("fetch"), [["fetch", "--", URL]])  # short video: no section
         picks = self.picks(jid)
         self.assertEqual([p["status"] for p in picks], ["proposed", "proposed"])
         self.assertEqual(picks[0]["click_trigger"], "curiosity gap 0")
@@ -54,6 +64,14 @@ class LifecycleTests(Helpers):
         self.assertEqual(on_disk, [p["data"] for p in picks])
         events = [e["message"] for e in store.job_events(jid)]
         self.assertLess(sum("[download]" in m for m in events), 5, "progress lines are throttled")
+        # Claude's status lines are the select stage's story in the dashboard: every one kept, as info
+        claude = [(e["message"], e["level"]) for e in store.job_events(jid) if e["message"].startswith(("Claude ",
+                                                                                                         "Auswahl"))]
+        self.assertEqual([m for m, _ in claude], ["Claude wählt bis zu 2 Momente (empfohlen 2)",
+                                                  "Claude liest das Transkript (um 11 s)",
+                                                  "Claude sieht sich ein Bild bei 12 s an", "Claude prüft einen Entwurf",
+                                                  "Auswahl angenommen: 2 Pick(s) nach 4 Anfragen (0.05 €)"])
+        self.assertEqual({lvl for _, lvl in claude}, {"info"})
         self.assertEqual(self.agent.calls[0]["max_picks"], 2)  # candidates.json recommended
 
         render_id = pipeline.approve_pick(picks[0]["id"])
@@ -62,7 +80,7 @@ class LifecycleTests(Helpers):
         render = self.job(render_id)
         self.assertEqual(render["status"], "done", render["error"])
         args = self.clip.args_of("render")[0]
-        self.assertEqual(args[1], "AAAAAAAAAAA")
+        self.assertEqual(args[-2:], ["--", "AAAAAAAAAAA"])
         self.assertEqual(Path(args[args.index("--out") + 1]),
                          paths.exports_dir() / "gta6" / date.today().isoformat())
         self.assertNotIn("--allow-say", args)
@@ -103,7 +121,7 @@ class LifecycleTests(Helpers):
         self.clip.duration = 3 * 3600
         jid = self.gated()
         self.assertEqual(self.job(jid)["section"], "0:00-1:30:00")
-        self.assertEqual(self.clip.args_of("fetch"), [["fetch", "AAAAAAAAAAA", "--section", "0:00-1:30:00"]])
+        self.assertEqual(self.clip.args_of("fetch"), [["fetch", "--section", "0:00-1:30:00", "--", "https://www.youtube.com/watch?v=AAAAAAAAAAA"]])
 
     def test_no_picks_means_skipped_with_the_reason(self):
         self.agent.script.append(0)
@@ -280,6 +298,7 @@ class WaitingTests(Helpers):
             self.assertEqual(self.job(jid)["status"], "waiting_budget")
             self.assertEqual(self.agent.calls, [])
             self.assertIsNone(store.get_alert("budget.reached")["resolved_at"])
+            self.assertIn("Tageslimit von 5,00 € ist erreicht (0,00 € heute)", store.get_alert("budget.reached")["message"])
             self.assertEqual(pipeline.resume_waiting(), [])
         self.assertEqual(pipeline.resume_waiting(), [jid])
         self.assertIsNotNone(store.get_alert("budget.reached")["resolved_at"])
@@ -497,7 +516,7 @@ class RestartTests(Helpers):
 
     def test_killed_mid_analyze_drops_the_truncated_audio_first(self):
         jid = pipeline.enqueue_url(URL, "gta6")
-        self.clip._fetch(["fetch", "AAAAAAAAAAA"], lambda line: None, "gta6")
+        self.clip._fetch(["fetch", "--", "https://www.youtube.com/watch?v=AAAAAAAAAAA"], lambda line: None, "gta6")
         jd = paths.jobs_dir() / "AAAAAAAAAAA"
         (jd / "audio.wav").write_bytes(b"trunc")
         (jd / "transcript.json").write_text('{"words": [')  # half written
@@ -509,8 +528,8 @@ class RestartTests(Helpers):
 
     def test_killed_between_select_and_picks_does_not_ask_claude_again(self):
         jid = pipeline.enqueue_url(URL, "gta6")
-        self.clip._fetch(["fetch", "AAAAAAAAAAA"], lambda line: None, "gta6")
-        self.clip._analyze(["analyze", "AAAAAAAAAAA"], lambda line: None, "gta6")
+        self.clip._fetch(["fetch", "--", "https://www.youtube.com/watch?v=AAAAAAAAAAA"], lambda line: None, "gta6")
+        self.clip._analyze(["analyze", "--", "AAAAAAAAAAA"], lambda line: None, "gta6")
         sel = {"picks": [make_pick(1), make_pick(2)], "reasons": ["a", "b"], "click_triggers": ["x", "y"],
                "no_clip_reason": None, "check_report": {}, "turns": 2, "usage": {}}
         self.crash(jid, stage="gate", result={"selection": sel})
@@ -543,6 +562,22 @@ class RestartTests(Helpers):
         self.assertFalse((folder / "first hook.mp4").exists())
         self.assertEqual(len(video["variants"]), 5)
 
+    def test_a_render_left_running_by_a_killed_server_is_stopped_before_its_folder_is_touched(self):
+        jid, pick, rid, folder = self.render_job_with_leftover(manifest=False)
+        seen = []
+
+        def reap(module, args):  # what the stage asks to stop, and whether the half-written folder still existed
+            seen.append((module, list(args[:3]), folder.exists()))
+            return [4242] if args[0] == "render" and not seen[1:] else []
+        with mock.patch.object(worker, "reap_orphans", reap):
+            self.drive()
+        self.assertEqual(self.job(rid)["status"], "done")
+        self.assertEqual(seen[0], ("clipper", ["render", "--picks", str(paths.tmp_dir() / f"render-{rid}.json")], True))
+        events = [e["message"] for e in store.job_events(rid)]
+        stopped = next(i for i, m in enumerate(events) if "PID 4242" in m)
+        removed = next(i for i, m in enumerate(events) if "Unvollständiges video 1" in m)
+        self.assertLess(stopped, removed)  # the leftover process can't write into the folder while it's cleaned up
+
     def test_killed_after_render_before_the_db_write_adopts_the_folder(self):
         jid, pick, rid, folder = self.render_job_with_leftover(manifest=True)
         self.drive()
@@ -571,7 +606,7 @@ class SourceTests(Helpers):
         self.assertIsNone(pipeline.source_expires_at(self.job(jid)))
         pipeline.approve_pick(self.picks(jid)[0]["id"])
         self.drive()
-        self.assertEqual(self.clip.args_of("fetch")[-1], ["fetch", "AAAAAAAAAAA", "--section", "0:00-1:30:00"])
+        self.assertEqual(self.clip.args_of("fetch")[-1], ["fetch", "--section", "0:00-1:30:00", "--", "https://www.youtube.com/watch?v=AAAAAAAAAAA"])
         self.assertEqual(store.list_videos()[1], 1)
 
     def test_source_expires_at_follows_the_cleanup_rules(self):
@@ -601,7 +636,7 @@ class LiveChunkTests(Helpers):
         self.assertEqual(self.job(jid)["stage"], "render")
         self.assertEqual(self.clip.args_of("live done"), [])
         self.drive()
-        self.assertEqual(self.clip.args_of("live done"), [["live", "done", cj]])
+        self.assertEqual(self.clip.args_of("live done"), [["live", "done", "--", cj]])
         job = self.job(jid)
         self.assertEqual((job["status"], job["stage"]), ("done", "finished"))
         self.assertTrue(job["result"]["live_done"])
@@ -614,7 +649,7 @@ class LiveChunkTests(Helpers):
         [jid] = pipeline.enqueue_live_chunks("gta6", [cj])
         self.drive()
         self.assertEqual(self.job(jid)["status"], "skipped")
-        self.assertEqual(self.clip.args_of("live done"), [["live", "done", cj]])
+        self.assertEqual(self.clip.args_of("live done"), [["live", "done", "--", cj]])
 
     def test_deleted_live_source_blocks_approval_and_fails_the_render_clearly(self):
         cj = "live-xqc-twitch-20261117-130000"
@@ -656,7 +691,7 @@ class DubAndUploadTests(Helpers):
         self.drive()
         self.assertEqual(self.job(did)["status"], "done", self.job(did)["error"])
         self.assertEqual(self.agent.dub_calls, [(did, 1, "es")])
-        self.assertEqual(self.clip.args_of("dub segments"), [["dub", "segments", "AAAAAAAAAAA", "--pick", "1"]])
+        self.assertEqual(self.clip.args_of("dub segments"), [["dub", "segments", "--pick", "1", "--", "AAAAAAAAAAA"]])
         dub = store.list_videos(lang="es")[0][0]
         self.assertEqual((dub["pick_id"], dub["job_id"]), (pick["id"], did))
         self.assertTrue(dub["folder"].endswith(f"gta6-es/{date.today().isoformat()}/video 1"))
@@ -779,6 +814,13 @@ class UnitTests(unittest.TestCase):
         parse = pipeline._render_progress(3)
         self.assertIn("trenne Stimmen", parse("[render] video 4 (1 of 1): separating voices + diarizing ..."))
         self.assertEqual(parse("[render]   video 4/Why did Kai run.mp4"), "Rendere Video 4: Hook-Variante 1 von 3 …")
+
+    def test_a_commands_json_result_is_not_stored_as_log_lines(self):
+        for line in ('[', '  {', '    "titles": [', '      "3 Things Kai Noticed In GTA 6 \\ud83d\\ude2d",',
+                     '      "POV: You Finally Play GTA 6"', '    "rank": 2,', '      12.5,', '      null', '  },', ']'):
+            self.assertTrue(worker.JSON_LINE_RE.match(line), line)
+        for line in ("[render] video 1/Why did Kai run.mp4", "ERROR: boom", '"quoted" said Kai', "Fertig: video 4"):
+            self.assertFalse(worker.JSON_LINE_RE.match(line), line)
 
     def test_reap_orphans_stops_a_leftover_of_the_same_command(self):
         marker = f"orphan-test-{os.getpid()}"

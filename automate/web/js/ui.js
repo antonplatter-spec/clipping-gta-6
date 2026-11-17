@@ -4,7 +4,7 @@ import {
   dialogStore, errorText, useNow,
 } from './lib.js';
 import ICONS from '../vendor/lucide-icons.js';
-import { JOB_STATUS, PICK_STATUS } from './labels.js';
+import { JOB_STATUS, JOB_STATUS_RENDERING, PICK_STATUS } from './labels.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // Icons, buttons, badges
@@ -53,8 +53,10 @@ export function Badge({ tone = 'neutral', dot, icon, children, class: klass, tit
     ${icon && html`<${Icon} name=${icon} size=${13} />`}${children}</span>`;
 }
 
-export function JobStatusBadge({ status }) {
-  const s = JOB_STATUS[status] || { label: status, tone: 'neutral' };
+export function JobStatusBadge({ status, stage }) {
+  // a source past its approval waits for its own renders, not for the owner (auto approval, or all picks decided)
+  const s = status === 'waiting_approval' && stage === 'render' ? JOB_STATUS_RENDERING
+    : JOB_STATUS[status] || { label: status, tone: 'neutral' };
   return html`<${Badge} tone=${s.tone} dot=${status === 'running'}>${s.label}<//>`;
 }
 

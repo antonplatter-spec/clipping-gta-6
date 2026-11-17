@@ -19,6 +19,7 @@ that first checks this worker still holds the job, so a cancel that won is never
     start_workers(stop) -> [threads]       request_cancel(job_id) -> bool       wake()
     process_next(worker_id, kinds=None, *, stop=None, now=None) -> job id | None   claim + run one job in this thread
     reap_orphans(module, args) -> [pids]   stop leftovers of an earlier server run executing the same command
+                                           (Run.reap(args) does it for a stage before it adopts that command's output)
     active_jobs() -> [job ids]
 """
 import collections
@@ -49,7 +50,8 @@ MAX_EVENTS = 400           # output lines stored per claimed run ...
 MAX_ERROR_EVENTS = 100     # ... plus this many error-looking lines after that
 MAX_EVENT_CHARS = 1000
 NOISE_RE = re.compile(r"^\[download\]\s+[\d.]+%|^frame=|\btime=\d+:\d\d:\d\d|^\s*\d+%\|| \d+(\.\d+)?%\s*$")
-JSON_LINE_RE = re.compile(r'^\s*([\[\]{}],?|"[^"]*":.*)$')  # a command's JSON result: stored as data, not as events
+# a command's JSON result (indented, one value per line): stored as data, not as events
+JSON_LINE_RE = re.compile(r'^\s*([\[\]{}],?|"(?:[^"\\]|\\.)*"\s*(:.*|,?)|-?\d[\d.eE+-]*,?|true,?|false,?|null,?)\s*$')
 ERRORISH_RE = re.compile(r"error|exception|traceback|failed|warning|refused|denied|not found", re.I)
 
 _active = {}
@@ -166,6 +168,7 @@ class Run:
         self._events = 0
         self._dropped = 0
         self._noise_at = 0.0
+        self._line_level = "debug"  # raw command output; the in-process calls' German status lines are "info"
 
     # -- state
     def abort(self, reason):
@@ -243,7 +246,9 @@ class Run:
             text = parse(line) if parse else None
             if text:
                 self.progress(text)
-            self._store_line(line, noisy=bool(text) or bool(NOISE_RE.search(line)))
+            # only progress-bar output is throttled; a line a parser turned into a status ("Claude liest das
+            # Transkript", "[render] video 1/…mp4") is part of the job's story and kept
+            self._store_line(line, noisy=bool(NOISE_RE.search(line)))
         if self._pending_progress and time.monotonic() - self._progress_at >= PROGRESS_EVERY_S:
             self._write_progress(self._pending_progress)
         return got
@@ -262,7 +267,7 @@ class Run:
             self._dropped += 1
             return
         self._events += 1
-        self.event(line, "warning" if errorish else "debug")
+        self.event(line, "warning" if errorish else self._line_level)
 
     def _flush_dropped(self):
         if self._dropped:
@@ -309,15 +314,21 @@ class Run:
         t.start()
         return t, box
 
+    def reap(self, args, module="clipper"):
+        """Stop what an earlier server run left running for this job (`python -m <module> <args…>`): before a stage
+        looks at that command's half-written output, nothing may still be writing it."""
+        killed = reap_orphans(module, [str(a) for a in args])
+        if killed:
+            self.event(f"Übrig gebliebene Prozesse eines früheren Laufs beendet (PID {', '.join(map(str, killed))})",
+                       "warning")
+        return killed
+
     def clipper(self, args, *, timeout, stall=None, progress=None, module="clipper", input=None):
         """`python -m clipper <args>` for this job's profile -> ProcResult (any exit code). Canceled -> Canceled;
         timed out or hung -> StageError (retryable)."""
         self.check()
         args = [str(a) for a in args]
-        killed = reap_orphans(module, args)
-        if killed:
-            self.event(f"Übrig gebliebene Prozesse eines früheren Laufs beendet (PID {', '.join(map(str, killed))})",
-                       "warning")
+        self.reap(args, module)
         t, box = self._thread(args[0], lambda: runtime.run_clipper(
             args, self.profile, timeout=timeout, on_line=self.log, cancel=self.cancel, module=module, input=input))
         finished = self._wait(t, parse=progress, stall=stall)
@@ -368,8 +379,12 @@ class Run:
         `log=run.log` / `on_progress=run.on_progress` / `cancel=run.cancel` yourself as the function takes them."""
         self.check()
         t, box = self._thread(getattr(fn, "__name__", "call"), lambda: fn(*args, **kwargs))
-        finished = self._wait(t, parse=progress or (lambda line: f"Claude: {line[:100]}"),
-                              deadline=time.monotonic() + timeout)
+        self._line_level = "info"
+        try:
+            finished = self._wait(t, parse=progress or (lambda line: f"Claude: {line[:100]}"),
+                                  deadline=time.monotonic() + timeout)
+        finally:
+            self._line_level = "debug"
         self._flush_dropped()
         if self.reason in ("cancel", "lost") or (not finished and self.reason == "shutdown"):
             raise pipeline.Canceled(self.reason)

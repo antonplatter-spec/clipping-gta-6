@@ -161,7 +161,7 @@ REGISTRY = {
     "claude.daily_limit_eur": S(
         "number", 5.0, "Tageslimit",
         "Ist das Limit erreicht, warten neue Claude-Anfragen bis zum nächsten Tag. 0 = kein Limit.", "claude",
-        min=0, max=10000, step=0.5, unit="€"),
+        min=0, max=10000, step=0.01, unit="€"),  # a coarser step makes the browser refuse e.g. 2,75 €
     "claude.usd_to_eur": S(
         "number", 0.92, "Wechselkurs USD → EUR",
         "Claude rechnet in US-Dollar ab; mit diesem Kurs werden die Kosten in Euro angezeigt.", "claude",
