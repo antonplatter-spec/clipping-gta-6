@@ -702,8 +702,8 @@ def _stage_fetch(run, job):
         params.update(probed=True, duration=info.get("duration"))
         if not section and params.get("auto_section", True):
             section = daily_section(info.get("duration"), store.get_setting("prefs.daily_max_minutes"))
-        run.update(params=params, section=section, title=job.get("title") or info.get("title"),
-                   channel=job.get("channel") or info.get("channel"))
+        job = run.update(params=params, section=section, title=job.get("title") or info.get("title"),
+                         channel=job.get("channel") or info.get("channel"))
         if section:
             run.event(f"Langes Video ({(info.get('duration') or 0) / 60:.0f} Min.): lade nur {section}")
     run.progress("Lade Video …", force=True)
@@ -1468,7 +1468,7 @@ def _edit_errors(data, changes):
                 errs[key] = "Story-Cuts haben keine einzelne Start-/Endzeit"
             elif not isinstance(changes[key], (int, float)) or isinstance(changes[key], bool) or changes[key] < 0:
                 errs[key] = "Sekunden (Zahl ≥ 0)"
-    if not errs and ("start" in changes or "end" in changes) and not data.get("segments"):
+    if ("start" in changes or "end" in changes) and not data.get("segments") and not {"start", "end"} & set(errs):
         s, e = float(changes.get("start", data.get("start", 0))), float(changes.get("end", data.get("end", 0)))
         if e <= s:
             errs["end"] = "Ende muss nach dem Start liegen"

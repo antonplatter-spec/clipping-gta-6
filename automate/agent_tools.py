@@ -4,9 +4,15 @@
                                             prompt prefix, so they never change between requests or jobs)
     JobContext.load(job_row, ...)           everything a tool needs about the job (dir, time base, prefs, limits)
     run_tool(ctx, name, input) -> ToolResult     grep_transcript, view_frame, find_line, check, simulate
-    submit(ctx, input) -> Submission | ToolResult   submit_picks: validation + `clipper check`; accepted or an error
+    submit(ctx, input, round_no=, max_rounds=) -> Submission | ToolResult   submit_picks: validation + `clipper check`
     validate_picks(ctx, picks, draft=False) -> (clean, reasons, triggers, errors)
+    resolve_name(name) -> declared tool name | None   (accepts "Submit-Picks"-style near misses)
     sheet_image(path) / image_block(path, max_side)   contact sheets and frames as downscaled base64 image blocks
+    candidates(ctx) / music_moods(ctx)       facts for the first message
+
+Validation beyond `clipper check`: types and enums of clip.md step 7, start < end, the 60 s cap, hooks paired with
+titles, `why` + a named `click_trigger` per pick, max_picks, the voiceover preference, no footage shared between the
+picks of one submission (> 3 s), and no hook or title opening with the same three words as another video's.
 
 Tools run as subprocesses (`runtime.run_clipper` / `runtime.run_bridge`), never by importing clipper here. Results
 are compact and bounded (match caps, window caps, truncation notes, downscaled images, a frame budget per job) so a
@@ -435,6 +441,8 @@ def view_frame(ctx, inp):
         if res.returncode != 0 or not last or not Path(last).exists():
             raise ToolError(f"no frame at {sec} s: " + (res.stderr.strip().splitlines() or ["ffmpeg failed"])[-1])
         block, (w, h) = image_block(last, FRAME_SIDE)
+        if Path(last).resolve().parent == (d / "review").resolve():  # not a contact sheet: keep review/ to those
+            Path(last).unlink(missing_ok=True)
         text = (f"Frame at {_fmt_s(sec)} s of job {name} ({w}x{h}) with a 10 % grid (lines labelled .1-.9 from the "
                 "left and the top). For a split layout give the facecam box as fractions [x, y, w, h], e.g. "
                 "[0.70, 0.05, 0.28, 0.32].")

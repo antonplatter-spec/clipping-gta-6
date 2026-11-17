@@ -83,6 +83,8 @@ def _type_errors(overrides, base, prefix=""):
         elif isinstance(b, (int, float)) and not isinstance(b, bool) and \
                 (not isinstance(v, (int, float)) or isinstance(v, bool)):
             errors[path] = "Muss eine Zahl sein."
+        elif isinstance(b, (int, float)) and b >= 0 and isinstance(v, (int, float)) and v < 0:
+            errors[path] = "Darf nicht negativ sein."
         elif isinstance(b, list) and not isinstance(v, list):
             errors[path] = "Muss eine Liste sein."
         elif isinstance(b, dict) and not isinstance(v, dict):
@@ -93,6 +95,7 @@ def _type_errors(overrides, base, prefix=""):
                     re.compile(str(rx))
                 except re.error as e:
                     errors[f"{path}.{i}"] = f"Ungültiger regulärer Ausdruck: {e}"
+                    errors.setdefault(path, f"Muster {i + 1} ist kein gültiger regulärer Ausdruck.")
     return errors
 
 

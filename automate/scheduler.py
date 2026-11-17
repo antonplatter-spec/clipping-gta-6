@@ -14,6 +14,7 @@ timers of clipper/schedule.py (nothing is installed in the OS).
 All runs are recorded in `runs` (kind scan | live_watch | cleanup | health) with a German summary.
 
     start_scheduler(stop) -> [threads] ; next_scan_time(now=None) -> float | None ; run_scan_now(profile=None)
+    scan_running(profile=None) -> bool   a scan (scheduled or "Jetzt suchen") is in progress
     due_scan(profile, now=None) -> slot timestamp | None ; tick(now=None) ; live_tick(trigger="schedule")
     run_cleanup(trigger="schedule", dry_run=False) -> summary ; wake()
 """
@@ -34,6 +35,7 @@ T_LIVE_TICK = 20 * 60
 
 _wake_event = threading.Event()
 _cleanup_lock = threading.Lock()
+_cleanup_runner = None
 _live_lock = threading.Lock()
 
 
@@ -86,6 +88,10 @@ def next_scan_time(now=None):
     today = datetime.fromtimestamp(now).date()
     upcoming = [ts for ts in _slots(today) if ts > now] or _slots(today + timedelta(days=1))
     return upcoming[0] if upcoming else None
+
+
+def scan_running(profile=None):
+    return pipeline.scan_running(profile)
 
 
 def run_scan_now(profile=None):
@@ -153,7 +159,9 @@ def tick(now=None, stop=None):
             except pipeline.PipelineError:
                 pass
     if _cleanup_due(now) and _cleanup_lock.acquire(blocking=False):
-        threading.Thread(target=_cleanup_thread, args=("schedule",), name="cleanup", daemon=True).start()
+        global _cleanup_runner
+        _cleanup_runner = threading.Thread(target=_cleanup_thread, args=("schedule",), name="cleanup", daemon=True)
+        _cleanup_runner.start()
     return started
 
 
@@ -206,7 +214,12 @@ def _live_profile(profile, chunk, trigger, stop):
         data = runtime.run_bridge("live_tick", {"chunk": chunk, "health": True, "restart_stalled": True}, profile,
                                   timeout=T_LIVE_TICK, cancel=stop)
     except runtime.BridgeError as e:
-        msg = "Live-Check unterbrochen" if e.canceled else f"Live-Check fehlgeschlagen: {e.message}"
+        if e.canceled:
+            msg = "Live-Check unterbrochen"
+        elif "yt-dlp" in e.message and ("No such file" in e.message or "not found" in e.message):
+            msg = f"Live-Check fehlgeschlagen: {pipeline.YTDLP_MISSING}"
+        else:
+            msg = f"Live-Check fehlgeschlagen: {e.message}"
         health.store_live(profile, None, error=msg)
         store.finish_run(rid, False, {"message": msg, "interrupted": bool(e.canceled)})
         return {"message": msg}

@@ -61,6 +61,7 @@ def fake_modules():
     pipeline.retry_job = mock.Mock(side_effect=lambda jid: store.update_job(jid, status="queued"))
     pipeline.cancel_job = mock.Mock(side_effect=lambda jid: store.update_job(jid, status="canceled"))
     pipeline.on_settings_changed = mock.Mock()
+    pipeline.source_expires_at = mock.Mock(return_value=1234.5)
     health = types.ModuleType("automate.health")
     health.live_status = mock.Mock(return_value={"streams": [], "recorders": 0, "checked_at": None})
     health.system_report = mock.Mock(return_value={
@@ -93,6 +94,9 @@ class ApiCase(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.addCleanup(db.close)
+        quiet = logging.getLogger("automate")
+        self.addCleanup(quiet.setLevel, quiet.level)
+        quiet.setLevel(logging.CRITICAL)  # refused hosts etc. are logged on purpose; keep the test output clean
         store.ensure_profile("gta6", True)
         store.ensure_profile("gta-rp", False)
         self.fakes = fake_modules() if self.modules else {n: None for n in ("automate.pipeline", "automate.health",
@@ -473,6 +477,7 @@ class SecurityTests(ApiCase):
                                            user["totp_secret"], "PENDINGTOTPSECRETXYZ", c.token_hash,
                                            *user["recovery_codes"], "GOCSPX", "ya29."]
         records = []
+        logging.getLogger("automate").setLevel(logging.DEBUG)
         handler = logging.Handler()
         handler.emit = lambda rec: records.append(rec.getMessage())
         logging.getLogger().addHandler(handler)
@@ -723,7 +728,8 @@ class PickTests(ApiCase):
         p = d["items"][0]
         self.assertEqual((p["duration"], p["source_link"]), (18.5, "https://www.youtube.com/watch?v=abc&t=112s"))
         self.assertEqual(p["sheets"], [f"/api/jobs/{self.job}/sheets/cand_01.jpg"])
-        self.assertGreater(p["source_expires_at"], time.time() + 86400)  # keep_sources_days after the last change
+        self.assertEqual(p["source_expires_at"], 1234.5)
+        self.assertEqual(self.pipeline.source_expires_at.call_args[0][0]["clipper_job"], "job1")
         self.assertEqual((p["job"]["title"], p["video_id"]), ("Stream", None))
         second = d["items"][1]
         self.assertEqual((second["duration"], second["sheets"]), (10.0, [f"/api/jobs/{self.job}/sheets/cand_02.jpg"]))
@@ -887,7 +893,7 @@ class SourceConfigTests(ApiCase):
         doc = self.c.get("/api/profiles/gta6/config").json()
         self.assertEqual(set(doc), {"base", "overrides", "effective"})
         r = self.c.put("/api/profiles/gta6/config", json={"overrides": {"topic_patterns": ["gta", "ok", "(bad"]}})
-        self.assertEqual(set(r.json()["error"]["fields"]), {"topic_patterns.2"})
+        self.assertEqual(set(r.json()["error"]["fields"]), {"topic_patterns", "topic_patterns.2"})
         r = self.c.put("/api/profiles/gta6/config", json={"overrides": {"hashtags": ["#gta6"], "require_topic": 1}})
         self.assertEqual(set(r.json()["error"]["fields"]), {"require_topic"})
         r = self.c.put("/api/profiles/gta6/config", json={"overrides": {"hashtags": ["#gta6", "#x"]}})
@@ -896,8 +902,8 @@ class SourceConfigTests(ApiCase):
         self.assertEqual(self.c.get("/api/profiles/nope/config").status_code, 404)
         r = self.c.put("/api/settings/watchlist", json={"overrides": {"weights": {"loudness": "loud"}}})
         self.assertEqual(set(r.json()["error"]["fields"]), {"weights.loudness"})
-        r = self.c.put("/api/settings/watchlist", json={"overrides": {"weights": 3}})
-        self.assertEqual(r.status_code, 422)
+        r = self.c.put("/api/settings/watchlist", json={"overrides": {"weights": 3, "min_free_gb": -5}})
+        self.assertEqual(set(r.json()["error"]["fields"]), {"weights", "min_free_gb"})
         r = self.c.put("/api/settings/watchlist", json={"overrides": {"min_free_gb": 50}})
         self.assertEqual(r.json()["effective"]["min_free_gb"], 50)
         import yaml

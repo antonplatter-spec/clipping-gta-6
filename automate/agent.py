@@ -14,9 +14,10 @@ daily limit, checked before every request), AgentError (.retryable, .code; str(e
 AgentCanceled when `cancel` is set). The agent never writes the DB except usage rows; it keeps a copy of each
 conversation (images elided) in data/tmp/agent/job-<id>/ for debugging.
 
-Request shape: model from claude.model, adaptive thinking (the only mode on Sonnet 5.5 / Opus 5.5) with effort
-from claude.effort, tool_choice auto (forced tool use is a 400 on these models: the prompt steers, and a turn without
-a tool call gets a nudge), server-side refusal fallback ("default"), streaming (so cancel works mid-generation).
+Request shape: model from claude.model, adaptive thinking (the only mode on Sonnet 5.5 / Opus 5.5; summarized, so
+the saved conversations show Claude's reasoning) with effort from claude.effort, tool_choice auto (forced tool use
+is a 400 on these models: the prompt steers, and a turn without a tool call gets a nudge), server-side refusal
+fallback ("default"), streaming (so cancel works mid-generation).
 Caching: tools + system form a 1-hour cached prefix shared by every job of a profile (the breakpoint is on the
 research block); top-level automatic caching (5 minutes) carries the growing conversation within a job. Usage is
 logged per request (per served model when a fallback ran) under purpose select | fix | dub_translate | test.
@@ -47,6 +48,8 @@ MAX_PAUSES = 3
 MAX_UPFRONT_SHEETS = 10
 CANDIDATES_MD_CHARS = 60000
 MODEL_LABELS = {"claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-opus-5-5": "Claude Opus 5.5"}
+# Thinking is always on for these models; "summarized" costs the same and makes the saved conversations readable.
+THINKING = {"type": "adaptive", "display": "summarized"}
 STOP_REASONS = ("end_turn", "tool_use", "max_tokens", "stop_sequence", "pause_turn")
 NUDGE = ("You ended your turn without calling a tool, and nothing is saved until submit_picks accepts it. Continue "
          "with the tools, and finish with submit_picks: your picks, or an empty list with no_clip_reason if nothing "
@@ -357,8 +360,8 @@ def _first_message(ctx, max_turns, max_fix):
                                                  f"{data.get('recommended', '?')})"),
         ("Hook variants per video", _hooks_pref(ctx.hooks_per_video)),
         ("Voiceover", VOICE_TEXT.get(ctx.voice, ctx.voice)),
-        ("Hooks and titles of earlier videos", "; ".join(f"\"{o}\"" for o in openers) + " (don't start a hook or "
-         "title with the same three words as any of these)" if openers else "none yet"),
+        ("How earlier videos' hooks and titles open", "; ".join(f"\"{o}\"" for o in openers) + " (don't start a "
+         "hook or title with the same three words as any of these)" if openers else "no earlier videos yet"),
         ("Music", music_text),
         ("Requests", f"{max_turns} in total for this job (every round trip with tool results is one)"),
         ("Fix rounds", f"{max_fix} rejected submission(s) come back for fixing; the next rejection fails the job"
@@ -379,7 +382,7 @@ def build_select_request(job, *, max_picks, avoid_openers=(), cancel=None, log=N
     except T.ToolCanceled:
         raise AgentCanceled() from None
     params = {"model": model, "max_tokens": MAX_TOKENS, "system": build_system_prompt(job["profile"]),
-              "tools": T.TOOLS, "tool_choice": {"type": "auto"}, "thinking": {"type": "adaptive"},
+              "tools": T.TOOLS, "tool_choice": {"type": "auto"}, "thinking": THINKING,
               "output_config": {"effort": effort}, "cache_control": {"type": "ephemeral"}, "betas": BETAS,
               "fallbacks": "default", "messages": [first]}
     return ctx, params
@@ -667,7 +670,7 @@ def translate_dub(job_id, pick_idx, lang, segments_report, *, log=None, cancel=N
     sess = _Session(make_client(key), job_id, cancel)
     messages = [{"role": "user", "content": prompts.dub_message(lang, segments_report)}]
     params = {"model": model, "max_tokens": DUB_MAX_TOKENS, "system": prompts.dub_system(lang),
-              "thinking": {"type": "adaptive"},
+              "thinking": THINKING,
               "output_config": {"effort": effort, "format": {"type": "json_schema", "schema": prompts.DUB_SCHEMA}},
               "betas": BETAS, "fallbacks": "default", "messages": messages}
     english = segments_report.get("english") or {}

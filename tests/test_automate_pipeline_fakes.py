@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from automate import db, paths, runtime, store, worker
+from automate import db, health, paths, runtime, store, worker
 from automate.runtime import ProcResult
 
 KEY = "sk-ant-test-0123456789abcdef"
@@ -336,11 +336,22 @@ class PipelineCase(unittest.TestCase):
         for patcher in (mock.patch.object(runtime, "run_clipper", self.clip.run_clipper),
                         mock.patch.object(runtime, "run_bridge", self.clip.run_bridge),
                         mock.patch.object(worker, "reap_orphans", lambda module, args: []),
-                        mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt})):
+                        mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt}),
+                        mock.patch.object(health, "_live", None),
+                        mock.patch.dict(health._sys_cache, {"at": 0.0, "data": None})):
             patcher.start()
             self.addCleanup(patcher.stop)
         from automate import pipeline
         pipeline._cfg_cache.clear()
+        self.addCleanup(self.join_background)  # runs first: before the temp dirs and fakes go away
+
+    @staticmethod
+    def join_background():
+        """Scan and cleanup threads a test started must end while its temp dirs and fakes still exist."""
+        from automate import pipeline, scheduler
+        for t in [*pipeline._scan_threads.values(), scheduler._cleanup_runner]:
+            if t is not None:
+                t.join(10)
 
     def drive(self, kinds=None, limit=100, now=None):
         """Run queued jobs in this thread until none is claimable; returns the job ids run."""

@@ -2,8 +2,8 @@
 
 A pick row from the store is enriched for the dashboard (`Pick` in api.js): `duration` (all segments), `source_link`
 (the source at the pick's start, from jobs/<id>/job.json's url + offset), `sheets` (contact sheets of the
-candidates/scenarios the pick overlaps, most overlap first), `source_expires_at` (when `clipper cleanup` deletes the
-source video: keep_live_sources_hours after `live done`, else keep_sources_days after the job folder's last change).
+candidates/scenarios the pick overlaps, most overlap first), `source_expires_at` (pipeline.source_expires_at: when
+`clipper cleanup` deletes the source video; None while the pipeline module is missing).
 Edits and decisions go through automate.pipeline (it rewrites picks.json and re-checks).
 """
 import json
@@ -13,9 +13,9 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Query, Request
 
-from .. import paths, runtime, store
+from .. import paths, store
 from . import files
-from .common import ApiError, Form, invalid, mapped, need, not_found, page
+from .common import ApiError, Form, invalid, mapped, need, not_found, optional, page
 
 router = APIRouter()
 
@@ -66,22 +66,6 @@ def timestamp_link(url, seconds):
     return url
 
 
-class _Context:
-    """Per-request caches: the effective config of a profile (cleanup times)."""
-
-    def __init__(self):
-        self.cfg = {}
-
-    def config(self, profile):
-        if profile not in self.cfg:
-            try:
-                self.cfg[profile] = runtime.merge_config(runtime.watchlist_config()["effective"],
-                                                         runtime.profile_config(profile)["overrides"])
-            except Exception:
-                self.cfg[profile] = {}
-        return self.cfg[profile]
-
-
 def _segments(data):
     if isinstance(data.get("segments"), list) and data["segments"]:
         return [s for s in data["segments"] if isinstance(s, dict)]
@@ -116,24 +100,20 @@ def _sheets(job_id, d, own):
     return [f"/api/jobs/{job_id}/sheets/{quote(n)}" for n in names]
 
 
-def _expires(d, cfg):
-    try:
-        if not (d / "source.mp4").exists():
+def _expires_fn():
+    pipeline = optional("pipeline")
+    fn = getattr(pipeline, "source_expires_at", None)
+
+    def expires(job):
+        try:
+            return fn(job) if fn else None
+        except Exception:
             return None
-        live_h, days = cfg.get("keep_live_sources_hours"), cfg.get("keep_sources_days")
-        done = d / "live_done"
-        if done.exists() and live_h is not None:
-            return done.stat().st_mtime + float(live_h) * 3600
-        if days is None:
-            return None
-        newest = max(f.stat().st_mtime for f in d.iterdir() if f.is_file())
-        return newest + float(days) * 86400
-    except (OSError, ValueError, TypeError):
-        return None
+    return expires
 
 
-def enrich(pick, ctx=None):
-    ctx = ctx or _Context()
+def enrich(pick, expires=None):
+    expires = expires or _expires_fn()
     data = pick.get("data") or {}
     job = pick.get("job") or {}
     cj = job.get("clipper_job")
@@ -147,13 +127,13 @@ def enrich(pick, ctx=None):
     out = dict(pick)
     out.update(duration=round(duration, 2), source_link=link,
                sheets=_sheets(pick["job_id"], d, own) if d else [],
-               source_expires_at=_expires(d, ctx.config(pick.get("profile"))) if d else None)
+               source_expires_at=expires(job) if d else None)
     return out
 
 
 def enrich_many(picks):
-    ctx = _Context()
-    return [enrich(p, ctx) for p in picks]
+    expires = _expires_fn()
+    return [enrich(p, expires) for p in picks]
 
 
 def _get(pick_id):

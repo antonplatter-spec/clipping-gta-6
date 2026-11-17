@@ -120,8 +120,6 @@ class YoutubeCase(unittest.TestCase):
         self.addCleanup(mods.stop)
         store.ensure_profile("gta6", True)
         self.google = FakeGoogle()
-        for target, value in ((youtube, "transport", self.google), (youtube, "_sleep", self.slept)):
-            p = mock.patch.object(target, value if isinstance(value, str) else value, value)
         p1 = mock.patch.object(youtube, "transport", self.google)
         p2 = mock.patch.object(youtube, "_sleep", self.slept)
         for p in (p1, p2):
@@ -314,7 +312,8 @@ class UploadTests(YoutubeCase):
         self.google.plan = ["ok", "404", "ok", "401", "ok", "ok"]
         res = youtube.upload_variant(var, self.aid, "private", title="Eigener Titel", description="Eigene Beschreibung")
         self.assertEqual(res["video_id"], "VID123")
-        self.assertEqual(self.google.sessions, 2)
+        posts = [c for c in self.google.calls if c[0] == "POST" and c[1].startswith(youtube.UPLOAD_URL)]
+        self.assertEqual(len(posts), 2)  # the lost session was replaced once
         self.assertEqual(bytes(self.google.data), self.payload)
         self.assertEqual(self.google.metadata["snippet"]["title"], "Eigener Titel")
         self.assertEqual(self.google.metadata["snippet"]["description"], "Eigene Beschreibung\n\n#Shorts")
@@ -342,7 +341,7 @@ class UploadTests(YoutubeCase):
             {"reason": "quotaExceeded", "domain": "youtube.quota"}]}})]
         with self.assertRaises(youtube.YouTubeError) as e:
             youtube.upload_variant(var, self.aid, "public")
-        self.assertIn("Kontingent", str(e.exception))
+        self.assertIn("kontingent", str(e.exception))
         self.assertTrue(e.exception.retryable)
         with self.assertRaises(youtube.YouTubeError):
             youtube.upload_variant(var, self.aid, "everyone")

@@ -1,0 +1,246 @@
+"""automate.scheduler: scan slots with an injected clock (a slot missed while the PC slept runs once; clock
+changes; no double runs), scans the way `clipper daily` does them (creators first, dedupe, sections, the daily
+quota, a failing watch), the live service (chunks queued once, status cached, live done for ended chunks), the daily
+cleanup and the threads' start/stop."""
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_automate_pipeline_fakes import PipelineCase, write_live_chunk  # noqa: E402
+
+from automate import health, pipeline, runtime, scheduler, store, worker  # noqa: E402
+
+
+def at(hhmm, days=0):
+    d = datetime.now().date() + timedelta(days=days)
+    h, m = map(int, hhmm.split(":"))
+    return datetime(d.year, d.month, d.day, h, m).timestamp()
+
+
+def clock(ts):
+    return mock.patch.object(store, "_now", lambda: ts)
+
+
+def join_scans():
+    for t in list(pipeline._scan_threads.values()):
+        t.join(10)
+
+
+class SlotTests(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        store.set_settings({"schedule.scan_times": ["09:00", "18:00"], "automation.enabled": True})
+
+    def test_due_slot_and_a_missed_slot_after_sleep_runs_once(self):
+        self.assertIsNone(scheduler.due_scan("gta6", at("08:00")))
+        self.assertEqual(scheduler.due_scan("gta6", at("09:05")), at("09:00"))
+        with clock(at("09:05")):
+            store.start_run("scan", "gta6", "schedule")
+        self.assertIsNone(scheduler.due_scan("gta6", at("17:59")))
+        # the PC slept from 10:00 to 20:30: only the latest slot (18:00) is due, and only once
+        with clock(at("20:30")):
+            started = scheduler.tick(now=at("20:30"))
+            join_scans()
+            self.assertEqual(len(started), 1)
+            self.assertEqual(scheduler.tick(now=at("20:31")), [])
+            join_scans()
+        run = store.last_run("scan", "gta6")
+        self.assertEqual((run["trigger"], run["ok"]), ("catch_up", True))
+        self.assertEqual(len([r for r in store.list_runs("scan") if r["profile"] == "gta6"]), 2)
+
+    def test_a_scan_shortly_before_the_slot_counts_and_clock_changes_do_not_double_run(self):
+        with clock(at("08:50")):
+            store.start_run("scan", "gta6", "dashboard")
+        self.assertIsNone(scheduler.due_scan("gta6", at("09:01")))
+        with clock(at("09:02")):
+            store.start_run("scan", "gta6", "schedule")
+        self.assertIsNone(scheduler.due_scan("gta6", at("08:30")))  # clock set back an hour
+        self.assertIsNone(scheduler.due_scan("gta6", at("09:30")))
+
+    def test_an_interrupted_scan_does_not_count(self):
+        with clock(at("09:01")):
+            rid = store.start_run("scan", "gta6", "schedule")
+        scheduler._mark_interrupted_runs()
+        self.assertTrue(store.list_runs("scan")[0]["summary"]["interrupted"])
+        self.assertEqual(scheduler.due_scan("gta6", at("10:00")), at("09:00"))
+        self.assertIsNotNone(store.list_runs("scan")[0]["finished_at"])
+        self.assertEqual(store.list_runs("scan")[0]["id"], rid)
+
+    def test_next_scan_time(self):
+        with clock(at("09:05")):
+            store.start_run("scan", "gta6", "schedule")
+        self.assertEqual(scheduler.next_scan_time(at("12:00")), at("18:00"))
+        self.assertEqual(scheduler.next_scan_time(at("18:30")), at("18:30"))  # due now
+        with clock(at("18:31")):
+            store.start_run("scan", "gta6", "schedule")
+        self.assertEqual(scheduler.next_scan_time(at("19:00")), at("09:00", days=1))
+        store.set_settings({"automation.enabled": False})
+        self.assertIsNone(scheduler.next_scan_time(at("19:00")))
+
+    def test_settings_are_read_on_every_tick(self):
+        store.set_settings({"automation.enabled": False})
+        self.assertEqual(scheduler.tick(now=at("09:30")), [])
+        store.set_settings({"automation.enabled": True})
+        with clock(at("09:30")):
+            self.assertEqual(len(scheduler.tick(now=at("09:30"))), 1)
+            join_scans()
+
+
+class ScanTests(PipelineCase):
+    def video(self, vid, source="Kai Cenat", duration=600, processed=False):
+        return {"id": vid, "title": f"GTA 6 {vid}", "duration": duration, "channel": source, "source": source,
+                "url": f"https://www.youtube.com/watch?v={vid}", "processed": processed, "keywords": []}
+
+    def test_scan_queues_creators_first_dedupes_and_cuts_long_videos(self):
+        known = pipeline.enqueue_url("https://youtu.be/KKKKKKKKKKK", "gta6")
+        self.clip.watch = {"videos": [self.video("SSSSSSSSSSS", "search: GTA 6 reaction"),
+                                      self.video("LLLLLLLLLLL", duration=4 * 3600),
+                                      self.video("PPPPPPPPPPP", processed=True),
+                                      self.video("KKKKKKKKKKK", "xQc"), self.video("XXXXXXXXXXX", "xQc")],
+                           "skipped_off_topic": 3, "errors": [{"source": "Gone", "error": "404"}]}
+        [rid] = pipeline.request_scan("gta6", wait=True)
+        self.assertEqual(self.clip.calls[:2], [["cleanup"], ["watch", "--per-channel", "6"]])
+        jobs = sorted(store.list_jobs(kind="source", run_id=rid)[0], key=lambda j: j["id"])
+        self.assertEqual([j["clipper_job"] for j in jobs], ["LLLLLLLLLLL", "XXXXXXXXXXX"])  # creators first, 2/day
+        self.assertEqual(jobs[0]["section"], "0:00-1:30:00")
+        self.assertIsNone(jobs[1]["section"])
+        run = store.last_run("scan", "gta6")
+        self.assertTrue(run["ok"])
+        msg = run["summary"]["message"]
+        for part in ("2 neue Videos eingereiht", "5 geprüft", "3 nicht zu GTA 6", "1 schon bekannt",
+                     "1 Quelle(n) nicht erreichbar"):
+            self.assertIn(part, msg)
+        self.assertNotIn(known, [j["id"] for j in jobs])
+        [rid2] = pipeline.request_scan("gta6", wait=True)
+        self.assertEqual(store.list_jobs(kind="source", run_id=rid2)[1], 1)  # the search hit, the rest known
+        [rid3] = pipeline.request_scan("gta6", wait=True)
+        self.assertEqual(store.list_jobs(kind="source", run_id=rid3)[1], 0)
+        self.assertIn("Keine neuen Videos", store.last_run("scan", "gta6")["summary"]["message"])
+
+    def test_scheduled_scans_share_the_daily_quota_and_skip_undownloadable_videos(self):
+        self.clip.watch = {"videos": [self.video(c * 11) for c in "ABCD"], "skipped_off_topic": 0, "errors": []}
+        pipeline.request_scan("gta6", trigger="schedule", wait=True)
+        pipeline.request_scan("gta6", trigger="schedule", wait=True)
+        self.assertEqual(store.count_jobs(kind="source"), 2)
+        self.assertIn("Tageslimit", store.last_run("scan", "gta6")["summary"]["message"])
+        pipeline.request_scan("gta6", trigger="dashboard", wait=True)  # "Jetzt suchen" is one more run
+        self.assertEqual(store.count_jobs(kind="source"), 4)
+        self.clip.fail["fetch"] = [{"stderr": "ERROR: [youtube] AAAAAAAAAAA: Video unavailable"}]
+        self.drive(kinds=["source"])
+        self.assertEqual(store.find_job_by_clipper_job("AAAAAAAAAAA")["status"], "skipped")
+        self.assertEqual(store.find_job_by_clipper_job("BBBBBBBBBBB")["status"], "waiting_approval")
+
+    def test_a_failing_watch_fails_the_run_with_an_alert_that_the_next_scan_resolves(self):
+        self.clip.fail["watch"] = [{"stderr": "FileNotFoundError: [Errno 2] No such file or directory: 'yt-dlp'"}]
+        pipeline.request_scan("gta6", wait=True)
+        run = store.last_run("scan", "gta6")
+        self.assertFalse(run["ok"])
+        self.assertIn("yt-dlp ist nicht installiert", run["summary"]["message"])
+        self.assertIsNone(store.get_alert("scan.failed.gta6")["resolved_at"])
+        pipeline.request_scan("gta6", wait=True)
+        self.assertIsNotNone(store.get_alert("scan.failed.gta6")["resolved_at"])
+
+    def test_two_scans_of_a_profile_never_overlap(self):
+        lock = pipeline._scan_locks["gta6"]
+        lock.acquire()
+        try:
+            self.assertTrue(scheduler.scan_running())
+            with self.assertRaises(pipeline.PipelineError) as e:
+                pipeline.request_scan("gta6")
+            self.assertEqual((e.exception.code, e.exception.status), ("scan_running", 409))
+            store.set_settings({"automation.enabled": True, "schedule.scan_times": ["00:00"]})
+            self.assertEqual(scheduler.tick(), [])
+        finally:
+            lock.release()
+        self.assertFalse(scheduler.scan_running())
+        store.update_profile("gta6", enabled=False)
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.request_scan()
+        self.assertEqual(e.exception.code, "no_profile")
+
+
+class LiveServiceTests(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        self.sid = store.add_stream("gta6", "xqc-twitch", "https://www.twitch.tv/xqc")
+        store.add_stream("gta6", "kai-youtube", "https://www.youtube.com/@KaiCenat/live")
+        store.set_settings({"automation.live_enabled": True})
+
+    def tick_data(self, ready):
+        return {"started": ["xqc-twitch"], "ready": ready, "transcribing": ["live-xqc-twitch-x"],
+                "cleaned": {"files": 2, "gb": 3.2}, "recorders": 1, "issues": {}, "stalled": [], "restarted": [],
+                "streams": [{"name": "xqc-twitch", "url": "https://www.twitch.tv/xqc", "live": True, "on_topic": True,
+                             "recording": True, "title": "GTA 6 RP", "priority": 100, "topic_only": True}]}
+
+    def test_live_tick_queues_ready_chunks_once_and_caches_the_status(self):
+        cj = "live-xqc-twitch-20261117-150000"
+        write_live_chunk(cj)
+        self.clip.live_ticks = [self.tick_data([cj]), self.tick_data([cj])]
+        scheduler.live_tick()
+        scheduler.live_tick()
+        self.assertEqual(store.count_jobs(kind="live_chunk"), 1)
+        op, payload = self.clip.bridge_calls[0]
+        self.assertEqual((op, payload["chunk"], payload["health"]), ("live_tick", 30, True))
+        st = health.live_status()
+        by_id = {s["id"]: s for s in st["streams"]}
+        self.assertEqual((by_id[self.sid]["live"], by_id[self.sid]["recording"]), (True, True))
+        self.assertIsNotNone(by_id[self.sid]["checked_at"])
+        other = next(s for s in st["streams"] if s["name"] == "kai-youtube")
+        self.assertEqual((other["live"], other["checked_at"]), (None, None))
+        self.assertEqual(st["recorders"], 1)
+        runs = store.list_runs("live_watch")
+        self.assertEqual(len(runs), 2)
+        self.assertIn("Aufnahme gestartet: xqc-twitch", runs[1]["summary"]["message"])
+        self.assertIn("1 neue(s) Stück(e)", runs[1]["summary"]["message"])
+        self.drive()
+        self.assertEqual(store.list_jobs(kind="live_chunk")[0][0]["status"], "waiting_approval")
+
+    def test_ended_chunks_get_live_done_and_a_failed_tick_is_recorded(self):
+        cj = "live-xqc-twitch-20261117-160000"
+        write_live_chunk(cj)
+        [jid] = pipeline.enqueue_live_chunks("gta6", [cj])
+        store.update_job(jid, status="failed", error="x")
+        self.clip.live_ticks = [self.tick_data([cj]),
+                                runtime.BridgeError("[Errno 2] No such file or directory: 'yt-dlp'")]
+        scheduler.live_tick()
+        self.assertEqual(self.clip.args_of("live done"), [["live", "done", cj]])
+        scheduler.live_tick()
+        run = store.list_runs("live_watch")[0]
+        self.assertFalse(run["ok"])
+        self.assertIn("yt-dlp ist nicht installiert", run["summary"]["message"])
+        self.assertIn("yt-dlp", health._cache()["gta6"]["error"])
+
+    def test_profiles_without_active_streams_are_not_watched(self):
+        for s in store.list_streams("gta6"):
+            store.update_stream(s["id"], paused=True)
+        self.assertEqual(scheduler.live_tick(), {})
+        self.assertEqual(self.clip.bridge_calls, [])
+
+
+class HousekeepingTests(PipelineCase):
+    def test_cleanup_run_is_recorded_once_a_day(self):
+        summary = scheduler.run_cleanup(dry_run=True)
+        self.assertEqual(self.clip.args_of("cleanup"), [["cleanup", "--dry-run"]])
+        self.assertIn("1 Quelldatei(en) würde löschen (1.5 GB)", summary["message"])
+        self.assertTrue(store.last_run("cleanup")["ok"])
+        self.assertFalse(scheduler._cleanup_due(time.time()))
+        self.assertTrue(scheduler._cleanup_due(time.time() + 25 * 3600))
+
+    def test_threads_start_and_stop_promptly(self):
+        stop = threading.Event()
+        with mock.patch.object(worker, "POLL_S", 0.05):
+            threads = scheduler.start_scheduler(stop) + worker.start_workers(stop)
+            self.assertTrue({t.name for t in threads} >= {"scheduler", "live-service", "health-monitor"})
+            for _ in range(500):  # the first tick starts the daily cleanup
+                if store.last_run("cleanup", finished_only=True):
+                    break
+                time.sleep(0.01)
+            stop.set()
+            for t in threads:
+                t.join(6)
+                self.assertFalse(t.is_alive(), t.name)
+        self.assertTrue(store.last_run("cleanup", finished_only=True)["ok"])

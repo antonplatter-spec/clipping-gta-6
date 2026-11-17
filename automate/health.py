@@ -298,7 +298,7 @@ def check_all(now=None):
             f"{disk['min_free_gb']:.0f} GB). Alte Quellvideos löscht das Aufräumen automatisch; lösche sonst alte "
             "Exporte unter exports/ oder senke min_free_gb in den Analyse-Einstellungen.", disk)
 
-        rep = system_report()
+        rep = system_report(refresh=bool({"tools.missing", "tools.voice"} & before))  # an install shows at once
         missing = [t["name"] for t in rep["tools"] if t.get("required") and not t["ok"]]
         put("tools.missing", bool(missing), "error",
             f"Es fehlen Programme, ohne die der Server nicht arbeiten kann: {', '.join(missing)}. Unter System steht, "

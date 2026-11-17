@@ -120,7 +120,10 @@ def refresh_system_report():
     if health is None or not hasattr(health, "system_report"):
         return _fallback_report("Die Werkzeug-Prüfung ist noch nicht verfügbar (automate.health fehlt).")
     try:
-        report = dict(health.system_report())
+        try:
+            report = dict(health.system_report(refresh=True))  # "Erneut prüfen" must not get a cached answer
+        except TypeError:
+            report = dict(health.system_report())
     except Exception:
         log.exception("health.system_report failed")
         return _fallback_report("Die Werkzeug-Prüfung ist fehlgeschlagen. Details stehen im Server-Log.")
@@ -149,6 +152,13 @@ def tools_state():
 # ---------------------------------------------------------------- overview, automation, alerts
 
 def _scan_running():
+    """pipeline.scan_running() (its in-process scan locks); without the pipeline, an unfinished recent scan run."""
+    pipeline = optional("pipeline")
+    if pipeline is not None and hasattr(pipeline, "scan_running"):
+        try:
+            return bool(pipeline.scan_running())
+        except Exception:
+            log.exception("pipeline.scan_running failed")
     run = store.last_run("scan")
     return bool(run and run.get("finished_at") is None and time.time() - run["started_at"] < SCAN_STALE_S)
 

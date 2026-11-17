@@ -461,7 +461,7 @@ class LoopTests(FakeTools):
         first, second = client.calls
         # the request: adaptive thinking, effort, tool_choice auto (never forced), refusal fallback, caching
         self.assertEqual(first["model"], "claude-sonnet-5-5")
-        self.assertEqual(first["thinking"], {"type": "adaptive"})
+        self.assertEqual(first["thinking"], {"type": "adaptive", "display": "summarized"})
         self.assertEqual(first["output_config"], {"effort": "medium"})
         self.assertEqual(first["tool_choice"], {"type": "auto"})
         self.assertEqual((first["betas"], first["fallbacks"]), (["server-side-fallback-2026-07-01"], "default"))
@@ -728,6 +728,8 @@ class ToolTests(TempData):
         grid = T.run_tool(ctx, "view_frame", {"seconds": 5, "grid": True})
         self.assertFalse(grid.is_error, grid.content)
         self.assertIn("10 % grid", grid.content[0]["text"])
+        self.assertEqual(sorted(p.name for p in (self.dir / "review").iterdir()),
+                         ["cand_01.jpg", "cand_02.jpg", "scen_01.jpg"])  # the gridded frame isn't left as a sheet
         self.assertIn("past the end", T.run_tool(ctx, "view_frame", {"seconds": 90}).content)
         (self.dir / "source.mp4").unlink()
         self.assertIn("gone", T.run_tool(ctx, "view_frame", {"seconds": 5}).content)
@@ -968,7 +970,7 @@ class SdkWireTests(FakeTools):
         self.assertEqual(h1["authorization"], f"Bearer {KEY}")  # the stored key, passed explicitly
         self.assertTrue(b1["stream"])
         self.assertEqual((b1["fallbacks"], b1["thinking"], b1["output_config"], b1["tool_choice"]),
-                         ("default", {"type": "adaptive"}, {"effort": "medium"}, {"type": "auto"}))
+                         ("default", agent.THINKING, {"effort": "medium"}, {"type": "auto"}))
         self.assertEqual(b1["cache_control"], {"type": "ephemeral"})
         self.assertEqual(b1["system"][1]["cache_control"], {"type": "ephemeral", "ttl": "1h"})
         self.assertEqual(b1["tools"][0]["strict"], True)
