@@ -154,14 +154,9 @@ def list_picks(status: str | None = None, profile: str | None = None, limit: int
     bad = [s for s in statuses if s not in store.PICK_STATUSES]
     if bad:
         raise invalid({"status": f"Unbekannter Status: {', '.join(bad)}."})
-    rows, total = store.list_picks(status=statuses or None, profile=profile or None, limit=100000)
-    if statuses == ["proposed"]:
-        rows.sort(key=lambda p: (p["created_at"], p["job_id"], p["idx"]))  # the queue: oldest first
-    else:
-        rows.sort(key=lambda p: (p.get("decided_at") or p.get("updated_at") or p["created_at"], p["id"]),
-                  reverse=True)
-    return {"items": enrich_many(rows[offset:offset + limit]), "total": total,
-            "counts": store.pick_counts(profile or None)}
+    rows, total = store.list_picks(status=statuses or None, profile=profile or None, limit=limit, offset=offset,
+                                   order="queue" if statuses == ["proposed"] else "decided")
+    return {"items": enrich_many(rows), "total": total, "counts": store.pick_counts(profile or None)}
 
 
 @router.get("/picks/{pick_id}")

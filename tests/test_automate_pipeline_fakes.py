@@ -307,11 +307,14 @@ def make_youtube():
             super().__init__(message)
             self.retryable, self.code = retryable, code
 
-    mod.YouTubeError, mod.script, mod.calls = YouTubeError, [], []
+    mod.YouTubeError, mod.script, mod.calls, mod.sessions = YouTubeError, [], [], []
 
     def upload_variant(variant_id, account_id, privacy, *, title=None, description=None, on_progress=None,
-                       cancel=None):
+                       cancel=None, session=None, on_session=None):
         mod.calls.append((variant_id, account_id, privacy))
+        mod.sessions.append(session)
+        if on_session and session is None:
+            on_session(f"https://upload.example/session-{len(mod.calls)}")
         if on_progress:
             on_progress(50, 100)
         item = mod.script.pop(0) if mod.script else None

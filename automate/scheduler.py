@@ -5,9 +5,9 @@ timers of clipper/schedule.py (nothing is installed in the OS).
     scheduler       every TICK_S: resume jobs waiting for a key/budget; per enabled profile, when
                     automation.enabled, run the scan of the latest passed slot of schedule.scan_times if no scan
                     started since (a slot missed while the PC slept or was off runs once on wake, never once per
-                    missed slot; clock changes only move which slot is "latest"); once a day `clipper cleanup`
-                    and pruning of data/tmp (agent conversation copies, one-off picks/translation files older
-                    than TMP_KEEP_DAYS)
+                    missed slot; clock changes only move which slot is "latest"); once a day `clipper cleanup`,
+                    pruning of data/tmp (agent conversation copies, one-off picks/translation files older
+                    than TMP_KEEP_DAYS) and of old DB rows (prune_db: job output lines, health/live/scan runs)
     live-service    every schedule.live_watch_minutes when automation.live_enabled: per enabled profile with active
                     streams the bridge op `live_tick` (= `clipper live watch --chunk N` + cleanup + `live health`
                     with one status probe of the streams), then a live_chunk job per newly analyzed chunk; the
@@ -18,7 +18,8 @@ All runs are recorded in `runs` (kind scan | live_watch | cleanup | health) with
     start_scheduler(stop) -> [threads] ; next_scan_time(now=None) -> float | None ; run_scan_now(profile=None)
     scan_running(profile=None) -> bool   a scan (scheduled or "Jetzt suchen") is in progress
     due_scan(profile, now=None) -> slot timestamp | None ; tick(now=None) ; live_tick(trigger="schedule")
-    run_cleanup(trigger="schedule", dry_run=False) -> summary ; prune_tmp(days=TMP_KEEP_DAYS) -> files ; wake()
+    run_cleanup(trigger="schedule", dry_run=False) -> summary ; prune_tmp(days=TMP_KEEP_DAYS) -> files
+    prune_db(now=None) -> {what: rows} ; wake()
 """
 import logging
 import threading
@@ -35,6 +36,11 @@ CATCH_UP_AFTER_S = 10 * 60   # a slot run later than this is labelled "catch_up"
 CLEANUP_EVERY_S = 24 * 3600
 T_LIVE_TICK = 20 * 60
 TMP_KEEP_DAYS = 5
+DAY_S = 86400
+# DB retention, applied by the daily cleanup. A job keeps its info/warning/error events as long as it exists (they
+# are its story in the dashboard); its raw command output (debug) goes two weeks after it ended.
+EVENT_DEBUG_KEEP_S, EVENT_KEEP_S = 14 * DAY_S, 365 * DAY_S
+RUN_KEEP_S = {"health": 3 * DAY_S, "live_watch": 14 * DAY_S, "scan": 180 * DAY_S, "cleanup": 180 * DAY_S}
 
 _wake_event = threading.Event()
 _cleanup_lock = threading.Lock()
@@ -131,6 +137,15 @@ def prune_tmp(days=TMP_KEEP_DAYS, now=None):
     return removed
 
 
+def prune_db(now=None):
+    """Old job output lines and old runs (health and live checks add hundreds a day) -> {what: rows deleted}."""
+    out = {"job_events": store.prune_job_events(EVENT_DEBUG_KEEP_S, levels=("debug",), now=now)
+           + store.prune_job_events(EVENT_KEEP_S, now=now)}
+    for kind, keep in RUN_KEEP_S.items():
+        out[f"runs.{kind}"] = store.prune_runs(kind, keep, now=now)
+    return out
+
+
 def run_cleanup(trigger="schedule", dry_run=False, profile=None):
     """`clipper cleanup`: source.mp4/audio.wav past their keep time (transcripts, picks and exports stay)."""
     profile = profile or store.get_setting("ui.default_profile")
@@ -141,16 +156,18 @@ def run_cleanup(trigger="schedule", dry_run=False, profile=None):
         data = pipeline.trailing_json(res.stdout) if res.returncode == 0 else None
     except ValueError:
         data = None
+    pruned = 0 if dry_run else prune_tmp()
+    db_rows = {} if dry_run else prune_db()  # also when `clipper cleanup` failed: the DB must not grow forever
     if not isinstance(data, dict):
-        summary = {"message": f"Aufräumen fehlgeschlagen: {pipeline._tail(res)}"}
+        summary = {"message": f"Aufräumen fehlgeschlagen: {pipeline._tail(res)}", "tmp_files": pruned,
+                   "db_rows": db_rows}
         store.finish_run(rid, False, summary)
         return summary
     files, gb = int(data.get("files") or 0), float(data.get("gb") or 0)
-    pruned = 0 if dry_run else prune_tmp()
     verb = "würde löschen" if dry_run else "gelöscht"
     msg = (f"{files} Quelldatei(en) {verb} ({gb:.1f} GB)" if files else "Nichts zu löschen") \
         + (f", {pruned} alte Hilfsdatei(en) entfernt" if pruned else "")
-    summary = {"message": msg, **data, "tmp_files": pruned}
+    summary = {"message": msg, **data, "tmp_files": pruned, "db_rows": db_rows}
     store.finish_run(rid, True, summary)
     return summary
 

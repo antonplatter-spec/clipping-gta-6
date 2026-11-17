@@ -160,7 +160,8 @@ function YoutubeSetup({ app, onConnect, connecting }) {
           <div class="form-actions"><${Button} type="submit" busy=${busy} disabled=${!clientId.trim() && !secret.trim()}>Speichern<//></div>
         </form>
         <hr style="margin:4px 0" />
-        ${!local && html`<${Callout} tone="warning" title="Am PC selbst verbinden">
+        ${d.redirect_note ? html`<${Callout} tone=${local ? 'info' : 'warning'} title=${local ? 'So läuft das Verbinden' : 'Am PC selbst verbinden'}>${d.redirect_note}<//>`
+          : !local && html`<${Callout} tone="warning" title="Am PC selbst verbinden">
           Google schickt dich nach dem Erlauben zu <code>${d.redirect_uri}</code> zurück. Das klappt nur im Browser auf dem PC, auf dem der Clipper läuft – nicht vom Handy.<//>`}
         <${Button} variant="primary" icon="circle-play" busy=${connecting} disabled=${!ready} onClick=${onConnect}>Mit YouTube verbinden<//>
         <p class="muted small">Zugriff: Videos hochladen und Kanal lesen. Tipp: Im Testmodus laufen Googles Zugangs-Tokens nach 7 Tagen ab. Stell die App im Zustimmungsbildschirm auf <b>In Produktion</b>, damit die Verbindung bleibt.</p>

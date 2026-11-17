@@ -324,6 +324,32 @@ class UploadTests(YoutubeCase):
         refreshed = [c for c in self.google.calls if c[1] == youtube.TOKEN_URL]
         self.assertEqual(len(refreshed), 1)
 
+    def test_a_retry_asks_the_saved_session_first_and_never_uploads_twice(self):
+        var = self.variant(2600)
+        seen = []
+        # 1) the server dies right after YouTube accepted the last byte (before the DB write): the session was kept
+        self.assertEqual(youtube.upload_variant(var, self.aid, "private", on_session=seen.append)["video_id"],
+                         "VID123")
+        self.assertEqual(seen, [f"{SESSION_URL}1"])
+        before = len(self.google.calls)
+        res = youtube.upload_variant(var, self.aid, "private", session=seen[0], on_session=seen.append)
+        self.assertEqual(res["video_id"], "VID123")
+        retry = self.google.calls[before:]
+        self.assertEqual([(c[0], c[2].get("Content-Range")) for c in retry if c[0] in ("PUT", "POST")],
+                         [("PUT", "bytes */2600")])  # one status question, no new session, no bytes
+        self.assertEqual((self.google.sessions, len(seen)), (1, 1))
+        # 2) it died half-way: the retry continues the same session where YouTube stopped
+        self.google.plan = ["ok", "drop:0"]
+        with mock.patch.object(youtube, "MAX_RETRIES", 0), self.assertRaises(youtube.YouTubeError):
+            youtube.upload_variant(var, self.aid, "private", on_session=seen.append)
+        self.assertEqual(len(self.google.data), 1024)
+        res = youtube.upload_variant(var, self.aid, "private", session=seen[-1], on_session=seen.append)
+        self.assertEqual((res["video_id"], bytes(self.google.data)), ("VID123", self.payload))
+        self.assertEqual(self.google.sessions, 2)  # the second attempt opened no third session
+        # 3) the saved session expired (about a week): a new one starts
+        res = youtube.upload_variant(var, self.aid, "private", session=f"{SESSION_URL}1", on_session=seen.append)
+        self.assertEqual((res["video_id"], self.google.sessions, seen[-1]), ("VID123", 3, f"{SESSION_URL}3"))
+
     def test_gives_up_after_repeated_failures_and_honours_cancel(self):
         var = self.variant(2600)
         self.google.plan = ["503"] * 30

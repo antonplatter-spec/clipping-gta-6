@@ -294,13 +294,20 @@ def _bullets(facts):
     return "\n".join(f"- {k}: {v}" for k, v in facts if v not in (None, ""))
 
 
-def select_message(facts, index, candidates_md, sheets):
-    """facts: [(label, text)]; index: the candidate index text; sheets: [(caption, image block)]."""
+def select_message(facts, index, candidates_md, sheets, feedback=None):
+    """facts: [(label, text)]; index: the candidate index text; sheets: [(caption, image block)]; feedback: the fails
+    of an earlier selection of this source that the worker's quality gate rejected ([(where, fail)]), or None."""
     blocks = [{"type": "text", "text": "# Job facts\n" + _bullets(facts)},
               {"type": "text", "text": "# Candidates in job seconds\n" + index},
               {"type": "text", "text": "# candidates.md\n\n" + candidates_md}]
     for caption, image in sheets:
         blocks += [{"type": "text", "text": caption}, image]
+    if feedback:
+        blocks.append({"type": "text", "text": (
+            "# Your earlier selection for this source failed the quality gate\n"
+            "After ranking the hooks with simulate and keeping the best of different types, `clipper check` still "
+            "found these fails, so nothing was saved. Select again and fix every one of them (another wording, "
+            "another hook type, other footage); don't submit the same texts again:\n" + _bullets(feedback))})
     blocks.append({"type": "text", "text": (
         "Work through this source now and finish with submit_picks: the picks worth posting, or an empty list with "
         "no_clip_reason.")})

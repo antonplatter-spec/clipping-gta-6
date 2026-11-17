@@ -10,8 +10,8 @@ Setup (only while no account with confirmed 2FA exists): POST /setup creates the
 (inside one write transaction, so two browsers can't both create one) and sets a setup cookie; POST /setup/confirm
 with a valid code enables 2FA, returns the recovery codes once and logs in. An unconfirmed account can be set up
 again (frontend: reload mid-setup) by the browser holding the setup cookie, by anyone repeating its username and
-password, or by anyone once it has been idle for SETUP_ABANDONED_S; `python -m automate reset-login` empties the
-password so the setup starts over.
+password, or by anyone once it has been idle for SETUP_ABANDONED_S; `python -m automate reset-login` deletes the
+account (and its sessions) so the setup starts over.
 
 Login: constant-time checks (a dummy hash for unknown names), one generic error, failures counted per username and
 per client in login_attempts (RATE_WINDOW_S window; German wait time on 429), TOTP codes can't be replayed

@@ -334,6 +334,29 @@ class PickVideoTests(TempData):
         self.assertTrue(store.delete_account(acc))
         self.assertIsNone(store.get_post(p)["account_id"])
 
+    def test_videos_come_by_day_then_number_and_picks_in_the_requested_order(self):
+        root = paths.exports_dir() / "gta6"
+        for day, n in (("2026-11-16", 9), ("2026-11-17", 2), ("2026-11-17", 10), ("2026-11-15", 1)):
+            store.add_video("gta6", root / day / f"video {n}")
+        store.add_video("gta6", paths.exports_dir() / "gta6-es" / "2026-11-14" / "video 1", lang="es")
+        self.assertEqual([(v["day"], v["number"]) for v in store.list_videos()[0]],
+                         [("2026-11-17", 10), ("2026-11-17", 2), ("2026-11-16", 9), ("2026-11-15", 1),
+                          ("2026-11-14", 1)])  # newest day first, the day's last video first (not insertion order)
+        old = store.create_job("source", "gta6")
+        new = store.create_job("source", "gta6")
+        a, b = store.replace_picks(old, [self.PICK, {**self.PICK, "start": 40}])
+        c, = store.replace_picks(new, [self.PICK])
+        db.conn().execute("UPDATE picks SET created_at = created_at - 100 WHERE job_id = ?", (old,))
+        ids = lambda **kw: [p["id"] for p in store.list_picks(**kw)[0]]  # noqa: E731
+        self.assertEqual(ids(), [c, a, b])                       # by job, newest first
+        self.assertEqual(ids(order="queue"), [a, b, c])          # the approval queue: oldest first
+        self.assertEqual(ids(order="queue", limit=1, offset=1), [b])
+        store.transition_pick(c, ("proposed",), "rejected")
+        store.update_pick(b, status="approved", decided_at=time.time() + 50)
+        self.assertEqual(ids(order="decided"), [b, c, a])        # newest decision first
+        with self.assertRaises(ValueError):
+            store.list_picks(order="random")
+
 
 class UsageAlertRunLoginTests(TempData):
     def test_costs(self):
@@ -348,6 +371,53 @@ class UsageAlertRunLoginTests(TempData):
         with self.assertLogs("automate.costs", "WARNING"):
             est = costs.estimate("claude-mystery", {"input_tokens": 1_000_000}, prices)
         self.assertEqual((est["usd"], est["known_model"]), (2.0, False))
+
+    def test_refusal_fallback_models_are_costed_at_their_own_rate(self):
+        old_table = {"claude-sonnet-5-5": settings.DEFAULT_PRICES["claude-sonnet-5-5"]}  # a DB from before the rows
+        for model, usd in (("claude-opus-4-8", 25.0), ("claude-opus-5", 25.0), ("claude-sonnet-5", 10.0),
+                           ("claude-opus-5-20261001", 25.0)):
+            est = costs.estimate(model, {"output_tokens": 1_000_000}, old_table)
+            self.assertEqual((est["usd"], est["known_model"]), (usd, True), model)
+        # "claude-opus-5" is no prefix of "claude-opus-5-5": each is costed at its own row
+        self.assertEqual(costs.cost_usd("claude-opus-5-5", {"input_tokens": 1_000_000}, settings.DEFAULT_PRICES), 4.0)
+        self.assertEqual(costs.cost_usd("claude-opus-5-5-20261101", {"input_tokens": 1_000_000},
+                                        settings.DEFAULT_PRICES), 4.0)
+        self.assertEqual(set(settings.validate({"claude.prices": settings.DEFAULT_PRICES})["claude.prices"]),
+                         set(settings.DEFAULT_PRICES))
+        self.assertEqual([c["value"] for c in settings.schema()["claude.model"]["choices"]],
+                         ["claude-sonnet-5-5", "claude-opus-5-5"])  # costing rows only, not selectable
+
+    def test_db_retention_keeps_active_jobs_and_the_newest_runs(self):
+        now = time.time()
+        done = store.create_job("source", "gta6")
+        active = store.create_job("source", "gta6")
+        for jid in (done, active):
+            store.add_job_event(jid, "Eingereiht")
+            store.add_job_event(jid, "[analyze] line", "debug")
+        store.update_job(done, status="done")
+        db.conn().execute("UPDATE job_events SET ts = ?", (now - 20 * 86400,))
+        db.conn().execute("UPDATE jobs SET finished_at = ? WHERE id = ?", (now - 20 * 86400, done))
+        self.assertEqual(store.prune_job_events(14 * 86400, levels=("debug",)), 1)
+        self.assertEqual([e["message"] for e in store.job_events(done)], ["Eingereiht"])  # its story stays
+        self.assertEqual(len(store.job_events(active)), 2)  # still active: everything stays
+        self.assertEqual(store.prune_job_events(30 * 86400), 0)
+        self.assertEqual(store.prune_job_events(10 * 86400), 1)
+        self.assertEqual(len(store.job_events(active)), 2)
+        ids = {}
+        for profile in ("gta6", "gta-rp", None):
+            for _ in range(3):
+                rid = store.start_run("health" if profile is None else "scan", profile, "schedule")
+                store.finish_run(rid, True, {"message": "ok"})
+                ids.setdefault(profile, []).append(rid)
+        open_run = store.start_run("scan", "gta6", "schedule")
+        db.conn().execute("UPDATE runs SET started_at = ?", (now - 400 * 86400,))
+        self.assertEqual(store.prune_runs("scan", 180 * 86400), 4)  # two old ones per profile
+        self.assertEqual(sorted(r["id"] for r in store.list_runs("scan")),  # the newest (finished) of each stay
+                         sorted([ids["gta-rp"][-1], ids["gta6"][-1], open_run]))
+        self.assertEqual(store.last_run("scan", "gta6", finished_only=True)["id"], ids["gta6"][-1])
+        self.assertEqual(store.prune_runs("health", 3 * 86400), 2)
+        self.assertEqual([r["id"] for r in store.list_runs("health")], [ids[None][-1]])
+        self.assertEqual(store.last_run("health")["id"], ids[None][-1])
 
     def test_usage_and_daily_budget(self):
         store.set_settings({"claude.daily_limit_eur": 1.0, "claude.usd_to_eur": 0.5})
@@ -415,6 +485,10 @@ class UsageAlertRunLoginTests(TempData):
         for ok in (False, False, True, False):
             store.record_login_attempt("ip:127.0.0.1", ok)
         self.assertEqual(store.recent_failures("ip:127.0.0.1", now - 60), 3)
+        self.assertTrue(store.delete_user())  # reset-login: the row and its sessions go
+        self.assertIsNone(store.get_user())
+        self.assertIsNone(store.get_session("t3"))
+        self.assertFalse(store.delete_user())
 
 
 class ImporterTests(TempData):
@@ -440,6 +514,24 @@ class ImporterTests(TempData):
         self.assertEqual(store.list_creators("gta6"), [])
         self.assertEqual(store.get_setting("prefs.hooks_per_video"), 3)
         self.assertEqual(importer.run(force=True, env_file=env)["creators"]["gta6"], len(repo_creators))
+
+    def test_new_default_price_rows_reach_a_stored_table_once_without_touching_edited_rows(self):
+        importer.run(env_file=self.root / "none")
+        self.assertNotIn("claude.prices", store.stored_setting_keys())  # never stored: the defaults apply as they are
+        edited = {"claude-sonnet-5-5": {"input": 9.0, "output": 9.0, "cache_read": 9.0, "cache_write": 9.0},
+                  "claude-opus-5-5": settings.DEFAULT_PRICES["claude-opus-5-5"]}
+        store.set_settings({"claude.prices": edited})
+        store.set_meta("prices.defaults", ["claude-opus-5-5", "claude-sonnet-5-5"])  # a DB from the older release
+        out = importer.run(env_file=self.root / "none")
+        self.assertEqual(out["settings"], ["claude.prices"])
+        prices = store.get_setting("claude.prices")
+        self.assertEqual(prices["claude-sonnet-5-5"]["input"], 9.0)  # the owner's edit stays
+        self.assertEqual(prices["claude-opus-4-8"], settings.DEFAULT_PRICES["claude-opus-4-8"])
+        self.assertEqual(set(prices), set(settings.DEFAULT_PRICES))
+        del prices["claude-sonnet-5"]  # the owner removes an offered row: it doesn't come back
+        store.set_settings({"claude.prices": prices})
+        self.assertEqual(importer.run(env_file=self.root / "none")["settings"], [])
+        self.assertNotIn("claude-sonnet-5", store.get_setting("claude.prices"))
 
     def test_a_new_profile_folder_is_imported_on_the_next_start(self):
         repo = self.root / "profiles"

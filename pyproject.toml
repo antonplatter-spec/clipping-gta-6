@@ -4,18 +4,32 @@ version = "0.1.0"
 description = "Finds the best moments in GTA 6 videos and renders captioned 9:16 shorts"
 readme = "README.md"
 requires-python = ">=3.10"
-# The clipper's own four mirror PIP in clipper/setup.py; system tools (ffmpeg, yt-dlp, whisper.cpp, demucs) stay with
-# `clipper setup --install`. The rest are the automate server's (`python -m automate`), installed by `uv sync` only.
+# The clipper's own four mirror PIP in clipper/setup.py. yt-dlp lives here too, so `uv sync` never removes it:
+# [default] brings YouTube's challenge solver (yt-dlp-ejs), [deno] the JavaScript runtime it needs. The rest are the
+# automate server's (`python -m automate`). System tools (ffmpeg, espeak-ng, whisper.cpp) come from the OS package
+# manager or `clipper setup --install`.
 dependencies = [
     "numpy",
     "onnx-asr[cpu,hub]==0.12.0",
     "pillow",
     "pyyaml",
+    "yt-dlp[default,deno]",
     "anthropic",
     "fastapi",
     "segno",
     "uvicorn",
 ]
 
+[project.optional-dependencies]
+# Demucs voice separation (cleaner captions; dubs need it) pulls in PyTorch: on Linux the PyPI build with CUDA, several
+# GB. Opt-in, so it survives `uv sync` only when asked for: `./start.sh --stimmen` once (start.sh keeps it from then
+# on) or `uv sync --extra stimmen`.
+stimmen = ["demucs>=4.1"]
+
 [dependency-groups]
 dev = ["httpx"]  # FastAPI's TestClient
+
+[tool.uv]
+# Where it runs: Linux (also inside WSL2) and Apple Silicon Macs. Intel Macs have no current onnxruntime wheels, and
+# demucs pins them to an old PyTorch that would hold the whole lock back.
+environments = ["sys_platform == 'linux'", "sys_platform == 'darwin' and platform_machine == 'arm64'"]

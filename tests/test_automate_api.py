@@ -341,6 +341,8 @@ class AuthFlowTests(ApiCase):
         with mock.patch("builtins.input", return_value="RESET"), mock.patch("sys.stdout"):
             self.assertEqual(cli.reset_login([]), 0)
         self.assertEqual(c.get("/api/overview").status_code, 401)
+        self.assertIsNone(store.get_user())  # the row is gone, not just emptied
+        self.assertIsNone(store.get_session(c.token_hash))
         st = self.anon.get("/api/state").json()
         self.assertEqual((st["setup_required"], st["setup_step"]), (True, "account"))
         login = self.anon.post("/api/login", json={"username": "owner", "password": PASSWORD,
@@ -452,6 +454,16 @@ class SecurityTests(ApiCase):
         r = c.get("/api/jobs?limit=500")
         self.assertEqual(set(r.json()["error"]["fields"]), {"limit"})
         r = c.post("/api/jobs", content=b"x" * (5 * 1024 * 1024), headers={"Content-Type": "application/json"})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (413, "too_large"))
+
+        def chunked():  # no Content-Length: only the body limit middleware sees the size
+            for _ in range(5):
+                yield b"x" * (1024 * 1024)
+        for method, path in (("POST", "/api/jobs"), ("PUT", "/api/research"), ("POST", "/api/login")):
+            r = c.request(method, path, content=chunked(), headers={"Content-Type": "application/json"})
+            self.assertEqual((r.status_code, r.json()["error"]["code"]), (413, "too_large"), path)
+            self.assertIn("höchstens 4 MB", r.json()["error"]["message"])
+        r = c.post("/js/api.js", content=b"x" * (5 * 1024 * 1024))  # not under /api: German JSON all the same
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (413, "too_large"))
 
     def test_no_secret_in_any_get_response_or_log(self):
@@ -656,6 +668,8 @@ class OverviewJobTests(ApiCase):
         self.assertEqual([c["id"] for c in detail["children"]], [child])
         self.assertEqual(detail["events"][0]["message"], "Lade Video …")
         self.assertIn("params", detail)
+        up = store.create_job("upload", "gta6", params={"variant_id": 1, "upload_session": "https://upload/x?id=S"})
+        self.assertEqual(self.c.get(f"/api/jobs/{up}").json()["params"], {"variant_id": 1})  # a session is a token
         self.assertEqual(self.c.get("/api/jobs/999").status_code, 404)
         r = self.c.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=abc", "section": "0:00:00-1:30:00"})
         self.assertEqual(r.status_code, 200, r.text)
@@ -964,7 +978,7 @@ class CostKeyTests(ApiCase):
                          [("anthropic", False, None), ("fish", False, None)])
         self.assertEqual(self.c.post("/api/keys/anthropic/test").json()["error"]["code"], "key_missing")
         r = self.c.put("/api/keys/anthropic", json={"value": "not-a-key"})
-        self.assertEqual(set(r.json()["error"]["fields"]), {"value"})
+        self.assertEqual(r.json()["error"]["fields"], {"value": "Anthropic-API-Schlüssel: muss mit „sk-ant-“ beginnen"})
         r = self.c.put("/api/keys/anthropic", json={"value": " sk-ant-api03-abcdefghijklmnopqrstuvwxyz "})
         self.assertEqual((r.json()["set"], r.json()["masked"], r.json()["last_test"]), (True, "sk-a…wxyz", None))
         self.fakes["automate.pipeline"].on_settings_changed.assert_called_with(["secrets.anthropic_api_key"])

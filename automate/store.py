@@ -44,6 +44,8 @@ Jobs (kinds JOB_KINDS, statuses JOB_STATUSES, stages JOB_STAGES; every job row a
                                          finished_at, any other clears it; JSON fields (params, result) are replaced
     transition_job(id, from_statuses, **fields) -> row | None  compare-and-set on status (None: it had moved on)
     add_job_event(job_id, message, level="info") -> id ; job_events(job_id, limit=200, after_id=None) -> oldest first
+    prune_job_events(older_than_s, *, levels=None, now=None) -> n   events (of `levels`, default all) of jobs that
+                                         ended more than older_than_s ago; a job still active keeps all its events
     claim_next_job(worker_id, kinds=None, *, serial_kinds=SERIAL_KINDS, now=None) -> row | None
         atomic: the queued job with not_before <= now first by (priority, created_at, id) -> running + locked;
         a kind in serial_kinds is skipped while another job of that kind is running (renders number videos)
@@ -60,7 +62,9 @@ Picks (statuses PICK_STATUSES; rows carry `job`: {id, kind, profile, title, chan
         picks: clipper pick dicts, or {"data": pick, "reason"?, "click_trigger"?, "check_report"?,
         "simulate_report"?, "status"?}; upserts by idx (ids stay stable), drops idx beyond the list; refuses
         (ValueError) while a pick of the job is approved/rendering/rendered
-    list_picks(status=None, profile=None, job_id=None, limit=50, offset=0) -> (rows by job newest first then idx, total)
+    list_picks(status=None, profile=None, job_id=None, limit=50, offset=0, *, order="job") -> (rows, total)
+        order "job": by job newest first, then idx; "queue": oldest first (the approval queue);
+        "decided": newest decision first (decided_at, else updated_at)
     get_pick(id) ; update_pick(id, **f) -> row   (approved/rejected stamp decided_at) ; pick_counts(profile=None)
     transition_pick(id, from_statuses, to_status, **f) -> row | None   compare-and-set
 
@@ -70,7 +74,7 @@ Videos, variants, posts, social accounts
     add_variant(video_id, file, *, rank=0, hook, hook_type, arm, title, description, hashtags, predicted,
                 duration) -> id      idempotent on (video_id, file)
     list_videos(profile=None, day=None, posted=None, q=None, archived=False, limit=50, offset=0, *, lang=None,
-                job_id=None, pick_id=None) -> (rows newest first, total)   archived=None: both
+                job_id=None, pick_id=None) -> (rows by day, then number, newest first; total)   archived=None: both
     get_video(id) ; get_variant(id) ; update_video(id, **f)    video rows embed `variants`, variants embed `posts`
     add_post(variant_id, platform, *, account_id, status="posted", external_id, url, privacy, note, error,
              posted_at) -> id ; get_post(id) ; update_post(id, **f) ; delete_post(id) -> bool ; list_posts(variant_id)
@@ -92,10 +96,13 @@ Alerts and runs
     resolve_alert(key) -> bool ; get_alert(key) ; list_alerts(active_only=True) (errors first) ; ack_alert(id) -> bool
     start_run(kind, profile=None, trigger=None) -> id ; finish_run(id, ok, summary=None)
     last_run(kind, profile=None, finished_only=False) -> row | None ; list_runs(kind=None, limit=20)
+    prune_runs(kind, older_than_s, now=None) -> n   finished runs of `kind` that started longer ago; the newest and
+                                         the newest finished of each profile stay ("last scan" / "last cleanup")
 
 Login
     get_user(username=None) -> row | None (the first user when no name) ; create_user(username, password_hash,
     totp_secret=None, *, totp_enabled=False, recovery_codes=None) -> id ; update_user(user_id=None, **f) -> row
+    delete_user(user_id=None) -> bool   (the first user when no id; its sessions go with it)
     create_session(token_hash, user_id, expires_at, user_agent=None, now=None)
     get_session(token_hash, now=None) -> row | None (expired ones are deleted) ; touch_session(token_hash, expires_at)
     delete_session(token_hash) ; delete_user_sessions(user_id, keep=None) -> n ; purge_sessions(now=None) -> n
@@ -565,6 +572,18 @@ def job_events(job_id, limit=200, after_id=None):
     return [dict(r) for r in rows]
 
 
+def prune_job_events(older_than_s, *, levels=None, now=None):
+    cutoff = (_now() if now is None else now) - older_than_s
+    final, fargs = _in("status", FINAL_STATUSES)
+    conds = [(f"job_id IN (SELECT id FROM jobs WHERE {final} AND finished_at IS NOT NULL AND finished_at < ?)",
+              [*fargs, cutoff]), ("ts < ?", [cutoff])]
+    if levels:
+        conds.append(_in("level", levels))
+    where, args = _where(conds)
+    with transaction() as c:
+        return c.execute(f"DELETE FROM job_events{where}", args).rowcount
+
+
 def claim_next_job(worker_id, kinds=None, *, serial_kinds=SERIAL_KINDS, now=None):
     now = _now() if now is None else now
     if kinds is not None and not kinds:
@@ -691,7 +710,13 @@ def replace_picks(job_id, picks, *, status="proposed"):
     return ids
 
 
-def list_picks(status=None, profile=None, job_id=None, limit=50, offset=0):
+_PICK_ORDER = {"job": "picks.job_id DESC, picks.idx",
+               "queue": "picks.created_at, picks.job_id, picks.idx",
+               "decided": "COALESCE(picks.decided_at, picks.updated_at, picks.created_at) DESC, picks.id DESC"}
+
+
+def list_picks(status=None, profile=None, job_id=None, limit=50, offset=0, *, order="job"):
+    _check_choice(order, tuple(_PICK_ORDER), "pick order")
     conds = []
     if status:
         conds.append(_in("picks.status", status))
@@ -702,7 +727,7 @@ def list_picks(status=None, profile=None, job_id=None, limit=50, offset=0):
     where, args = _where(conds)
     c = _c()
     total = c.execute(f"SELECT COUNT(*) FROM picks{where}", args).fetchone()[0]
-    rows = c.execute(f"{_PICK_SELECT}{where} ORDER BY picks.job_id DESC, picks.idx LIMIT ? OFFSET ?",
+    rows = c.execute(f"{_PICK_SELECT}{where} ORDER BY {_PICK_ORDER[order]} LIMIT ? OFFSET ?",
                      [*args, int(limit), int(offset)])
     return [_pick(r) for r in rows], total
 
@@ -806,8 +831,9 @@ def list_videos(profile=None, day=None, posted=None, q=None, archived=False, lim
     where, args = _where(conds)
     c = _c()
     total = c.execute(f"SELECT COUNT(*) FROM videos{where}", args).fetchone()[0]
-    rows = [_row("videos", r) for r in c.execute(f"SELECT * FROM videos{where} ORDER BY created_at DESC, id DESC "
-                                                 f"LIMIT ? OFFSET ?", [*args, int(limit), int(offset)])]
+    rows = [_row("videos", r) for r in c.execute(f"SELECT * FROM videos{where} ORDER BY day DESC, number DESC, "
+                                                 f"created_at DESC, id DESC LIMIT ? OFFSET ?",
+                                                 [*args, int(limit), int(offset)])]
     by_video = _variants_for([r["id"] for r in rows])
     for r in rows:
         r["variants"] = by_video.get(r["id"], [])
@@ -1043,6 +1069,17 @@ def list_runs(kind=None, limit=20):
             _c().execute(f"SELECT * FROM runs{where} ORDER BY started_at DESC, id DESC LIMIT ?", [*args, int(limit)])]
 
 
+def prune_runs(kind, older_than_s, now=None):
+    _check_choice(kind, RUN_KINDS, "run kind")
+    cutoff = (_now() if now is None else now) - older_than_s
+    with transaction() as c:
+        newest = "SELECT MAX(id) FROM runs WHERE kind = ?{} GROUP BY COALESCE(profile, '')"
+        return c.execute(f"DELETE FROM runs WHERE kind = ? AND started_at < ? AND finished_at IS NOT NULL "
+                         f"AND id NOT IN ({newest.format('')}) "
+                         f"AND id NOT IN ({newest.format(' AND finished_at IS NOT NULL')})",
+                         (kind, cutoff, kind, kind)).rowcount
+
+
 # ---------------------------------------------------------------- login
 
 def get_user(username=None):
@@ -1068,6 +1105,16 @@ def update_user(user_id=None, **f):
         raise ValueError("Es gibt noch keinen Benutzer")
     _update("users", "id", user["id"], f)
     return get_user(f.get("username", user["username"]))
+
+
+def delete_user(user_id=None):
+    with transaction() as c:
+        if user_id is None:
+            row = c.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+            if row is None:
+                return False
+            user_id = row[0]
+        return c.execute("DELETE FROM users WHERE id = ?", (user_id,)).rowcount == 1
 
 
 def create_session(token_hash, user_id, expires_at, user_agent=None, now=None):

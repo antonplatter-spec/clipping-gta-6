@@ -697,6 +697,10 @@ class DubAndUploadTests(Helpers):
         self.assertEqual(store.list_posts(video["variants"][1]["id"])[0]["status"], "uploading")
         self.drive()
         self.assertEqual(store.list_posts(video["variants"][1]["id"])[0]["status"], "posted")
+        # every attempt after the first hands YouTube the session the first one opened (no second upload)
+        self.assertEqual(self.yt.sessions[-3:], [None, f"https://upload.example/session-{len(self.yt.calls) - 2}",
+                                                 f"https://upload.example/session-{len(self.yt.calls) - 2}"])
+        self.assertEqual(self.job(uid2)["params"]["upload_session"], self.yt.sessions[-1])
 
 
 class ConcurrencyTests(Helpers):

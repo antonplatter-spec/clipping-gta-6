@@ -231,9 +231,7 @@ def reset_login(argv):
             print("Abgebrochen – nichts geändert.")
             return 1
     with store.transaction():
-        store.update_user(user["id"], password_hash="", totp_secret=None, totp_enabled=False, totp_last_counter=0,
-                          recovery_codes=[])
-        store.delete_user_sessions(user["id"])
+        store.delete_user(user["id"])  # its sessions go with it
         store.set_meta("setup.pending", None)
         store.set_meta("totp.pending", None)
     print("Login zurückgesetzt. Öffne das Dashboard und lege das Konto neu an (ein laufender Server muss dafür nicht "

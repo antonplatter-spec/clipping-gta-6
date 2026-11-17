@@ -4,8 +4,9 @@ Prices come from the `claude.prices` setting (USD per 1M tokens; `cache_write` i
 write costs 2x input). "Today" is the local day of this PC (`local_day()`), the same day string store.add_usage writes.
 
     local_day(ts=None) -> "YYYY-MM-DD"
-    price_row(model, prices=None) -> (row, known)   exact id, else the longest price key the id starts with (a dated
-                                                     snapshot), else the claude-sonnet-5-5 row with known=False
+    price_row(model, prices=None) -> (row, known)   exact id, else the longest price key the id starts with plus "-"
+                                                     (a dated snapshot); the same in settings.DEFAULT_PRICES; else
+                                                     the claude-sonnet-5-5 row with known=False
     normalize_usage(usage) -> {input, output, cache_write_5m, cache_write_1h, cache_read}
                               accepts an SDK Usage object or a dict with the API's names (input_tokens,
                               cache_creation_input_tokens, cache_read_input_tokens, cache_creation:
@@ -40,14 +41,20 @@ def _prices(prices):
     return store.get_setting("claude.prices")
 
 
+def _lookup(model, prices):
+    if model in prices:
+        return prices[model]
+    prefixed = [k for k in prices if model.startswith(k + "-")]
+    return prices[max(prefixed, key=len)] if prefixed else None
+
+
 def price_row(model, prices=None):
     prices = _prices(prices)
     model = model or ""
-    if model in prices:
-        return prices[model], True
-    prefixed = [k for k in prices if model.startswith(k)]
-    if prefixed:
-        return prices[max(prefixed, key=len)], True
+    # the defaults also cover a model the owner's stored table predates (e.g. a refusal fallback's)
+    row = _lookup(model, prices) or _lookup(model, settings.DEFAULT_PRICES)
+    if row is not None:
+        return row, True
     row = prices.get(FALLBACK_MODEL) or settings.DEFAULT_PRICES[FALLBACK_MODEL]
     if model not in _warned:
         _warned.add(model)

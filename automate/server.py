@@ -64,7 +64,8 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
 STATUS_MESSAGES = {400: "Die Anfrage war ungültig.", 401: "Bitte melde dich an.",
                    403: "Diese Aktion ist nicht erlaubt.",
                    404: "Nicht gefunden.", 405: "Diese Methode ist hier nicht erlaubt.",
-                   413: "Die Daten sind zu groß.", 429: "Zu viele Anfragen. Bitte warte kurz."}
+                   413: f"Die Daten sind zu groß (höchstens {MAX_BODY // (1024 * 1024)} MB).",
+                   429: "Zu viele Anfragen. Bitte warte kurz."}
 
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("text/javascript", ".js")
@@ -227,10 +228,9 @@ class SecurityMiddleware:
             if method in MUTATING and headers.get("x-requested-with") != "automate":
                 return await self._reject(send, 403, "csrf", "Anfrage ohne Dashboard-Kennung (X-Requested-With) "
                                                              "abgelehnt.")
-            length = headers.get("content-length", "")
-            if length.isdigit() and int(length) > MAX_BODY:  # chunked bodies: RequestBodyLimitMiddleware
-                return await self._reject(send, 413, "too_large", f"Die Daten sind zu groß (höchstens "
-                                                                  f"{MAX_BODY // (1024 * 1024)} MB).")
+        length = headers.get("content-length", "")
+        if length.isdigit() and int(length) > MAX_BODY:  # chunked bodies: RequestBodyLimitMiddleware -> http_error
+            return await self._reject(send, 413, "too_large", STATUS_MESSAGES[413])
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
@@ -280,10 +280,10 @@ def _install_handlers(app):
     app.add_exception_handler(RequestValidationError, _validation_error)
 
     @app.exception_handler(StarletteHTTPException)
-    def http_error(request, exc):
+    def http_error(request, exc):  # incl. RequestBodyLimitMiddleware's 413 for a chunked body over MAX_BODY
         msg = STATUS_MESSAGES.get(exc.status_code, f"Fehler {exc.status_code}.")
-        return _error(exc.status_code, "not_found" if exc.status_code == 404 else f"http_{exc.status_code}", msg,
-                      headers=getattr(exc, "headers", None))
+        code = {404: "not_found", 413: "too_large"}.get(exc.status_code, f"http_{exc.status_code}")
+        return _error(exc.status_code, code, msg, headers=getattr(exc, "headers", None))
 
     @app.exception_handler(settings.SettingsError)
     def settings_error(request, exc):

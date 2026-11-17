@@ -12,12 +12,16 @@ submission is validated before it is accepted.
 Errors: MissingApiKey (no key; InvalidApiKey, a subclass, when Anthropic rejects the stored one), BudgetExceeded (the
 daily limit, checked before every request), AgentError (.retryable, .code; str(e) is German for the dashboard;
 AgentCanceled when `cancel` is set). The agent never writes the DB except usage rows; it keeps a copy of each
-conversation (images elided) in data/tmp/agent/job-<id>/ for debugging.
+conversation (images elided) in data/tmp/agent/job-<id>/ for debugging, and a resumable checkpoint of an unfinished
+selection there (select.resume.json, see _Resume): a selection interrupted by a server stop, a retryable API error,
+a missing key or the daily limit continues after its last completed turn instead of paying for them again.
 
 Request shape: model from claude.model, adaptive thinking (the only mode on Sonnet 5.5 / Opus 5.5; summarized, so
 the saved conversations show Claude's reasoning) with effort from claude.effort, tool_choice auto (forced tool use
 is a 400 on these models: the prompt steers, and a turn without a tool call gets a nudge), server-side refusal
-fallback ("default"), streaming (so cancel works mid-generation).
+fallback ("default"), streaming (so cancel works mid-generation). When the pipeline's gate rejected this source's
+last selection (job params.check_feedback, a `clipper check` report), the first message lists those fails
+(gate_feedback(report) -> [(where, fail)]) so Claude fixes them instead of repeating them.
 Caching: tools + system form a 1-hour cached prefix shared by every job of a profile (the breakpoint is on the
 research block); top-level automatic caching (5 minutes) carries the growing conversation within a job. Usage is
 logged per request (per served model when a fallback ran) under purpose select | fix | dub_translate | test.
@@ -47,6 +51,7 @@ MAX_NUDGES = 2  # turns without a tool call (or cut off at max_tokens) before gi
 MAX_PAUSES = 3
 MAX_UPFRONT_SHEETS = 10
 CANDIDATES_MD_CHARS = 60000
+RESUME_MAX_AGE_S = 12 * 3600  # an interrupted selection older than this starts over
 MODEL_LABELS = {"claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-opus-5-5": "Claude Opus 5.5"}
 # Thinking is always on for these models; "summarized" costs the same and makes the saved conversations readable.
 THINKING = {"type": "adaptive", "display": "summarized"}
@@ -294,6 +299,27 @@ def _span(c):
     return f"{float(c['start']):.1f}-{float(c['end']):.1f} s ({float(c['end']) - float(c['start']):.0f} s)"
 
 
+FAIL_KEYS = ("variety", "length", "labels", "footage", "fx")  # clipper.hooks.has_fails: these keys are fails
+
+
+def gate_feedback(report):
+    """[(where, fail)] from a `clipper check` report ({"video N": entry}) the pipeline's gate stored as
+    params.check_feedback after rejecting this source's last selection."""
+    out = []
+    for video, entry in (report or {}).items() if isinstance(report, dict) else ():
+        if not isinstance(entry, dict):
+            continue
+        for kind in ("hooks", "titles"):
+            for text, v in (entry.get(kind) or {}).items():
+                for fail in (v or {}).get("fails") or []:
+                    out.append((f"{video}, {kind[:-1]} \"{text}\"", fail))
+        for key in FAIL_KEYS:
+            if entry.get(key):
+                v = entry[key]
+                out.append((f"{video}, {key}", "; ".join(map(str, v)) if isinstance(v, list) else str(v)))
+    return out
+
+
 def _first_message(ctx, max_turns, max_fix):
     data = T.candidates(ctx)
     cands, scens = data.get("candidates") or [], data.get("scenarios") or []
@@ -367,7 +393,8 @@ def _first_message(ctx, max_turns, max_fix):
         ("Fix rounds", f"{max_fix} rejected submission(s) come back for fixing; the next rejection fails the job"
          if max_fix else "none: the first rejected submission fails the job"),
     ]
-    return {"role": "user", "content": prompts.select_message(facts, "\n".join(lines), md, sheets)}
+    feedback = gate_feedback((job.get("params") or {}).get("check_feedback"))
+    return {"role": "user", "content": prompts.select_message(facts, "\n".join(lines), md, sheets, feedback)}
 
 
 def build_select_request(job, *, max_picks, avoid_openers=(), cancel=None, log=None):
@@ -433,9 +460,19 @@ def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
     sess = _Session(make_client(key), job_id, cancel)
     messages = params["messages"]
     turns = nudges = pauses = rejections = 0
-    outcome = "unfinished"
+    outcome, keep = "unfinished", False
+    resume = _Resume(ctx, model, messages[0])
+    state = resume.load()
+    if state:
+        messages[:] = state["messages"]
+        turns, nudges, pauses, rejections = (int(state[k]) for k in ("turns", "nudges", "pauses", "rejections"))
+        ctx.views, ctx.sheets_attached = int(state.get("views") or 0), set(state.get("sheets") or ())
+        ctx.say(f"Setzt die unterbrochene Auswahl nach {turns} Anfrage(n) fort (bereits bezahlt, nicht wiederholt)")
     try:
         while turns < max_turns:
+            if turns:
+                resume.save(messages, turns=turns, nudges=nudges, pauses=pauses, rejections=rejections,
+                            views=ctx.views, sheets=sorted(ctx.sheets_attached))
             ctx.say(f"Claude ({_label(model)}) denkt nach … (Anfrage {turns + 1} von {max_turns})")
             message = sess.request(params, "fix" if rejections else "select")
             turns += 1
@@ -513,9 +550,72 @@ def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
         raise AgentError(f"Claude hat nach {max_turns} Anfragen keine gültige Auswahl abgegeben (Limit „Höchstens "
                          "Schritte pro Auswahl“).", code="max_turns")
     except T.ToolCanceled:
+        keep = True
         raise AgentCanceled() from None
+    except (BudgetExceeded, MissingApiKey, AgentCanceled):  # the job waits or stops and comes back to this selection
+        keep = True
+        raise
+    except AgentError as e:
+        keep = e.retryable
+        raise
     finally:
+        if not keep:
+            resume.clear()
         _save_conversation(ctx, params, outcome, sess)
+
+
+class _Resume:
+    """The select conversation after each completed turn, so a job interrupted mid-selection (server stopped, a
+    429 retried later, the budget spent) continues where it was instead of paying for the same turns again. Valid
+    only for the same model and the same first message (same analysis, max_picks, openers, gate feedback) and for
+    RESUME_MAX_AGE_S; images and thinking signatures are kept (the turns go back to the API unchanged)."""
+
+    def __init__(self, ctx, model, first):
+        self.path = ctx.scratch / "select.resume.json"
+        self.model = model
+        self.key = hashlib.sha256(json.dumps(_raw(first), sort_keys=True).encode("utf-8")).hexdigest()
+
+    def load(self):
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("key") != self.key or data.get("model") != self.model \
+                or time.time() - float(data.get("saved_at") or 0) > RESUME_MAX_AGE_S \
+                or not isinstance(data.get("messages"), list) or len(data["messages"]) < 2:
+            return None
+        return data
+
+    def save(self, messages, **counters):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(f".{self.path.name}.tmp")
+            tmp.write_text(json.dumps({"key": self.key, "model": self.model, "saved_at": time.time(),
+                                       "messages": _raw(messages), **counters}, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(self.path)
+        except (OSError, TypeError, ValueError):  # a missing checkpoint only costs a fresh start
+            pass
+
+    def clear(self):
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _raw(obj):
+    """Plain JSON of request messages with SDK blocks, dumped exactly as the SDK sends them (nothing elided)."""
+    if isinstance(obj, dict):
+        return {k: _raw(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_raw(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if callable(getattr(obj, "model_dump", None)):
+        return _raw(obj.model_dump(exclude_unset=True, mode="json", by_alias=True,
+                                   exclude=getattr(obj, "__api_exclude__", None)))
+    return _raw({k: v for k, v in vars(obj).items() if not k.startswith("_")})
 
 
 # ---------------------------------------------------------------- debugging copies of conversations

@@ -75,14 +75,20 @@ function Alerts({ alerts }) {
   </section>`;
 }
 
-function alertLink(a) {
+// Every alert key the backend raises (health.py, pipeline.py, youtube.py, api/auth.py) and where to fix it.
+export function alertLink(a) {
   const k = a.key || '';
   if (k.startsWith('key.')) return { href: '#/kosten', label: 'Schlüssel eintragen' };
+  if (k === 'anthropic.billing') return { href: '#/kosten', label: 'Kosten & Schlüssel' };
   if (k.startsWith('budget.')) return { href: '#/kosten', label: 'Tageslimit' };
   if (k.startsWith('tools.')) return { href: '#/system', label: 'Systemcheck' };
   if (k.startsWith('job.failed.')) return { href: `#/jobs?job=${k.split('.').pop()}`, label: 'Job ansehen' };
+  if (k === 'live.service' || k === 'live.analysis_failed') return { href: '#/system', label: 'Systemcheck' };
   if (k.startsWith('live.')) return { href: '#/quellen', label: 'Streams' };
+  if (k.startsWith('scan.failed.')) return { href: '#/system', label: 'Systemcheck' };
   if (k.startsWith('disk.')) return { href: '#/system', label: 'Speicher' };
+  if (k.startsWith('youtube.')) return { href: '#/konten', label: 'Konten' };
+  if (k === 'login.recovery_code') return { href: '#/system', label: 'Passwort & 2FA' };
   return null;
 }
 

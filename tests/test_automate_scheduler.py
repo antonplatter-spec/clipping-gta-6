@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_automate_pipeline_fakes import PipelineCase, write_live_chunk  # noqa: E402
 
-from automate import health, paths, pipeline, runtime, scheduler, store, worker  # noqa: E402
+from automate import db, health, paths, pipeline, runtime, scheduler, store, worker  # noqa: E402
 
 
 def at(hhmm, days=0):
@@ -246,6 +246,24 @@ class HousekeepingTests(PipelineCase):
         self.assertIn("2 alte Hilfsdatei(en) entfernt", summary["message"])
         self.assertFalse(old_dir.exists())
         self.assertTrue(fresh.exists())
+
+    def test_daily_cleanup_prunes_old_runs_and_job_output_even_when_clipper_cleanup_fails(self):
+        for _ in range(3):
+            store.finish_run(store.start_run("health", None, "schedule"), True, {"message": "Alles in Ordnung"})
+        job = store.create_job("source", "gta6")
+        store.add_job_event(job, "[download] 50%", "debug")
+        store.add_job_event(job, "Video geladen")
+        store.update_job(job, status="done")
+        old = time.time() - 30 * 86400
+        db.conn().execute("UPDATE runs SET started_at = ?", (old,))
+        db.conn().execute("UPDATE job_events SET ts = ?", (old,))
+        db.conn().execute("UPDATE jobs SET finished_at = ?", (old,))
+        with mock.patch.object(runtime, "run_clipper", return_value=runtime.ProcResult(1, "", "boom", 0.1)):
+            summary = scheduler.run_cleanup()
+        self.assertFalse(store.last_run("cleanup", finished_only=True)["ok"])
+        self.assertEqual((summary["db_rows"]["runs.health"], summary["db_rows"]["job_events"]), (2, 1))
+        self.assertEqual([e["message"] for e in store.job_events(job)], ["Video geladen"])
+        self.assertEqual(len(store.list_runs("health")), 1)
 
     def test_threads_start_and_stop_promptly(self):
         stop = threading.Event()

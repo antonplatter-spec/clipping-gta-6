@@ -33,10 +33,14 @@ _system = {"report": None, "at": 0.0}
 _system_lock = threading.Lock()
 
 
+PRIVATE_PARAMS = ("upload_session",)  # a YouTube resumable session URI works like a token for that upload
+
+
 def job_out(job, detail=False):
     out = {k: job.get(k) for k in JOB_KEYS}
     if detail:
-        out["params"], out["result"] = job.get("params"), job.get("result")
+        out["params"] = {k: v for k, v in (job.get("params") or {}).items() if k not in PRIVATE_PARAMS}
+        out["result"] = job.get("result")
     return out
 
 

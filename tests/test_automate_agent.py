@@ -599,6 +599,54 @@ class LoopTests(FakeTools):
         self.assertIsInstance(ctx.exception, agent.AgentError)
         self.assertEqual(ctx.exception.code, "canceled")
 
+    def test_the_gates_check_feedback_goes_into_the_first_message(self):
+        report = {"video 1": {"hooks": {"Wait for it...": {"fails": ["vague: says nothing concrete"],
+                                                           "notes": ["a note"]}},
+                              "titles": {"GTA": {"fails": ["needs \"GTA 6\""]}}, "variety": "2 hooks of one type",
+                              "playbook": ["only a note"]}}
+        params = {**store.get_job(self.job_id)["params"], "check_feedback": report, "gate_rounds": 1}
+        store.update_job(self.job_id, params=params)
+        self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s")])])
+        content = self.client.calls[0]["messages"][0]["content"]
+        gate = [b["text"] for b in content if b.get("type") == "text" and "failed the quality gate" in b["text"]]
+        self.assertEqual(len(gate), 1)
+        for want in ('video 1, hook "Wait for it...": vague: says nothing concrete', 'video 1, title "GTA": needs',
+                     "video 1, variety: 2 hooks of one type"):
+            self.assertIn(want, gate[0])
+        self.assertNotIn("only a note", gate[0])
+        self.assertEqual(content[-1]["text"].split(":")[0], "Work through this source now and finish with submit_picks")
+        self.assertEqual(agent.gate_feedback(None), [])
+
+    def test_an_interrupted_selection_continues_after_its_last_paid_turn(self):
+        first = msg([thinking(), text("Reading."), call("grep_transcript", {"around_s": 11}, "g1")])
+        with self.assertRaises(agent.AgentError) as ctx:  # the next request hits a 429 (or the server stops)
+            self.run_select([first, http_error(anthropic.RateLimitError, 429)])
+        self.assertTrue(ctx.exception.retryable)
+        transcript_calls = [op for op, _ in self.bridge_calls].count("transcript")
+        lines = []
+        sel, client = self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s")])], log=lines.append)
+        self.assertEqual(len(sel.picks), 1)
+        self.assertEqual(sel.turns, 2)  # one paid turn carried over, one new
+        resumed = client.calls[0]["messages"]
+        self.assertEqual([m["role"] for m in resumed], ["user", "assistant", "user"])
+        self.assertEqual(resumed[1]["content"][0]["type"], "thinking")
+        self.assertEqual(resumed[1]["content"][2]["id"], "g1")
+        self.assertEqual(resumed[2]["content"][0]["tool_use_id"], "g1")
+        self.assertEqual([op for op, _ in self.bridge_calls].count("transcript"), transcript_calls)  # not re-run
+        self.assertTrue(any("unterbrochene Auswahl" in x for x in lines))
+        checkpoint = self.root / "data" / "tmp" / "agent" / f"job-{self.job_id}" / "select.resume.json"
+        self.assertFalse(checkpoint.exists())  # accepted: nothing to resume any more
+        # a different first message (here: other max_picks) starts over; a non-retryable end drops the checkpoint
+        with self.assertRaises(agent.AgentError):
+            self.run_select([first, http_error(anthropic.RateLimitError, 429)])
+        self.assertTrue(checkpoint.exists())
+        _, client = self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s")])], max_picks=1)
+        self.assertEqual(len(client.calls[0]["messages"]), 1)
+        details = SimpleNamespace(category="cyber", explanation=None)
+        with self.assertRaises(agent.AgentError):
+            self.run_select([first, msg([], stop="refusal", stop_details=details)])
+        self.assertFalse(checkpoint.exists())
+
     def test_refusal_and_unexpected_stops_end_the_job(self):
         details = SimpleNamespace(category="general_harms", explanation=None)
         with self.assertRaises(agent.AgentError) as ctx:

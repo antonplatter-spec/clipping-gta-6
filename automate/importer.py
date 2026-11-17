@@ -12,7 +12,10 @@ Never overwrites DB state:
     and creators the owner deleted are not brought back. File order becomes insertion order (= the CLI's order);
   - prefs.yaml -> prefs.* settings and schedule_time -> schedule.scan_times, once, only keys without a stored value;
   - .env (default ROOT/.env) -> secrets fish_api_key / anthropic_api_key and setting render.top_hooks
-    (CLIPPER_TOP_HOOKS), once, only when unset there.
+    (CLIPPER_TOP_HOOKS), once, only when unset there;
+  - price rows a release adds to settings.DEFAULT_PRICES -> a stored claude.prices, once per row (meta
+    "prices.defaults" lists the rows already offered): rows the owner edited stay, a row the owner deleted after it
+    was offered stays deleted.
 `force=True` ignores the markers but still only adds what's missing (import-yaml command).
 """
 from pathlib import Path
@@ -126,6 +129,20 @@ def _import_env(env_file, force, summary):
     store.set_meta("import.env", {"file": paths.rel(env_file) if env_file.exists() else None})
 
 
+def _new_price_rows(summary):
+    offered = set(store.get_meta("prices.defaults") or [])
+    new = [m for m in settings.DEFAULT_PRICES if m not in offered]
+    if not new:
+        return
+    if "claude.prices" in store.stored_setting_keys():  # unset: the defaults apply as they are
+        prices = store.get_setting("claude.prices")
+        added = {m: settings.DEFAULT_PRICES[m] for m in new if m not in prices}
+        if added:
+            store.set_settings({"claude.prices": {**prices, **added}})
+            summary["settings"].append("claude.prices")
+    store.set_meta("prices.defaults", sorted(offered | set(new)))
+
+
 def run(force=False, env_file=None):
     summary = {"profiles": [], "creators": {}, "streams": {}, "settings": [], "secrets": [], "skipped": []}
     repo = paths.repo_profiles_dir()
@@ -138,4 +155,5 @@ def run(force=False, env_file=None):
         _import_list(name, "streams", force, summary)
     _import_prefs(force, summary)
     _import_env(Path(env_file) if env_file else paths.ROOT / ".env", force, summary)
+    _new_price_rows(summary)
     return summary

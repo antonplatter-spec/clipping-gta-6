@@ -19,11 +19,14 @@ never returned by the API and never logged.
     revoke(credentials) -> bool                             best effort
     video_resource(variant, video, privacy, title=None, description=None) -> {snippet, status}
     upload_variant(variant_id, account_id, privacy, *, title=None, description=None, on_progress=None,
-                   cancel=None) -> {"video_id", "url"}
+                   cancel=None, session=None, on_session=None) -> {"video_id", "url"}
         Resumable upload in CHUNK pieces (Content-Range); a dropped connection or a 5xx asks the session how far
         it got and continues from there (backoff, MAX_RETRIES in a row), a lost session starts a new one, a 401
         refreshes the token. `on_progress(done_bytes, total_bytes)` after every confirmed chunk; `cancel` (a
-        threading.Event) is checked between chunks and while waiting.
+        threading.Event) is checked between chunks and while waiting. `on_session(uri)` gets every new session
+        before its first byte is sent; the caller keeps it, and a later attempt passes it as `session`: that
+        attempt asks it first, so an upload YouTube finished before the server died (or before its result was
+        saved) returns the existing video instead of uploading it twice.
 """
 import json
 import logging
@@ -421,7 +424,8 @@ def _done(r):
     return {"video_id": vid, "url": f"https://youtube.com/shorts/{vid}"}
 
 
-def upload_variant(variant_id, account_id, privacy, *, title=None, description=None, on_progress=None, cancel=None):
+def upload_variant(variant_id, account_id, privacy, *, title=None, description=None, on_progress=None, cancel=None,
+                   session=None, on_session=None):
     variant = store.get_variant(variant_id)
     if variant is None:
         raise YouTubeError("Diese Variante gibt es nicht mehr.", code="not_found")
@@ -439,7 +443,7 @@ def upload_variant(variant_id, account_id, privacy, *, title=None, description=N
             on_progress(done, size)
 
     sessions = failures = 0
-    session, offset, ask = None, 0, False
+    offset, ask = 0, bool(session)  # an earlier attempt's session: first ask how far it got (maybe all the way)
     with open(path, "rb") as f:
         while True:
             _check_cancel(cancel)
@@ -451,6 +455,8 @@ def upload_variant(variant_id, account_id, privacy, *, title=None, description=N
                         raise YouTubeError("YouTube hat die Upload-Sitzung mehrfach verloren. Bitte später erneut "
                                            "versuchen.", retryable=True, code="youtube_session_lost")
                     session, offset, ask = _start_session(account_id, resource, size), 0, False
+                    if on_session:
+                        on_session(session)
                 if ask or offset >= size:  # after a failure, or all sent but unconfirmed: where did it stop?
                     r = _put(session, account_id, b"", f"bytes */{size}")
                 else:

@@ -35,7 +35,8 @@
 //     `checked_at`, all nullable) and `platform`.
 //  9. GET /api/settings schema: field format documented in `SettingSchema` (type names, choices as
 //     `{value, label, help?}`, `auto`, `unit`, `step`, `hidden`).
-// 10. GET /api/social/youtube/app adds `client_id_hint` (masked client id or null). PUT accepts either field alone.
+// 10. GET /api/social/youtube/app adds `client_id_hint` (masked client id or null) and `redirect_note` (German
+//     explanation of the redirect, shown in the YouTube card). PUT accepts either field alone.
 //     The OAuth callback finishes by sending the browser to `/#/konten?youtube=connected` or
 //     `/#/konten?youtube=error&message=<urlencoded German text>`.
 // 11. Tool rows in GET /api/system may carry `required` (bool) and `purpose` (German, what the tool is for).
@@ -929,6 +930,7 @@ export const deleteAccount = (id) => request('DELETE', `/social/accounts/${id}`)
  * @property {boolean} client_secret_set
  * @property {string|null} [client_id_hint]  ADDITION: masked client id
  * @property {string} redirect_uri  exactly what goes into the Google OAuth client ("http://localhost:8765/api/social/youtube/callback")
+ * @property {string} [redirect_note]  German: where Google sends the browser back and what that means (PC vs. phone)
  */
 
 /** GET /api/social/youtube/app @returns {Promise<YoutubeApp>} */

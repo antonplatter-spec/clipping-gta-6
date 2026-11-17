@@ -1306,9 +1306,15 @@ def _stage_upload(run, job):
         return {"status": "done", "progress": "Schon hochgeladen"}
     yt = _youtube()
     run.progress("Lade auf YouTube hoch …", force=True)
+
+    def keep_session(uri):  # before the first byte: a retry after a crash asks this session instead of re-uploading
+        run.update(params={**(run.job.get("params") or {}), "upload_session": uri})
+    if params.get("upload_session"):
+        run.event("Frage YouTube zuerst, wie weit der letzte Versuch kam (kein doppelter Upload)")
     try:
         res = run.call(yt.upload_variant, params["variant_id"], params["account_id"], params["privacy"],
-                       on_progress=run.on_progress, cancel=run.cancel, timeout=T_UPLOAD)
+                       on_progress=run.on_progress, cancel=run.cancel, timeout=T_UPLOAD,
+                       session=params.get("upload_session"), on_session=keep_session)
     except yt.YouTubeError as e:
         if getattr(e, "code", "") == "canceled" and run.cancel.is_set():
             raise Canceled(run.reason or "cancel") from None

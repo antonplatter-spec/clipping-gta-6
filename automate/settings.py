@@ -65,9 +65,15 @@ GROUPS = {
     "ui": "Oberfläche",
 }
 
+# The selectable models, plus the ones a refusal fallback ("fallbacks": "default") can route a request to: their
+# usage is logged under the model that served it and must not be costed at the Sonnet 5.5 rate. A row added here
+# reaches databases that already store their own claude.prices once, at startup (importer.run).
 DEFAULT_PRICES = {
     "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_read": 0.10, "cache_write": 2.5},
     "claude-opus-5-5": {"input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.5},
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
 }
 PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 LANGUAGES = (("es", "Spanisch"), ("ru", "Russisch"), ("pt", "Portugiesisch"), ("de", "Deutsch"), ("fr", "Französisch"),
@@ -183,7 +189,7 @@ del S
 SECRETS = {
     "anthropic_api_key": {"label": "Anthropic-API-Schlüssel", "env": "ANTHROPIC_API_KEY", "prefix": "sk-ant-",
                           "help": "Für Claudes Auswahl der Momente. Erstellen unter console.anthropic.com → "
-                                  "API Keys (beginnt mit sk-ant-)."},
+                                  "API Keys (beginnt mit „sk-ant-“)."},
     "fish_api_key": {"label": "Fish-Audio-API-Schlüssel", "env": "FISH_API_KEY",
                      "help": "Optional: für Voiceover und Synchronisation in der geklonten Stimme. Erstellen unter "
                              "fish.audio → API Keys."},
@@ -392,5 +398,5 @@ def validate_secret(name, value):
                                    f"Schlüssel einfügen"})
     prefix = SECRETS[name].get("prefix")
     if prefix and not v.startswith(prefix):
-        raise SettingsError({name: f"{SECRETS[name]['label']}: beginnt mit {prefix}"})
+        raise SettingsError({name: f"{SECRETS[name]['label']}: muss mit „{prefix}“ beginnen"})
     return v
