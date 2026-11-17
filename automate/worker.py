@@ -49,6 +49,7 @@ MAX_EVENTS = 400           # output lines stored per claimed run ...
 MAX_ERROR_EVENTS = 100     # ... plus this many error-looking lines after that
 MAX_EVENT_CHARS = 1000
 NOISE_RE = re.compile(r"^\[download\]\s+[\d.]+%|^frame=|\btime=\d+:\d\d:\d\d|^\s*\d+%\|| \d+(\.\d+)?%\s*$")
+JSON_LINE_RE = re.compile(r'^\s*([\[\]{}],?|"[^"]*":.*)$')  # a command's JSON result: stored as data, not as events
 ERRORISH_RE = re.compile(r"error|exception|traceback|failed|warning|refused|denied|not found", re.I)
 
 _active = {}
@@ -248,6 +249,9 @@ class Run:
         return got
 
     def _store_line(self, line, noisy):
+        if JSON_LINE_RE.match(line):
+            self._dropped += 1
+            return
         errorish = bool(ERRORISH_RE.search(line))
         if noisy and not errorish:
             if time.monotonic() - self._noise_at < NOISE_EVERY_S:

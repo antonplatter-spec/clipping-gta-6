@@ -5,7 +5,9 @@ timers of clipper/schedule.py (nothing is installed in the OS).
     scheduler       every TICK_S: resume jobs waiting for a key/budget; per enabled profile, when
                     automation.enabled, run the scan of the latest passed slot of schedule.scan_times if no scan
                     started since (a slot missed while the PC slept or was off runs once on wake, never once per
-                    missed slot; clock changes only move which slot is "latest"); `clipper cleanup` once a day
+                    missed slot; clock changes only move which slot is "latest"); once a day `clipper cleanup`
+                    and pruning of data/tmp (agent conversation copies, one-off picks/translation files older
+                    than TMP_KEEP_DAYS)
     live-service    every schedule.live_watch_minutes when automation.live_enabled: per enabled profile with active
                     streams the bridge op `live_tick` (= `clipper live watch --chunk N` + cleanup + `live health`
                     with one status probe of the streams), then a live_chunk job per newly analyzed chunk; the
@@ -16,14 +18,14 @@ All runs are recorded in `runs` (kind scan | live_watch | cleanup | health) with
     start_scheduler(stop) -> [threads] ; next_scan_time(now=None) -> float | None ; run_scan_now(profile=None)
     scan_running(profile=None) -> bool   a scan (scheduled or "Jetzt suchen") is in progress
     due_scan(profile, now=None) -> slot timestamp | None ; tick(now=None) ; live_tick(trigger="schedule")
-    run_cleanup(trigger="schedule", dry_run=False) -> summary ; wake()
+    run_cleanup(trigger="schedule", dry_run=False) -> summary ; prune_tmp(days=TMP_KEEP_DAYS) -> files ; wake()
 """
 import logging
 import threading
 import time
 from datetime import datetime, timedelta
 
-from . import db, health, pipeline, runtime, store
+from . import db, health, paths, pipeline, runtime, store
 
 log = logging.getLogger("automate.scheduler")
 
@@ -32,6 +34,7 @@ SLOT_GRACE_S = 15 * 60       # a scan started up to this long before a slot coun
 CATCH_UP_AFTER_S = 10 * 60   # a slot run later than this is labelled "catch_up" (e.g. after sleep)
 CLEANUP_EVERY_S = 24 * 3600
 T_LIVE_TICK = 20 * 60
+TMP_KEEP_DAYS = 5
 
 _wake_event = threading.Event()
 _cleanup_lock = threading.Lock()
@@ -101,6 +104,33 @@ def run_scan_now(profile=None):
 
 # ---------------------------------------------------------------- cleanup
 
+def prune_tmp(days=TMP_KEEP_DAYS, now=None):
+    """Scratch files under data/tmp older than `days` (the agent's conversation copies, one-off picks and translation
+    files; a stage that still needs one writes it again), and directories left empty that long."""
+    now = time.time() if now is None else now
+    root, removed = paths.tmp_dir(), 0
+    if not root.is_dir():
+        return 0
+    ages = {}
+    for f in root.rglob("*"):  # every age first: deleting a file refreshes its folder's mtime
+        try:
+            ages[f] = now - f.lstat().st_mtime
+        except OSError:
+            continue
+    for f in sorted(ages, key=lambda p: len(p.parts), reverse=True):  # deepest first
+        try:
+            old = ages[f] > days * 86400
+            if f.is_dir() and not f.is_symlink():
+                if old and not any(f.iterdir()):
+                    f.rmdir()
+            elif old:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def run_cleanup(trigger="schedule", dry_run=False, profile=None):
     """`clipper cleanup`: source.mp4/audio.wav past their keep time (transcripts, picks and exports stay)."""
     profile = profile or store.get_setting("ui.default_profile")
@@ -116,9 +146,11 @@ def run_cleanup(trigger="schedule", dry_run=False, profile=None):
         store.finish_run(rid, False, summary)
         return summary
     files, gb = int(data.get("files") or 0), float(data.get("gb") or 0)
+    pruned = 0 if dry_run else prune_tmp()
     verb = "würde löschen" if dry_run else "gelöscht"
-    msg = (f"{files} Quelldatei(en) {verb} ({gb:.1f} GB)" if files else "Nichts zu löschen")
-    summary = {"message": msg, **data}
+    msg = (f"{files} Quelldatei(en) {verb} ({gb:.1f} GB)" if files else "Nichts zu löschen") \
+        + (f", {pruned} alte Hilfsdatei(en) entfernt" if pruned else "")
+    summary = {"message": msg, **data, "tmp_files": pruned}
     store.finish_run(rid, True, summary)
     return summary
 

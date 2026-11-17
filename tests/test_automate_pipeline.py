@@ -226,8 +226,8 @@ class LifecycleTests(Helpers):
         self.clip.recommended = 2
         rid = store.start_run("scan", "gta6", "schedule")
         a = store.create_job("source", "gta6", clipper_job="AAAAAAAAAAA", source_url=URL, run_id=rid)
-        b = store.create_job("source", "gta6", clipper_job="BBBBBBBBBBB", source_url="https://youtu.be/BBBBBBBBBBB",
-                             run_id=rid, params={"duration": 600})
+        store.create_job("source", "gta6", clipper_job="BBBBBBBBBBB", source_url="https://youtu.be/BBBBBBBBBBB",
+                         run_id=rid, params={"duration": 600})
         store.update_job(a, params={"duration": 600})
         self.drive()
         self.assertEqual([c["max_picks"] for c in self.agent.calls], [2, 1])  # 3 per run, 2 already made
@@ -283,6 +283,47 @@ class WaitingTests(Helpers):
             self.assertEqual(pipeline.resume_waiting(), [])
         self.assertEqual(pipeline.resume_waiting(), [jid])
         self.assertIsNotNone(store.get_alert("budget.reached")["resolved_at"])
+
+
+    def test_a_rejected_key_waits_for_a_new_one_instead_of_looping(self):
+        self.agent.script.append(self.agent.InvalidApiKey("Anthropic hat den API-Schlüssel abgelehnt"))
+        jid = self.gated()
+        self.assertEqual(self.job(jid)["status"], "waiting_key")
+        self.assertIn("abgelehnt", store.get_alert("key.anthropic_missing")["message"])
+        self.assertEqual(pipeline.resume_waiting(), [])  # the same key would only be rejected again
+        store.set_secret("anthropic_api_key", KEY + "new")
+        pipeline.on_settings_changed(["anthropic_api_key"])
+        self.drive()
+        self.assertEqual(self.job(jid)["status"], "waiting_approval")
+        self.assertIsNotNone(store.get_alert("key.anthropic_missing")["resolved_at"])
+
+    def test_no_anthropic_credit_waits_and_retries_hourly(self):
+        self.agent.script.append(self.agent.AgentError("Das Anthropic-Konto hat kein Guthaben mehr.", code="billing"))
+        jid = self.gated()
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["params"]["wait"]), ("waiting_budget", "billing"))
+        alert = store.get_alert("anthropic.billing")
+        self.assertIn("kein Guthaben", alert["message"])
+        self.assertIsNone(store.get_alert("budget.reached"))  # not the daily limit
+        self.assertEqual(pipeline.resume_waiting(), [])
+        with mock.patch.object(time, "time", return_value=time.time() + 3700):
+            self.assertEqual(pipeline.resume_waiting(), [jid])
+        self.assertNotIn("wait", self.job(jid)["params"])
+        self.drive()
+        self.assertEqual(self.job(jid)["status"], "waiting_approval")
+        self.assertIsNotNone(store.get_alert("anthropic.billing")["resolved_at"])
+
+    def test_agent_errors_retry_only_when_the_agent_says_so(self):
+        self.agent.script += [self.agent.AgentError("429", retryable=True, code="rate_limited"),
+                              self.agent.AgentError("Claude lehnt ab", code="refusal")]
+        jid = self.gated()
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["attempts"]), ("queued", 1))
+        self.assertGreater(job["not_before"], time.time() + 800)  # rate limits back off longer
+        self.drive(now=time.time() + 1000)
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["attempts"]), ("failed", 2))
+        self.assertEqual(job["error"], "Claude: Claude lehnt ab")
 
 
 class FailureTests(Helpers):

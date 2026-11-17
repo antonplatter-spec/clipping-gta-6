@@ -37,7 +37,7 @@ Public (API):
     update_pick_data(pick_id, changes) -> (pick row, check_report)       raises PickCheckFailed on fails
     enqueue_dub(video_id, lang) -> job id ; enqueue_upload(variant_id, account_id, privacy) -> job id
     retry_job(job_id) -> job row ; cancel_job(job_id) -> job row
-    on_settings_changed(keys) ; resume_waiting() -> [job ids]
+    on_settings_changed(keys) ; resume_waiting(force=False) -> [job ids]
     source_expires_at(job) -> float | None   when `clipper cleanup` deletes the job's source.mp4 (None: gone / never)
     write_picks_file(job_id)                 jobs/<clipper_job>/picks.json = the job's picks in idx order
 Worker / scheduler side:
@@ -45,6 +45,7 @@ Worker / scheduler side:
     close_live_chunks(profile, ready) -> [clipper jobs] ; run_scan(run_id, profile, trigger, cancel=None) -> summary
     youtube_id(url) ; trailing_json(text) ; profile_config(profile)
 """
+import hashlib
 import importlib
 import json
 import logging
@@ -103,6 +104,11 @@ VOICE_KEY_MISSING = ("Dieser Clip hat ein Voiceover, aber es ist kein Fish-Audio
 LIVE_SOURCE_GONE = ("Das Quellvideo dieses Live-Stücks wurde bereits gelöscht (Live-Aufnahmen bleiben nach dem Clippen "
                     "3 Stunden, sonst 2 Tage ohne Änderung). Der Clip kann nicht mehr gerendert werden – gib Clips aus "
                     "Live-Streams bitte früher frei.")
+KEY_REJECTED = ("Anthropic hat den gespeicherten API-Schlüssel abgelehnt (ungültig oder widerrufen). Trage unter "
+                "„Kosten & Schlüssel“ einen gültigen ein – wartende Jobs laufen dann von selbst weiter.")
+BILLING = ("Das Anthropic-Konto hat kein Guthaben mehr oder sein Ausgabenlimit erreicht "
+           "(console.anthropic.com → Billing).")
+BILLING_RETRY_S = 3600
 YTDLP_MISSING = ("yt-dlp ist nicht installiert, deshalb kann kein Video geladen werden. Unter System steht, wie du es "
                  "installierst (z. B. „uv run python -m clipper setup --install“).")
 
@@ -364,44 +370,76 @@ def _ensure_sources(run, parent, data):
 
 # ---------------------------------------------------------------- alerts for waiting jobs
 
+def _key_id(key):
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16] if key else None
+
+
+def _key_state():
+    """"missing" | "rejected" (Anthropic refused exactly the stored key) | "ok"."""
+    key = store.get_secret("anthropic_api_key")
+    if not key:
+        return "missing"
+    return "rejected" if store.get_meta("anthropic.rejected_key") == _key_id(key) else "ok"
+
+
+def _waiting_for_credit():
+    return [j for j in store.list_jobs(status="waiting_budget", limit=10000)[0]
+            if (j.get("params") or {}).get("wait") == "billing"]
+
+
 def sync_waiting_alerts():
-    """key.anthropic_missing / budget.reached from the current state (jobs waiting, automation on)."""
+    """key.anthropic_missing, anthropic.billing and budget.reached from the current state (waiting jobs, automation
+    switched on)."""
     auto = store.get_setting("automation.enabled") or store.get_setting("automation.live_enabled")
     counts = store.job_counts()
-    if not store.get_secret("anthropic_api_key") and (counts["waiting_key"] or auto):
-        n = counts["waiting_key"]
+    state, n = _key_state(), counts["waiting_key"]
+    if state != "ok" and (n or auto):
         store.raise_alert("key.anthropic_missing", "error" if n else "warning",
-                          (f"{n} Job(s) warten auf Claude. " if n else "") + KEY_MISSING, {"waiting_jobs": n})
+                          (f"{n} Job(s) warten auf Claude. " if n else "")
+                          + (KEY_REJECTED if state == "rejected" else KEY_MISSING), {"waiting_jobs": n, "key": state})
     else:
         store.resolve_alert("key.anthropic_missing")
-    if not costs.budget_ok() and (counts["waiting_budget"] or auto):
-        n = counts["waiting_budget"]
+    credit = _waiting_for_credit()
+    if credit:
+        store.raise_alert("anthropic.billing", "error",
+                          f"{store.get_meta('anthropic.billing_message') or BILLING} {len(credit)} Job(s) warten; der "
+                          "Server versucht es stündlich erneut (sofort, sobald du unter „Kosten & Schlüssel“ etwas "
+                          "speicherst).", {"waiting_jobs": len(credit)})
+    else:
+        store.resolve_alert("anthropic.billing")
+    daily = counts["waiting_budget"] - len(credit)
+    if not costs.budget_ok() and (daily or auto):
         limit = float(store.get_setting("claude.daily_limit_eur") or 0)
         spent = costs.spent_today_eur()
         store.raise_alert("budget.reached", "warning",
                           f"Das Claude-Tageslimit von {limit:.2f} € ist erreicht ({spent:.2f} € heute). "
-                          + (f"{n} Job(s) warten und laufen morgen automatisch weiter" if n else
+                          + (f"{daily} Job(s) warten und laufen morgen automatisch weiter" if daily else
                              "Neue Auswahlen warten bis morgen")
                           + " – oder erhöhe das Limit unter „Kosten & Schlüssel“.",
-                          {"waiting_jobs": n, "limit_eur": limit, "spent_eur": spent})
+                          {"waiting_jobs": daily, "limit_eur": limit, "spent_eur": spent})
     else:
         store.resolve_alert("budget.reached")
 
 
-def resume_waiting():
-    """waiting_key -> queued once a key is stored, waiting_budget -> queued once the budget allows (new day, higher
-    limit). Compare-and-set, so a job canceled meanwhile stays canceled."""
+def resume_waiting(force=False):
+    """waiting_key -> queued once a key is stored (not the one Anthropic rejected), waiting_budget -> queued once the
+    daily budget allows (new day, higher limit); jobs waiting for Anthropic credit retry hourly, or at once with
+    `force` (a settings/key change). Compare-and-set, so a job canceled meanwhile stays canceled."""
     resumed = []
-    if store.get_secret("anthropic_api_key"):
+    if _key_state() == "ok":
         for job in store.list_jobs(status="waiting_key", limit=10000)[0]:
             if store.transition_job(job["id"], ("waiting_key",), status="queued", not_before=0,
                                     progress="Schlüssel ist da – geht weiter …"):
                 resumed.append(job["id"])
-    if costs.budget_ok():
-        for job in store.list_jobs(status="waiting_budget", limit=10000)[0]:
-            if store.transition_job(job["id"], ("waiting_budget",), status="queued", not_before=0,
-                                    progress="Budget frei – geht weiter …"):
-                resumed.append(job["id"])
+    credit_due = force or time.time() - float(store.get_meta("anthropic.billing_at") or 0) >= BILLING_RETRY_S
+    budget = costs.budget_ok()
+    for job in store.list_jobs(status="waiting_budget", limit=10000)[0]:
+        params = dict(job.get("params") or {})
+        if not (credit_due if params.pop("wait", None) == "billing" else budget):
+            continue
+        if store.transition_job(job["id"], ("waiting_budget",), status="queued", not_before=0, params=params,
+                                progress="Geht weiter …"):
+            resumed.append(job["id"])
     for jid in resumed:
         store.add_job_event(jid, "Wartezeit vorbei, wieder eingereiht")
     sync_waiting_alerts()
@@ -410,28 +448,63 @@ def resume_waiting():
     return resumed
 
 
-def _park_key(run):
-    out = {"status": "waiting_key", "progress": "Wartet auf den Anthropic-Schlüssel (Kosten & Schlüssel)"}
-    run.update(**out)
-    run.event("Kein Anthropic-Schlüssel gespeichert: der Job wartet", "warning")
+def _park_key(run, message=None, rejected=False):
+    if rejected:
+        store.set_meta("anthropic.rejected_key", _key_id(store.get_secret("anthropic_api_key")))
+    run.update(status="waiting_key", progress="Wartet: Anthropic hat den Schlüssel abgelehnt" if rejected else
+               "Wartet auf den Anthropic-Schlüssel (Kosten & Schlüssel)")
+    run.event(message or "Kein Anthropic-Schlüssel gespeichert: der Job wartet", "warning")
     sync_waiting_alerts()
 
 
-def _park_budget(run):
-    run.update(status="waiting_budget", progress="Wartet: Claude-Tageslimit erreicht (geht morgen weiter)")
-    run.event("Tageslimit für Claude erreicht: der Job wartet", "warning")
+def _park_budget(run, billing=None):
+    """Daily limit reached, or (`billing` = the agent's German message) the Anthropic account has no credit."""
+    params = dict((run.job or {}).get("params") or {})
+    params.pop("wait", None)
+    if billing:
+        params["wait"] = "billing"
+        store.set_meta("anthropic.billing_at", time.time())
+        store.set_meta("anthropic.billing_message", billing)
+    run.update(status="waiting_budget", params=params,
+               progress="Wartet: das Anthropic-Konto hat kein Guthaben" if billing else
+               "Wartet: Claude-Tageslimit erreicht (geht morgen weiter)")
+    run.event(billing or "Tageslimit für Claude erreicht: der Job wartet", "warning")
     sync_waiting_alerts()
 
 
 def _claude_ready(run):
     """False (and the job parked) when Claude can't be asked now."""
-    if not store.get_secret("anthropic_api_key"):
-        _park_key(run)
+    state = _key_state()
+    if state != "ok":
+        _park_key(run, rejected=state == "rejected")
         return False
     if not costs.budget_ok():
         _park_budget(run)
         return False
     return True
+
+
+def _ask_claude(run, fn, *args, timeout, **kwargs):
+    """agent.select_picks / translate_dub in the run's helper thread; None when the job was parked instead (no or a
+    rejected key, daily limit, no Anthropic credit). Other AgentErrors fail the stage, retried only when the agent
+    says trying again can help."""
+    if not _claude_ready(run):
+        return None
+    agent = _agent()
+    try:
+        return run.call(fn, *args, log=run.log, cancel=run.cancel, timeout=timeout, **kwargs)
+    except agent.MissingApiKey as e:  # InvalidApiKey (401) is both: the stored key was rejected
+        _park_key(run, str(e), rejected=isinstance(e, agent.AgentError))
+    except agent.BudgetExceeded:
+        _park_budget(run)
+    except agent.AgentError as e:
+        code = getattr(e, "code", None)
+        if code == "billing":
+            _park_budget(run, str(e))
+            return None
+        raise StageError(f"Claude: {e}", retryable=bool(getattr(e, "retryable", False)),
+                         slow=code == "rate_limited") from None
+    return None
 
 
 # ---------------------------------------------------------------- error classification
@@ -780,7 +853,8 @@ def max_picks_for(job, recommended):
     cap = int(store.get_setting("prefs.max_videos_per_run"))
     produced, open_sources = 0, 1
     if job.get("run_id"):
-        others = [j for j in store.list_jobs(kind="source", run_id=job["run_id"], limit=1000)[0] if j["id"] != job["id"]]
+        others = [j for j in store.list_jobs(kind="source", run_id=job["run_id"], limit=1000)[0]
+                  if j["id"] != job["id"]]
         for other in others:
             produced += sum(1 for p in _all_picks(other["id"]) if p["status"] != "rejected")
             if other["status"] in ("queued", "running", "waiting_key", "waiting_budget") \
@@ -839,24 +913,14 @@ def _stage_select(run, job):
         if job["kind"] == "live_chunk":
             _live_done_quiet(run, job)
         return {"status": "skipped", "error": reason, "progress": "Keine Clips", "result": result}
-    if not _claude_ready(run):
-        return None
     agent = _agent()
     openers = avoid_openers(job)
     run.progress("Claude wählt Momente …", force=True)
     run.event(f"Claude wählt bis zu {n} Momente (empfohlen {recommended})"
               + (f", vermeidet Anfänge: {', '.join(openers[:8])}" if openers else ""))
-    try:
-        sel = run.call(agent.select_picks, job["id"], max_picks=n, avoid_openers=openers, log=run.log,
-                       cancel=run.cancel, timeout=T_SELECT)
-    except agent.MissingApiKey:
-        _park_key(run)
+    sel = _ask_claude(run, agent.select_picks, job["id"], max_picks=n, avoid_openers=openers, timeout=T_SELECT)
+    if sel is None:
         return None
-    except agent.BudgetExceeded:
-        _park_budget(run)
-        return None
-    except agent.AgentError as e:
-        raise StageError(f"Claude: {e}", retryable=bool(getattr(e, "retryable", False))) from None
     sel = _selection(sel)
     if len(sel["picks"]) > n:
         run.event(f"Claude lieferte {len(sel['picks'])} Picks, erlaubt sind {n}: die ersten {n} bleiben", "warning")
@@ -895,6 +959,7 @@ def _stage_gate(run, job):
     if chk2.get("fails"):
         return _gate_failed(run, job, chk2.get("report") or {})
     report = chk2.get("report") or {}
+
     def nth(seq, i):
         return seq[i] if isinstance(seq, list) and i < len(seq) else None
     items = [{"data": p, "reason": nth(sel.get("reasons"), i), "click_trigger": nth(sel.get("click_triggers"), i),
@@ -1014,7 +1079,8 @@ def _leftovers(job):
     if not snap:
         return []
     pick_id = (job.get("params") or {}).get("pick_id")
-    known = {v["folder"] for v in store.list_videos(pick_id=pick_id, archived=None, limit=1000)[0]} if pick_id else set()
+    known = ({v["folder"] for v in store.list_videos(pick_id=pick_id, archived=None, limit=1000)[0]}
+             if pick_id else set())
     out = []
     for d in snap.get("dirs") or []:
         before = set((snap.get("before") or {}).get(d) or [])
@@ -1194,21 +1260,11 @@ def _stage_dub(run, job):
             raise StageError("„dub segments“ lieferte kein JSON", retryable=True) from None
         run.update(result=result)
     if "translation" not in result:
-        if not _claude_ready(run):
-            return None
-        agent = _agent()
         run.progress(f"Claude übersetzt ins {lang} …", force=True)
-        try:
-            tr = run.call(agent.translate_dub, job["id"], int(idx), lang, result["segments"], log=run.log,
-                          cancel=run.cancel, timeout=T_TRANSLATE)
-        except agent.MissingApiKey:
-            _park_key(run)
+        tr = _ask_claude(run, _agent().translate_dub, job["id"], int(idx), lang, result["segments"],
+                         timeout=T_TRANSLATE)
+        if tr is None:
             return None
-        except agent.BudgetExceeded:
-            _park_budget(run)
-            return None
-        except agent.AgentError as e:
-            raise StageError(f"Claude: {e}", retryable=bool(getattr(e, "retryable", False))) from None
         result["translation"] = tr
         run.update(result=result)
     paths.ensure_data_dir()
@@ -1281,7 +1337,8 @@ _STAGES = {
 
 def _check_profile(profile):
     if not profile or not store.get_profile(profile):
-        raise PipelineError(f"Unbekanntes Profil „{profile}“", "unknown_profile", 422, {"profile": "Unbekanntes Profil"})
+        raise PipelineError(f"Unbekanntes Profil „{profile}“", "unknown_profile", 422,
+                            {"profile": "Unbekanntes Profil"})
 
 
 def _normalize_section(section):
@@ -1332,7 +1389,8 @@ def _create_dub(video_id, lang, pick):
     return store.create_job("dub", pick["profile"], parent_id=pick["job_id"], clipper_job=parent["clipper_job"],
                             source_url=parent.get("source_url"), channel=parent.get("channel"),
                             title=f"{(video or {}).get('title') or parent.get('title') or ''} ({lang})".strip(),
-                            priority=PRIORITY["dub"], params={"video_id": video_id, "lang": lang, "pick_id": pick["id"]},
+                            priority=PRIORITY["dub"],
+                            params={"video_id": video_id, "lang": lang, "pick_id": pick["id"]},
                             progress="Wartet")
 
 
@@ -1620,7 +1678,10 @@ def on_settings_changed(keys=()):
         runtime.materialize()
     except Exception:
         log.exception("materialize after settings change failed")
-    resume_waiting()
+    keys = [str(k) for k in keys or ()]
+    if not keys or any("anthropic" in k for k in keys):
+        store.set_meta("anthropic.rejected_key", None)  # saved again: give it another try
+    resume_waiting(force=not keys or any(k.startswith(("secrets.", "claude.")) or "anthropic" in k for k in keys))
     _wake()
     try:
         from . import scheduler
@@ -1780,7 +1841,8 @@ def enqueue_live_chunks(profile, ready):
             if store.find_job_by_clipper_job(cj, kinds=("live_chunk", "source")):
                 continue
             jid = store.create_job("live_chunk", profile, clipper_job=cj, source_url=meta.get("url"),
-                                   title=meta.get("title"), channel=meta.get("channel"), priority=PRIORITY["live_chunk"],
+                                   title=meta.get("title"), channel=meta.get("channel"),
+                                   priority=PRIORITY["live_chunk"],
                                    params={"recorded_at": meta.get("recorded_at"), "duration": meta.get("duration")},
                                    progress="Wartet")
         store.add_job_event(jid, f"Live-Stück aufgenommen und analysiert: {cj}")

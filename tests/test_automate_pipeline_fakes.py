@@ -247,9 +247,17 @@ def make_agent():
         pass
 
     class AgentError(Exception):
-        def __init__(self, msg, retryable=False):
+        def __init__(self, msg, *, retryable=False, code="agent_error"):
             super().__init__(msg)
-            self.retryable = retryable
+            self.retryable, self.code = retryable, code
+
+    class InvalidApiKey(MissingApiKey, AgentError):
+        def __init__(self, msg):
+            AgentError.__init__(self, msg, code="invalid_key")
+
+    class AgentCanceled(AgentError):
+        def __init__(self, msg="Abgebrochen."):
+            super().__init__(msg, code="canceled")
 
     @dataclass
     class Selection:
@@ -263,6 +271,7 @@ def make_agent():
 
     mod.MissingApiKey, mod.BudgetExceeded, mod.AgentError, mod.Selection = (MissingApiKey, BudgetExceeded,
                                                                             AgentError, Selection)
+    mod.InvalidApiKey, mod.AgentCanceled = InvalidApiKey, AgentCanceled
     mod.calls, mod.script, mod.dub_calls = [], [], []
 
     def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):

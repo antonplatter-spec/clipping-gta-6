@@ -2,6 +2,7 @@
 changes; no double runs), scans the way `clipper daily` does them (creators first, dedupe, sections, the daily
 quota, a failing watch), the live service (chunks queued once, status cached, live done for ended chunks), the daily
 cleanup and the threads' start/stop."""
+import os
 import sys
 import threading
 import time
@@ -12,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_automate_pipeline_fakes import PipelineCase, write_live_chunk  # noqa: E402
 
-from automate import health, pipeline, runtime, scheduler, store, worker  # noqa: E402
+from automate import health, paths, pipeline, runtime, scheduler, store, worker  # noqa: E402
 
 
 def at(hhmm, days=0):
@@ -229,6 +230,22 @@ class HousekeepingTests(PipelineCase):
         self.assertTrue(store.last_run("cleanup")["ok"])
         self.assertFalse(scheduler._cleanup_due(time.time()))
         self.assertTrue(scheduler._cleanup_due(time.time() + 25 * 3600))
+
+    def test_daily_cleanup_prunes_old_scratch_files(self):
+        old_dir = paths.tmp_dir() / "agent" / "job-7"
+        old_dir.mkdir(parents=True)
+        (old_dir / "select.json").write_text("{}")
+        (paths.tmp_dir() / "render-3.json").write_text("[]")
+        fresh = paths.tmp_dir() / "render-4.json"
+        fresh.write_text("[]")
+        past = time.time() - 6 * 86400
+        for f in (old_dir / "select.json", paths.tmp_dir() / "render-3.json", old_dir):
+            os.utime(f, (past, past))
+        summary = scheduler.run_cleanup()
+        self.assertEqual(summary["tmp_files"], 2)
+        self.assertIn("2 alte Hilfsdatei(en) entfernt", summary["message"])
+        self.assertFalse(old_dir.exists())
+        self.assertTrue(fresh.exists())
 
     def test_threads_start_and_stop_promptly(self):
         stop = threading.Event()
