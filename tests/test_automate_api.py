@@ -452,7 +452,7 @@ class SecurityTests(ApiCase):
         r = c.get("/api/jobs?limit=500")
         self.assertEqual(set(r.json()["error"]["fields"]), {"limit"})
         r = c.post("/api/jobs", content=b"x" * (5 * 1024 * 1024), headers={"Content-Type": "application/json"})
-        self.assertEqual(r.status_code, 413)
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (413, "too_large"))
 
     def test_no_secret_in_any_get_response_or_log(self):
         c = self.client()

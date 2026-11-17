@@ -61,7 +61,8 @@ SHUTDOWN_JOIN_S = 20
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
        "font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
        "frame-ancestors 'none'")
-STATUS_MESSAGES = {400: "Die Anfrage war ungültig.", 401: "Bitte melde dich an.", 403: "Diese Aktion ist nicht erlaubt.",
+STATUS_MESSAGES = {400: "Die Anfrage war ungültig.", 401: "Bitte melde dich an.",
+                   403: "Diese Aktion ist nicht erlaubt.",
                    404: "Nicht gefunden.", 405: "Diese Methode ist hier nicht erlaubt.",
                    413: "Die Daten sind zu groß.", 429: "Zu viele Anfragen. Bitte warte kurz."}
 
@@ -226,6 +227,10 @@ class SecurityMiddleware:
             if method in MUTATING and headers.get("x-requested-with") != "automate":
                 return await self._reject(send, 403, "csrf", "Anfrage ohne Dashboard-Kennung (X-Requested-With) "
                                                              "abgelehnt.")
+            length = headers.get("content-length", "")
+            if length.isdigit() and int(length) > MAX_BODY:  # chunked bodies: RequestBodyLimitMiddleware
+                return await self._reject(send, 413, "too_large", f"Die Daten sind zu groß (höchstens "
+                                                                  f"{MAX_BODY // (1024 * 1024)} MB).")
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":

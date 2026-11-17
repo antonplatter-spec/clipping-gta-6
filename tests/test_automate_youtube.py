@@ -33,7 +33,7 @@ class FakeGoogle:
         self.calls, self.access, self.refresh = [], "ya29.first", "1//refresh"
         self.scope = f"{youtube.SCOPE_UPLOAD} {youtube.SCOPE_READONLY}"
         self.refresh_error = None
-        self.plan = []  # per chunk PUT: "ok" | "drop:N" (keep N bytes, then reset the connection) | "503" | "404" | "401"
+        self.plan = []  # per chunk PUT: ok | drop:N (keep N bytes, then reset the connection) | 503 | 404 | 401
         self.init_errors = []  # responses for the session POST before it succeeds
         self.sessions, self.data, self.total, self.complete, self.metadata = 0, bytearray(), None, False, None
 
@@ -56,7 +56,8 @@ class FakeGoogle:
         if headers.get("Authorization") != f"Bearer {self.access}":
             return self.res(401, {"error": {"code": 401, "message": "Invalid Credentials"}})
         if url.startswith(youtube.API_URL + "/channels"):
-            return self.res(200, {"items": [{"id": "UC123", "snippet": {"title": "Mein Kanal", "customUrl": "@meinkanal"}}]})
+            channel = {"id": "UC123", "snippet": {"title": "Mein Kanal", "customUrl": "@meinkanal"}}
+            return self.res(200, {"items": [channel]})
         if method == "POST" and url.startswith(youtube.UPLOAD_URL):
             if self.init_errors:
                 return self.init_errors.pop(0)
@@ -115,7 +116,9 @@ class YoutubeCase(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.addCleanup(db.close)
-        mods = mock.patch.dict(sys.modules, {"automate.pipeline": types.ModuleType("automate.pipeline")})
+        mods = mock.patch.dict(sys.modules, {"automate.pipeline": types.ModuleType("automate.pipeline"),
+                                             "automate.health": None, "automate.scheduler": None,
+                                             "automate.agent": None, "automate.worker": None})
         mods.start()
         self.addCleanup(mods.stop)
         store.ensure_profile("gta6", True)
@@ -154,8 +157,9 @@ class YoutubeCase(unittest.TestCase):
         self.payload = os.urandom(size)
         f.write_bytes(self.payload)
         vid = store.add_video("gta6", folder, lang=lang, title="Video")
-        return store.add_variant(vid, f, **{"hook": "Hook", "title": "GTA 6 is insane", "hashtags": ["#gta6", "#shorts"],
-                                            "description": "Look at this\n\nClip from X: https://y\n\n#gta6", **fields})
+        fields = {"hook": "Hook", "title": "GTA 6 is insane", "hashtags": ["#gta6", "#shorts"],
+                  "description": "Look at this\n\nClip from X: https://y\n\n#gta6", **fields}
+        return store.add_variant(vid, f, **fields)
 
 
 # ---------------------------------------------------------------- OAuth

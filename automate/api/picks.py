@@ -88,7 +88,8 @@ def _sheets(job_id, d, own):
     for c in windows:
         name = os.path.basename(str(c.get("contact_sheet") or ""))
         s, e = _num(c.get("start")), _num(c.get("end"))
-        if not name or s is None or e is None or not re.fullmatch(SHEET_RE, name) or not (d / "review" / name).is_file():
+        if not name or s is None or e is None or not re.fullmatch(SHEET_RE, name) \
+                or not (d / "review" / name).is_file():
             continue
         overlap = sum(max(0.0, min(e, b) - max(s, a)) for a, b in own)
         gap = min((max(0.0, a - e, s - b) for a, b in own), default=float("inf"))

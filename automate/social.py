@@ -55,7 +55,8 @@ def redirect_note(redirect_uri):
                 f"„Mit YouTube verbinden“ deshalb im Browser auf dem PC, auf dem der Clipper läuft (nicht vom Handy). "
                 f"Ob du das Dashboard dort über localhost, 127.0.0.1 oder den Rechnernamen geöffnet hast, ist egal: "
                 f"Der Server erkennt die Rückkehr am einmaligen Code und schickt dich danach zur Adresse zurück, von "
-                f"der du gestartet bist. Der Vorgang muss innerhalb von {STATE_TTL_S // 60} Minuten abgeschlossen sein.")
+                f"der du gestartet bist. Der Vorgang muss innerhalb von {STATE_TTL_S // 60} Minuten abgeschlossen "
+                f"sein.")
     return (f"Google schickt dich nach dem Erlauben zu {redirect_uri} zurück. Diese Adresse muss genau so im "
             f"Google-OAuth-Client eingetragen und von deinem Browser aus erreichbar sein. Der Vorgang muss innerhalb "
             f"von {STATE_TTL_S // 60} Minuten abgeschlossen sein.")

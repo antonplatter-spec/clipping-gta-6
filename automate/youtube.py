@@ -234,8 +234,8 @@ def fetch_channel(token):
         raise _api_error(r)
     items = (r.json() or {}).get("items") or []
     if not items:
-        raise YouTubeError("Dieses Google-Konto hat keinen YouTube-Kanal. Bitte beim Verbinden den Kanal wählen, auf den "
-                           "hochgeladen werden soll.", code="youtube_no_channel")
+        raise YouTubeError("Dieses Google-Konto hat keinen YouTube-Kanal. Bitte beim Verbinden den Kanal wählen, auf "
+                           "den hochgeladen werden soll.", code="youtube_no_channel")
     ch = items[0]
     sn = ch.get("snippet") or {}
     return {"id": ch.get("id"), "title": sn.get("title") or ch.get("id"), "handle": sn.get("customUrl") or None}

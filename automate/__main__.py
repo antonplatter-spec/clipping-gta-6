@@ -16,6 +16,7 @@ import logging.handlers
 import os
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -183,13 +184,27 @@ def serve(argv):
     config = uvicorn.Config(create_app(config=cfg), host=args.host, port=args.port, log_config=None,
                             proxy_headers=True, forwarded_allow_ips="127.0.0.1", server_header=False,
                             timeout_graceful_shutdown=10, lifespan="on")
+    # uvicorn shuts down gracefully on SIGINT/SIGTERM, then raises the signal again: end quietly instead of with a
+    # KeyboardInterrupt traceback (Ctrl+C) or a kill by the default SIGTERM action
+    previous = signal.signal(signal.SIGTERM, _stopped)
     try:
         uvicorn.Server(config).run()
+    except (KeyboardInterrupt, _Stopped):
+        pass
     finally:
+        signal.signal(signal.SIGTERM, previous)
         db.close()
         lock.close()
     print("Server beendet.")
     return 0
+
+
+class _Stopped(Exception):
+    pass
+
+
+def _stopped(signum, frame):
+    raise _Stopped()
 
 
 # ---------------------------------------------------------------- maintenance

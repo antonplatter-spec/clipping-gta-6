@@ -179,7 +179,7 @@ def page(limit, offset, default=50):
 
 def http_url(value):
     """True for an absolute http(s) URL with a host (what yt-dlp and the dashboard links can use)."""
-    return bool(re.match(r"^https?://[^\s/?#]+\.[^\s/?#]+(/\S*)?$|^https?://localhost(:\d+)?(/\S*)?$", value or "", re.I))
+    return bool(re.match(r"^https?://([^\s/?#]+\.[^\s/?#]+|localhost(:\d+)?)(/\S*)?$", value or "", re.I))
 
 
 # ---------------------------------------------------------------- modules of the other agents
