@@ -88,6 +88,9 @@ export function alertLink(a) {
   if (k.startsWith('scan.failed.')) return { href: '#/system', label: 'Systemcheck' };
   if (k.startsWith('disk.')) return { href: '#/system', label: 'Speicher' };
   if (k.startsWith('youtube.')) return { href: '#/konten', label: 'Konten' };
+  if (k.startsWith('pick.footage.')) return { href: `#/freigabe?pick=${k.split('.').pop()}`, label: 'Zur Freigabe' };
+  if (k.startsWith('prices.')) return { href: '#/einstellungen/claude', label: 'Preise' };
+  if (k === 'schedule.old' || k === 'service.restarted') return { href: '#/system', label: 'System' };
   if (k === 'login.recovery_code') return { href: '#/system', label: 'Passwort & 2FA' };
   return null;
 }
@@ -139,7 +142,7 @@ function AutomationCard({ d }) {
     actions=${html`<${Button} size="sm" variant="ghost" icon="calendar-clock" href="#/einstellungen/zeitplan">Zeitplan<//>`}>
     <${Toggle} size="lg" checked=${!!a.enabled} busy=${busy === 'enabled'} onChange=${(v) => set({ enabled: v }, 'enabled')}
       label="Automatik (Scans nach Zeitplan)"
-      description=${a.enabled ? 'Sucht nach Zeitplan nach neuen Videos und schlägt Clips vor.' : 'Aus: Es wird nur gesucht, wenn du es startest.'} />
+      description=${a.enabled ? 'Sucht nach Zeitplan nach neuen Videos und schlägt Clips vor.' : 'Aus: Es wird nur gesucht, wenn du es startest. Schaltest du sie nach der heutigen Suchzeit ein, startet die verpasste Suche sofort.'} />
     <div class="automation-meta">
       ${a.enabled && html`<span><${Icon} name="clock" size=${13} /> Nächste Suche: ${a.next_scan_at ? html`<b>${fmt.dateTime(a.next_scan_at)}</b> (<${Rel} ts=${a.next_scan_at} />)` : 'kein Zeitpunkt geplant'}</span>`}
       ${a.scan_running && html`<span><${Badge} tone="running" dot>Suche läuft<//></span>`}
@@ -147,7 +150,7 @@ function AutomationCard({ d }) {
     </div>
     <div style="height:14px"></div>
     <${Toggle} size="lg" checked=${!!a.live_enabled} busy=${busy === 'live'} onChange=${(v) => set({ live_enabled: v }, 'live')}
-      label="Live-Aufnahme" description=${a.live_enabled ? 'Prüft deine Streams alle paar Minuten und nimmt GTA-6-Streams auf.' : 'Aus: Live-Streams werden nicht aufgenommen.'} />
+      label="Live-Aufnahme" description=${a.live_enabled ? 'Prüft deine Streams alle paar Minuten und nimmt GTA-6-Streams auf. Ausschalten beendet laufende Aufnahmen.' : 'Aus: Live-Streams werden nicht aufgenommen.'} />
     ${a.live_enabled && html`<div class="automation-meta"><span>${d.live && d.live.recorders ? html`<span class="rec">${fmt.plural(d.live.recorders, 'Recorder nimmt', 'Recorder nehmen')} auf</span>` : 'Gerade nimmt kein Recorder auf.'}</span></div>`}
   <//>`;
 }

@@ -9,7 +9,7 @@ import time
 
 from fastapi import APIRouter, Body, Query
 
-from .. import runtime, settings, store
+from .. import costs, runtime, settings, store
 from .common import ApiError, Form, changed, conflict, invalid, mapped, need, not_found
 
 router = APIRouter()
@@ -38,6 +38,8 @@ def get_costs(days: int = Query(30)):
     return {"today": {k: today[k] for k in ("eur", "usd", "requests", "input_tokens", "output_tokens",
                                              "cache_read_tokens", "cache_creation_tokens")},
             "limit_eur": store.get_setting("claude.daily_limit_eur"),
+            "selection_limit_eur": store.get_setting("claude.selection_limit_eur"),
+            "reserved_eur": costs.reserved_eur(),
             "usd_to_eur": store.get_setting("claude.usd_to_eur"),
             "days": [{k: d[k] for k in ("day", "eur", "usd", "requests", "tokens")} for d in store.usage_by_day(days)],
             "by_purpose": store.usage_by_purpose(days), "recent": store.recent_usage(50)}

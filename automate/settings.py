@@ -85,11 +85,12 @@ REGISTRY = {
     "automation.enabled": S(
         "boolean", False, "Automatik eingeschaltet",
         "Hauptschalter: Wenn an, sucht der Server zu den Suchzeiten nach neuen GTA-6-Videos deiner Creator und clippt "
-        "sie ohne Rückfragen.", "automation"),
+        "sie ohne Rückfragen. Schaltest du ihn nach der heutigen Suchzeit ein, startet die verpasste Suche sofort.",
+        "automation"),
     "automation.live_enabled": S(
         "boolean", False, "Live-Aufnahme eingeschaltet",
-        "Prüft die Live-Streams regelmäßig, nimmt GTA-6-Streams in Stücken auf und clippt jedes fertige Stück.",
-        "automation"),
+        "Prüft die Live-Streams regelmäßig, nimmt GTA-6-Streams in Stücken auf und clippt jedes fertige Stück. "
+        "Ausschalten beendet laufende Aufnahmen (das angefangene Stück wird noch gespeichert).", "automation"),
     "schedule.scan_times": S(
         "time_list", ["09:00"], "Suchzeiten",
         "Uhrzeiten (Ortszeit dieses PCs), zu denen täglich nach neuen Videos gesucht wird, z. B. 09:00 und 18:00.",
@@ -160,8 +161,16 @@ REGISTRY = {
                                "claude", min=0, max=10, advanced=True),
     "claude.daily_limit_eur": S(
         "number", 5.0, "Tageslimit",
-        "Ist das Limit erreicht, warten neue Claude-Anfragen bis zum nächsten Tag. 0 = kein Limit.", "claude",
+        "Neue Auswahlen starten nur, solange die heutigen Kosten plus das, was laufende Auswahlen noch ausgeben "
+        "dürfen, unter dem Limit liegen; sonst warten sie bis morgen. Eine laufende Auswahl wird nicht abgebrochen: "
+        "Sie darf ihr Limit pro Auswahl noch ausschöpfen. 0 = kein Limit.", "claude",
         min=0, max=10000, step=0.01, unit="€"),  # a coarser step makes the browser refuse e.g. 2,75 €
+    "claude.selection_limit_eur": S(
+        "number", 2.0, "Höchstens pro Auswahl",
+        "Kostengrenze für eine Auswahl (alle Anfragen an Claude zu einer Quelle, auch über Neustarts hinweg). Kurz "
+        "davor wird Claude gebeten, abzugeben; ist sie erreicht, endet die Auswahl als fehlgeschlagen. Um höchstens "
+        "diesen Betrag kann eine laufende Auswahl das Tageslimit überschreiten.", "claude",
+        min=0.1, max=1000, step=0.01, unit="€"),
     "claude.usd_to_eur": S(
         "number", 0.92, "Wechselkurs USD → EUR",
         "Claude rechnet in US-Dollar ab; mit diesem Kurs werden die Kosten in Euro angezeigt.", "claude",

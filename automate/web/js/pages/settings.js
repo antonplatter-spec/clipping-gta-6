@@ -442,7 +442,7 @@ const WATCH_FIELDS = [
   { path: 'live_fast', label: 'Schnelles Modell für Live', section: 'live', kind: 'bool', help: 'Nur bei whisper.cpp: Live-Chunks mit dem schnellen Modell.' },
   { path: 'keep_live_sources_hours', label: 'Live-Video aufbewahren', section: 'keep', kind: 'nullnum', unit: 'Std.', min: 0, nullLabel: 'nie löschen', fallback: 3, help: 'Nach dem Clippen; Zeit für Multi-Streamer-Edits.' },
   { path: 'keep_sources_days', label: 'Andere Quellvideos aufbewahren', section: 'keep', kind: 'nullnum', unit: 'Tage', min: 0, nullLabel: 'nie löschen', fallback: 2, help: 'Transkripte, Picks und Exporte bleiben immer.' },
-  { path: 'min_free_gb', label: 'Alarm unter freiem Speicher', section: 'keep', kind: 'num', unit: 'GB', min: 1 },
+  { path: 'min_free_gb', label: 'Alarm unter freiem Speicher', section: 'keep', kind: 'num', unit: 'GB', min: 1, help: 'Darunter: Alarm, und neue Downloads und Live-Aufnahmen warten, bis wieder Platz ist.' },
   { path: 'caption_style', label: 'Untertitel-Stil (Standard)', section: 'style', kind: 'choice', choices: [{ value: 'bold', label: 'Fett' }, { value: 'boxed', label: 'Box' }, { value: 'comic', label: 'Comic' }] },
   { path: 'censor_captions', label: 'Schimpfwörter in Untertiteln maskieren', section: 'style', kind: 'bool', help: 'F*CK statt des Worts; der Ton bleibt unverändert.' },
   { path: 'no_hook_share', label: 'Anteil ohne Hook (A/B-Test)', section: 'style', kind: 'percent', help: 'So viele Clips gehen ohne Hook-Text raus, zum Vergleich.' },

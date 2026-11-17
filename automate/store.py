@@ -50,7 +50,8 @@ Jobs (kinds JOB_KINDS, statuses JOB_STATUSES, stages JOB_STAGES; every job row a
         atomic: the queued job with not_before <= now first by (priority, created_at, id) -> running + locked;
         a kind in serial_kinds is skipped while another job of that kind is running (renders number videos)
     heartbeat_job(job_id, worker_id, now=None) -> bool   refresh locked_at; False when the lock is gone
-    release_stale_jobs(older_than_s, now=None) -> [ids]  running jobs whose lock is older go back to queued
+    release_stale_jobs(older_than_s, now=None) -> [ids]  running jobs whose lock is older go back to queued, each
+                                         with attempts + 1 (pipeline.release_stale fails those out of attempts)
     find_job_by_clipper_job(clipper_job, kinds=("source", "live_chunk")) -> newest row | None
     job_counts(profile=None) -> {status: n} for every status ; count_jobs(status=None, kind=None, profile=None,
               finished_since=None) -> int ; job_group(status) -> "waiting" | "running" | "done" | "failed" | "canceled"
@@ -86,6 +87,7 @@ Videos, variants, posts, social accounts
 Usage and costs (cost computed with costs.py at insert time)
     add_usage(job_id, purpose, model, input_tokens=0, output_tokens=0, cache_creation_tokens=0,
               cache_read_tokens=0, request_id=None, *, cache_creation_1h_tokens=0, ts=None) -> row (+ known_model)
+              a model without a price row raises the alert prices.unknown.<model> (health resolves it)
     usage_today() -> {day, eur, usd, requests, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
                       tokens}
     usage_by_day(days=30) -> one such dict per local day, oldest first, zero days included
@@ -619,10 +621,10 @@ def release_stale_jobs(older_than_s, now=None):
         ids = [r[0] for r in c.execute("SELECT id FROM jobs WHERE status = 'running' AND "
                                        "(locked_at IS NULL OR locked_at <= ?)", (now - older_than_s,))]
         for jid in ids:
-            c.execute("UPDATE jobs SET status = 'queued', locked_by = NULL, locked_at = NULL, updated_at = ? "
-                      "WHERE id = ?", (now, jid))
-            add_job_event(jid, "Job wurde unterbrochen (Neustart oder hängender Worker) und wieder eingereiht",
-                          "warning")
+            c.execute("UPDATE jobs SET status = 'queued', locked_by = NULL, locked_at = NULL, updated_at = ?, "
+                      "attempts = COALESCE(attempts, 0) + 1 WHERE id = ?", (now, jid))
+            add_job_event(jid, "Job wurde unterbrochen (Absturz, hartes Beenden oder hängender Worker) und wieder "
+                               "eingereiht; das zählt als Versuch", "warning")
     return ids
 
 
@@ -948,6 +950,12 @@ def add_usage(job_id, purpose, model, input_tokens=0, output_tokens=0, cache_cre
              "cache_creation_1h_tokens": cache_creation_1h_tokens or 0}
     est = costs.estimate(model, usage)
     eur = costs.to_eur(est["usd"])
+    if not est["known_model"]:  # costed at the Sonnet 5.5 rate: the owner must know the number may be wrong
+        raise_alert(f"prices.unknown.{model}", "warning",
+                    f"Für das Modell „{model}“ ist kein Preis hinterlegt: seine Kosten werden mit dem Preis von Claude "
+                    "Sonnet 5.5 geschätzt und können vom echten Betrag abweichen (auch das Tageslimit rechnet damit). "
+                    "Trage unter Einstellungen → Claude → Preise eine Zeile für dieses Modell ein (die Preise "
+                    "nennt Anthropic auf seiner Preisseite).", {"model": model})
     uid = _insert("usage", {"ts": ts, "day": costs.local_day(ts), "job_id": job_id, "purpose": purpose,
                             "model": model, "input_tokens": usage["input_tokens"],
                             "output_tokens": usage["output_tokens"],

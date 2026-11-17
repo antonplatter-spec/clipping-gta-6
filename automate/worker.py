@@ -6,9 +6,10 @@ Lanes (store.claim_next_job by kind, so a 4-hour download never blocks a render 
     render        render and dub jobs, one at a time (they number the `video N` folders)
     upload        YouTube uploads
 A supervisor thread heartbeats every running job (its lock), aborts a run whose lock is gone (canceled through the
-API, or released), releases the locks of workers that died (store.release_stale_jobs), restarts dead lane threads
+API, or released), releases the locks of workers that died (pipeline.release_stale: counted as an attempt),
+settles parents a crash left waiting (pipeline.reconcile, every minute and at start), restarts dead lane threads
 and follows worker.concurrency. On `stop` every running command is stopped and its job goes back to the queue at
-its stage (the next start continues there).
+its stage (the next start continues there; an interrupted Claude step counts as an attempt).
 
 Everything a stage does goes through a `Run` (one claimed job): subprocesses and in-process calls (Claude, YouTube)
 run in helper threads while the worker thread pumps their output into job_events (throttled and bounded: a 4-hour
@@ -376,7 +377,8 @@ class Run:
 
     def call(self, fn, *args, timeout, progress=None, **kwargs):
         """An in-process call (Claude, YouTube) in a helper thread, with this run's timeout and stop handling; pass
-        `log=run.log` / `on_progress=run.on_progress` / `cancel=run.cancel` yourself as the function takes them."""
+        `log=run.log` / `on_progress=run.on_progress` / `cancel=run.cancel` yourself as the function takes them.
+        When the call returns a result it is returned even if a cancel, stop or timeout arrived meanwhile."""
         self.check()
         t, box = self._thread(getattr(fn, "__name__", "call"), lambda: fn(*args, **kwargs))
         self._line_level = "info"
@@ -386,6 +388,8 @@ class Run:
         finally:
             self._line_level = "debug"
         self._flush_dropped()
+        if finished and "r" in box:  # it completed: a finished upload or a paid selection is never thrown away
+            return box["r"]  # because a stop arrived meanwhile; the stage's own (owned) write decides what stands
         if self.reason in ("cancel", "lost") or (not finished and self.reason == "shutdown"):
             raise pipeline.Canceled(self.reason)
         if not finished or (self.reason == "timeout" and "r" not in box):
@@ -476,12 +480,16 @@ def _supervisor(stop):
             if time.monotonic() - last_release >= RELEASE_EVERY_S:
                 last_release = time.monotonic()
                 try:
-                    ids = store.release_stale_jobs(STALE_S)
+                    ids = pipeline.release_stale(STALE_S)
                     if ids:
                         log.warning("released stale jobs %s", ids)
                         wake()
                 except Exception:
-                    log.exception("release_stale_jobs failed")
+                    log.exception("release_stale failed")
+                try:
+                    pipeline.reconcile()
+                except Exception:
+                    log.exception("reconcile failed")
             try:
                 _ensure_lanes(stop)
             except Exception:
@@ -497,7 +505,11 @@ def _supervisor(stop):
 
 def start_workers(stop):
     """Start the lanes and their supervisor (daemon threads, all ending soon after `stop` is set)."""
-    store.release_stale_jobs(0)
+    pipeline.release_stale(0)
+    try:
+        pipeline.reconcile()
+    except Exception:
+        log.exception("reconcile at startup failed")
     threads = _ensure_lanes(stop)
     sup = threading.Thread(target=_supervisor, args=(stop,), name="worker-supervisor", daemon=True)
     sup.start()

@@ -75,8 +75,9 @@ Auf dem **Mac** sieht es fast genauso aus, nur mit Homebrew statt `apt`: siehe [
 
 Alte Videos räumt der Server selbst weg: Live-Aufnahmen 3 Stunden nachdem sie geclippt wurden, andere Quellvideos
 nach 2 Tagen ohne Änderung. Transkripte, Picks und fertige Shorts bleiben. Fällt der freie Platz unter **30 GB**,
-zeigt das Dashboard einen Alarm (einstellbar unter *Einstellungen → Analyse → Alarm unter freiem Speicher*). Plane
-deshalb **mindestens 50 GB freien Platz** ein; wenn du viele Live-Streams aufnimmst, deutlich mehr.
+zeigt das Dashboard einen Alarm, und neue Downloads und Live-Aufnahmen warten, bis wieder Platz ist (einstellbar unter
+*Einstellungen → Analyse → Alarm unter freiem Speicher*). Plane deshalb **mindestens 50 GB freien Platz** ein; wenn du
+viele Live-Streams aufnimmst, deutlich mehr.
 
 **Rechenleistung:** Transkription und Rendern laufen auf der CPU (Stimmen-Trennung nutzt eine NVIDIA-Grafikkarte
 bzw. den Apple-Chip, wenn vorhanden). Wie viele Live-Streams dein Rechner gleichzeitig schafft, misst später
@@ -266,10 +267,20 @@ Zehn Codes, mit denen du hineinkommst, falls das Handy weg ist. **Sie werden nur
 
 Was es kostet: Der Clipper nutzt standardmäßig **Claude Sonnet 5.5** und rechnet mit den Preisen, die unter
 *Einstellungen → Claude → Erweitert* hinterlegt sind (Sonnet 5.5: 2 US-Dollar je Million Eingabe-Tokens, 10 US-Dollar
-je Million Ausgabe-Tokens – gleiche das mit Anthropics aktueller Preisliste ab). Jede Anfrage wird mit Tokens und
-Kosten unter **Kosten & Schlüssel** angezeigt, dort siehst du nach den ersten Läufen, was ein Video kostet. Das
-**Tageslimit** steht anfangs auf **5 €**: Ist es erreicht, warten neue Claude-Anfragen bis zum nächsten Tag (Jobs
-zeigen dann *„Wartet auf Budget“*). Ändern unter *Kosten & Schlüssel → Tageslimit in Euro* (0 = kein Limit).
+je Million Ausgabe-Tokens – gleiche das mit Anthropics aktueller Preisliste ab). Antwortet einmal ein Modell, für das
+dort kein Preis steht (etwa ein Ersatzmodell, auf das Anthropic ausweicht), meldet das Dashboard das als Alarm. Jede
+Anfrage wird mit Tokens und Kosten unter **Kosten & Schlüssel** angezeigt, dort siehst du nach den ersten Läufen, was
+ein Video kostet. Zwei Grenzen schützen dich, beide unter *Kosten & Schlüssel → Limits*:
+
+- **Tageslimit** (anfangs **5 €**, 0 = kein Limit): Neue Auswahlen starten nur, solange es nicht erreicht ist; danach
+  warten sie bis zum nächsten Tag (Jobs zeigen *„Wartet auf Budget“*). Eine Auswahl, die schon läuft, wird nicht
+  abgebrochen – sonst wäre das schon Bezahlte verloren.
+- **Höchstens pro Auswahl** (anfangs **2 €**): die Grenze für alle Anfragen einer Auswahl zusammen, auch über
+  Neustarts hinweg. Kurz davor wird Claude gebeten, abzugeben; ist sie erreicht, endet die Auswahl als fehlgeschlagen.
+
+Laufende Auswahlen halten sich den Rest ihrer Grenze frei; eine neue startet nur, wenn danach noch Platz bis zum
+Tageslimit ist. Ein Tag kostet deshalb höchstens etwa Tageslimit plus eine Auswahl (mit den Standardwerten rund
+7 €, dazu höchstens zwei kleine Anfragen einer laufenden Dub-Übersetzung).
 
 Ohne Anthropic-Schlüssel findet und analysiert der Server trotzdem Videos, die Jobs bleiben aber vor der Auswahl
 stehen (*„Wartet auf API-Schlüssel“*) und laufen weiter, sobald du den Schlüssel einträgst.
@@ -297,18 +308,23 @@ dürfen dastehen:
 - `espeak-ng` bzw. `say` – die Ersatzstimme (unter Linux mit `sudo apt install espeak-ng`).
 
 Fehlt ein Pflicht-Werkzeug, steht der Befehl zum Installieren direkt daneben. Nach der Installation **Erneut prüfen**.
+Unter der Liste steht außerdem, ob das Parakeet-Sprachmodell schon heruntergeladen ist; wenn nicht, lädt es die erste
+Analyse (rund 650 MB, siehe [Fehlersuche](#12-fehlersuche)).
 
 #### Schritt 6: Quellen
 
 Die Creator (YouTube-Uploads) und Live-Streams aus dem Repo sind schon übernommen. Mit dem Schalter pausierst du eine
-Quelle. Neue Creator und Streams fügst du später unter **Quellen** hinzu (*Creator hinzufügen*, *Stream hinzufügen*).
+Quelle; ein Stream, der gerade aufgenommen wird, hört dann sofort auf (das angefangene Stück wird gespeichert, aber nicht
+mehr geclippt – genauso beim Entfernen). Neue Creator und Streams fügst du später unter **Quellen** hinzu (*Creator
+hinzufügen*, *Stream hinzufügen*).
 
 #### Schritt 7: Automatik
 
 - **Automatik (tägliche Suche)** – sucht täglich (anfangs um 09:00 Uhr, Zeiten unter *Einstellungen → Zeitplan &
-  Automatik*) nach neuen GTA-6-Videos deiner Creator und lässt Claude Clips vorschlagen.
+  Automatik*) nach neuen GTA-6-Videos deiner Creator und lässt Claude Clips vorschlagen. Schaltest du sie ein, wenn die
+  heutige Suchzeit schon vorbei ist, startet die verpasste Suche sofort.
 - **Live-Aufnahme** – prüft alle paar Minuten, ob deine Streams live GTA 6 spielen, nimmt sie auf und clippt jeden
-  fertigen 30-Minuten-Abschnitt.
+  fertigen 30-Minuten-Abschnitt. Ausschalten beendet laufende Aufnahmen sofort.
 
 Mit **Fertig – zur Übersicht** ist die Einrichtung abgeschlossen. Beide Schalter findest du auch auf der Übersicht.
 
@@ -340,11 +356,16 @@ wenn `nvidia-smi` vorhanden ist, sonst die CPU (langsamer, funktioniert aber). F
 - **Übersicht** – Status, *Bereit zum Start*-Liste, Alarme, die nächste Suche. **Jetzt nach neuen Videos suchen**
   startet eine Suche sofort; unter *Video-URL direkt clippen* gibst du ein einzelnes Video ein (**Clippen**).
 - **Freigabe** – Claudes Vorschläge: Hooks und Titel ansehen und ändern, dann **Freigeben → Render** oder
-  **Ablehnen**. Wenn alles ohne dich gerendert werden soll: *Einstellungen → Freigabe → Automatisch*.
+  **Ablehnen**. Wenn alles ohne dich gerendert werden soll: *Einstellungen → Freigabe → Automatisch*. Dieselben
+  Szenen werden nie zweimal gerendert: Nutzt ein Clip Szenen, die schon ein anderer (fertiger, freigegebener oder
+  älterer offener) Clip nutzt, lässt er sich nicht freigeben, bis du einen der beiden ablehnst oder Start/Ende änderst.
+  Stellt sich das erst beim Rendern heraus, kommt der Clip mit Begründung in die Freigabe zurück (und ein Alarm sagt es).
 - **Videos** – die fertigen Shorts, je Hook eine Variante. **Titel kopieren**, MP4 herunterladen,
-  **Als gepostet markieren** oder **Auf YouTube hochladen**.
+  **Als gepostet markieren** oder **Auf YouTube hochladen**. Ist die Variante auf dem gewählten Kanal schon online,
+  fragt das Dashboard vor einem zweiten Upload nach.
 - **Jobs** – was gerade läuft und was gescheitert ist (mit **Erneut versuchen**).
-- **Kosten & Schlüssel** – Claude-Kosten pro Tag in Euro, **Tageslimit**, API-Schlüssel.
+- **Kosten & Schlüssel** – Claude-Kosten pro Tag in Euro, **Tageslimit** und **Höchstens pro Auswahl**,
+  API-Schlüssel.
 - **Quellen**, **Einstellungen**, **Konten**, **System** – alles Weitere.
 
 ---
@@ -435,7 +456,12 @@ Was `install` je nach System einrichtet:
 
 `install` noch einmal aufrufen (z. B. mit anderen Optionen, siehe [Handy-Zugriff](#8-zugriff-vom-handy-im-heimnetz))
 ersetzt die alte Einrichtung. Ein Neustart des Servers ist harmlos: Laufende Live-Aufnahmen nehmen weiter auf, und
-unterbrochene Jobs macht der Server danach weiter.
+unterbrochene Jobs macht der Server danach weiter – eine unterbrochene Claude-Auswahl an der Stelle, an der sie war
+(höchstens eine Anfrage wird wiederholt). Damit ein Job, der immer wieder unterbrochen wird, nicht endlos wiederholt
+und bezahlt wird, zählt jede Unterbrechung einer Claude-Auswahl und jeder Absturz als Versuch; nach dem dritten steht
+der Job als fehlgeschlagen unter **Jobs**, und **Erneut versuchen** setzt ihn fort. Nach dem Start und nach dem
+Aufwachen aus dem Ruhezustand wartet die Suche 2 Minuten, bis das Netzwerk steht; erreicht eine geplante Suche keine
+einzige Quelle, versucht sie es alle 15 Minuten erneut (bis zu zwei Stunden lang).
 
 **Hast du früher `/clip-schedule` oder `clipper schedule` benutzt?** Diese alten Zeitpläne starten Claude Code und
 einen eigenen Live-Watcher und dürfen nicht neben dem Server laufen (doppelte Arbeit und Kosten). Entfernen:
@@ -445,7 +471,8 @@ uv run python -m clipper schedule remove
 ```
 
 Geplante Aufgaben, die du in der Claude-Code-Desktop-App oder der Codex-App angelegt hast (z. B. `gta6-daily-clips`),
-löschst du dort. `autostart install` und `autostart status` warnen, solange alte Zeitpläne gefunden werden.
+löschst du dort – die kann der Server nicht sehen. `autostart install` und `autostart status` warnen, solange alte
+`clipper schedule`-Zeitpläne gefunden werden, und das Dashboard zeigt dann einen Alarm.
 
 ---
 
@@ -619,13 +646,25 @@ steht im Dashboard unter **Jobs** beim jeweiligen Job.
   ([Abschnitt 9](#9-aktualisieren)).
 - **Die erste Analyse hängt oder scheitert beim Modell** – beim allerersten Transkribieren lädt der Clipper das
   Parakeet-Modell (etwa 650 MB) von huggingface.co in `~/.cache/huggingface`. Ohne Internet oder wenn eine Firewall
-  huggingface.co sperrt, scheitert das. Später läuft alles offline. Dasselbe gilt für das Demucs-Modell beim ersten Clip
-  mit Stimmen-Trennung.
-- **Alarm „Nur noch … GB frei“** – alte Quellvideos löscht der Server selbst. Hilft das nicht: alte Exporte unter
+  huggingface.co sperrt, scheitert das. Später läuft alles offline. Ob das Modell schon da ist, steht unter **System**.
+  Dasselbe gilt für das Demucs-Modell beim ersten Clip mit Stimmen-Trennung.
+- **Alarm „Nur noch … GB frei“** – bis wieder Platz ist, warten neue Downloads (*„Wartet: nur … GB frei“*) und es
+  starten keine neuen Live-Aufnahmen. Alte Quellvideos löscht der Server selbst. Hilft das nicht: alte Exporte unter
   `exports/` löschen (vorher sichern) oder die Grenze unter *Einstellungen → Analyse → Alarm unter freiem Speicher*
   senken.
 - **Jobs „Wartet auf API-Schlüssel“ / „Wartet auf Budget“** – Anthropic-Schlüssel eintragen bzw. das Tageslimit
-  erhöhen (beides unter *Kosten & Schlüssel*). Die Jobs laufen danach von selbst weiter.
+  erhöhen (beides unter *Kosten & Schlüssel*). Die Jobs laufen danach von selbst weiter. *„Wartet: das restliche
+  Tagesbudget ist für laufende Auswahlen verplant“* löst sich von selbst, sobald diese fertig sind.
+- **Auswahl „hat ihr Kostenlimit erreicht“** – Claude hat für diese Quelle mehr gebraucht als *Höchstens pro Auswahl*
+  erlaubt. Passiert das öfter, die Grenze unter *Kosten & Schlüssel → Limits* erhöhen; **Erneut versuchen** startet die
+  Auswahl neu (und kostet noch einmal).
+- **Job „…-mal mitten in der Arbeit unterbrochen“** – der Server wurde während dieses Jobs mehrmals beendet oder ist
+  abgestürzt. **Erneut versuchen** setzt ihn fort; passiert es wieder, steht der Grund im Server-Log.
+- **Alarm „… wurde nicht gerendert, weil seine Szenen schon ein anderer Clip verwendet“** – der Clip wartet wieder in
+  der **Freigabe**: einen der beiden ablehnen oder Start/Ende ändern, dann freigeben.
+- **Alarm „Die Suche … hat keine einzige Quelle erreicht“** – meist war beim Suchen kein Internet da; die geplante
+  Suche versucht es alle 15 Minuten erneut. Bleibt der Alarm, Internetverbindung prüfen bzw. yt-dlp aktualisieren
+  ([Abschnitt 9](#9-aktualisieren)).
 - **Voiceover scheitert beim Rendern** – kein Fish-Schlüssel und keine Systemstimme: Fish-Schlüssel eintragen oder
   `sudo apt install espeak-ng`.
 - **Der Browser öffnet sich nicht** – auf Rechnern ohne Bildschirm oder unter WSL ohne Hilfsprogramm normal; die
@@ -648,8 +687,8 @@ steht im Dashboard unter **Jobs** beim jeweiligen Job.
    ```
 
    Ohne Autostart: den Server mit Strg+C beenden.
-2. Laufende Live-Aufnahmen hören von selbst auf, wenn der Stream endet. Sofort beenden:
-   `pkill -f "clipper live record"`.
+2. Laufende Live-Aufnahmen hören von selbst auf, wenn der Stream endet. Hast du vor Schritt 1 im Dashboard die
+   **Live-Aufnahme** ausgeschaltet, läuft keine mehr; sonst sofort beenden: `pkill -f "clipper live record"`.
 3. Was du behalten willst, sichern (vor allem `exports/`).
 4. Den Ordner löschen: `rm -rf ~/clipping-gta-6`.
 5. Optional aufräumen: heruntergeladene Modelle in `~/.cache/huggingface` (nur, wenn kein anderes Programm sie
@@ -683,7 +722,7 @@ Alle im Clipper-Ordner (`cd ~/clipping-gta-6`):
 | `./start.sh --no-browser` | ohne den Browser zu öffnen |
 | `./start.sh --stimmen` / `--ohne-stimmen` | Stimmen-Trennung (Demucs) installieren / entfernen |
 | `uv run python -m automate doctor` | Systemcheck im Terminal |
-| `uv run python -m automate reset-login` | Login zurücksetzen (Passwort/2FA vergessen); zeigt einen neuen Einrichtungs-Code |
+| `uv run python -m automate reset-login` | Login zurücksetzen (Passwort/2FA vergessen); zeigt einen neuen Einrichtungs-Code. Mit `--wipe-keys` auch alle API-Schlüssel löschen und YouTube trennen |
 | `uv run python -m automate import-yaml` | Creator, Streams und Einstellungen aus den Repo-Dateien erneut übernehmen (fügt nur Fehlendes hinzu) |
 | `uv run python -m automate.autostart install` / `status` / `restart` / `remove` | Autostart |
 | `uv run python -m clipper schedule remove` | alte `clipper schedule`-Zeitpläne entfernen |

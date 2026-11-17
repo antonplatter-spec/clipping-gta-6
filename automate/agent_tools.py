@@ -5,6 +5,7 @@
     JobContext.load(job_row, ...)           everything a tool needs about the job (dir, time base, prefs, limits)
     run_tool(ctx, name, input) -> ToolResult     grep_transcript, view_frame, find_line, check, simulate
     submit(ctx, input, round_no=, max_rounds=) -> Submission | ToolResult   submit_picks: validation + `clipper check`
+                                            (ToolError when the check itself can't run: the caller decides)
     validate_picks(ctx, picks, draft=False) -> (clean, reasons, triggers, errors)
     resolve_name(name) -> declared tool name | None   (accepts "Submit-Picks"-style near misses)
     sheet_image(path) / image_block(path, max_side)   contact sheets and frames as downscaled base64 image blocks
@@ -226,9 +227,10 @@ class JobContext:
     views: int = 0
     scratch: Path = None
     sheets_attached: set = field(default_factory=set)
+    reserved: list = field(default_factory=list)  # footage other pending picks hold (see run_check)
 
     @classmethod
-    def load(cls, job, *, max_picks, avoid_openers=(), cancel=None, log=None):
+    def load(cls, job, *, max_picks, avoid_openers=(), cancel=None, log=None, reserved=()):
         """Raises LookupError (German) when the job has no analysis to select from."""
         cj = job.get("clipper_job")
         if not cj:
@@ -241,7 +243,8 @@ class JobContext:
         ctx = cls(job=job, profile=job["profile"], clipper_job=cj, dir=d, meta=meta, duration=None,
                   max_picks=int(max_picks), avoid_openers=[str(x) for x in avoid_openers or () if str(x).strip()],
                   voice=voice if voice in VOICE_PREFS else "auto",
-                  hooks_per_video=store.get_setting("prefs.hooks_per_video"), cancel=cancel, log=log)
+                  hooks_per_video=store.get_setting("prefs.hooks_per_video"), cancel=cancel, log=log,
+                  reserved=[r for r in reserved or () if isinstance(r, dict)])
         ctx.scratch = paths.tmp_dir() / "agent" / f"job-{job.get('id')}"
         ctx.duration = source_duration(ctx)
         return ctx
@@ -727,7 +730,11 @@ def _report_text(report):
 
 
 def run_check(ctx, clean):
-    out = _bridge(ctx, "check", {"picks": clean, "job": str(ctx.dir)}, "check")
+    """`clipper check --job` on the picks, also failing footage other pending (not yet rendered) picks hold."""
+    payload = {"picks": clean, "job": str(ctx.dir)}
+    if ctx.reserved:
+        payload["reserved"] = ctx.reserved
+    out = _bridge(ctx, "check", payload, "check")
     return out.get("report") or {}, bool(out.get("fails"))
 
 

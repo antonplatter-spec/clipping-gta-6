@@ -156,10 +156,13 @@ function Streams({ profile }) {
   };
   const patch = async (s, body) => {
     setBusyId(s.id);
-    try { rows.replace(await api.updateStream(s.id, body)); } catch (err) { toast.fail(err); } finally { setBusyId(null); }
+    try {
+      rows.replace(await api.updateStream(s.id, body));
+      if (body.paused && s.recording) toast.success(`${s.name} pausiert – die laufende Aufnahme wird beendet.`);
+    } catch (err) { toast.fail(err); } finally { setBusyId(null); }
   };
   const del = async (s) => {
-    if (!(await confirmDialog({ title: `${s.name} entfernen?`, danger: true, confirmLabel: 'Entfernen', message: 'Der Stream wird nicht mehr aufgenommen. Ein laufender Recorder beendet sich beim nächsten Check.' }))) return;
+    if (!(await confirmDialog({ title: `${s.name} entfernen?`, danger: true, confirmLabel: 'Entfernen', message: 'Der Stream wird nicht mehr aufgenommen. Eine laufende Aufnahme wird sofort beendet; ihr angefangenes Stück wird gespeichert, aber nicht mehr geclippt.' }))) return;
     setBusyId(s.id);
     try { await api.deleteStream(s.id); rows.remove(s.id); toast.success(`${s.name} entfernt.`); invalidateProfiles(); } catch (err) { toast.fail(err); } finally { setBusyId(null); }
   };

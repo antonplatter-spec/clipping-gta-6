@@ -168,26 +168,32 @@ function DayChart({ days, limit }) {
 
 function LimitCard({ c, onSaved }) {
   const [limit, setLimit] = useState(String(c.limit_eur ?? ''));
+  const [cap, setCap] = useState(String(c.selection_limit_eur ?? ''));
   const [rate, setRate] = useState(String(c.usd_to_eur ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  useEffect(() => { setLimit(String(c.limit_eur ?? '')); setRate(String(c.usd_to_eur ?? '')); }, [c.limit_eur, c.usd_to_eur]);
-  const dirty = Number(limit) !== c.limit_eur || Number(rate) !== c.usd_to_eur;
+  useEffect(() => { setLimit(String(c.limit_eur ?? '')); setCap(String(c.selection_limit_eur ?? '')); setRate(String(c.usd_to_eur ?? '')); },
+    [c.limit_eur, c.selection_limit_eur, c.usd_to_eur]);
+  const dirty = Number(limit) !== c.limit_eur || Number(cap) !== c.selection_limit_eur || Number(rate) !== c.usd_to_eur;
   const save = async (e) => {
     e.preventDefault();
     setBusy(true); setError(null);
     try {
-      await api.updateSettings({ 'claude.daily_limit_eur': Number(limit), 'claude.usd_to_eur': Number(rate) });
-      toast.success('Tageslimit und Wechselkurs gespeichert.');
+      await api.updateSettings({ 'claude.daily_limit_eur': Number(limit), 'claude.selection_limit_eur': Number(cap), 'claude.usd_to_eur': Number(rate) });
+      toast.success('Limits und Wechselkurs gespeichert.');
       onSaved(); overview.refresh();
     } catch (err) { setError(err); } finally { setBusy(false); }
   };
   const f = (error && error.fields) || {};
-  return html`<${Card} title="Tageslimit" icon="gauge" subtitle="Schützt vor Überraschungen auf der Rechnung.">
+  const worst = Number(limit) > 0 && Number(cap) > 0 ? Number(limit) + Number(cap) : null;
+  return html`<${Card} title="Limits" icon="gauge" subtitle="Schützt vor Überraschungen auf der Rechnung.">
     <form class="stack" onSubmit=${save}>
       <${FormError} error=${error && !error.fields ? error : null} />
       <${TextField} label="Tageslimit in Euro" type="number" min="0" step="0.01" value=${limit} onInput=${setLimit} inputClass="input-num"
-        error=${f['claude.daily_limit_eur']} help="0 = kein Limit. Ist es erreicht, warten Claude-Schritte bis morgen („Wartet auf Budget“); alles andere läuft weiter." />
+        error=${f['claude.daily_limit_eur']} help="0 = kein Limit. Neue Auswahlen starten nur, solange das Limit nicht erreicht ist (sonst „Wartet auf Budget“ bis morgen); eine laufende Auswahl wird nicht abgebrochen. Alles andere läuft weiter." />
+      <${TextField} label="Höchstens pro Auswahl in Euro" type="number" min="0.1" step="0.01" value=${cap} onInput=${setCap} inputClass="input-num"
+        error=${f['claude.selection_limit_eur']} help=${`Grenze für alle Anfragen einer Auswahl zusammen (auch über Neustarts hinweg). Kurz davor gibt Claude ab; ist sie erreicht, endet die Auswahl als fehlgeschlagen.${worst ? ` Ein Tag kostet so höchstens etwa ${fmt.eur(worst)}.` : ''}`} />
+      ${c.reserved_eur > 0 && html`<p class="muted small">Laufende Auswahlen dürfen gerade noch bis zu ${fmt.eur(c.reserved_eur)} ausgeben; das ist für sie verplant.</p>`}
       <${TextField} label="Wechselkurs: 1 US-Dollar in Euro" type="number" min="0.01" step="0.01" value=${rate} onInput=${setRate} inputClass="input-num"
         error=${f['claude.usd_to_eur']} help="Anthropic rechnet in US-Dollar ab. Der Kurs wird nur zur Anzeige und fürs Limit genutzt." />
       <div class="form-actions"><${Button} type="submit" variant="primary" busy=${busy} disabled=${!dirty || limit === '' || rate === ''}>Speichern<//></div>

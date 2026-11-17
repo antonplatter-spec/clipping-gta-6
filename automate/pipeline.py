@@ -16,10 +16,20 @@ pick is still rendering (stage render); `settle_parent` finishes it once every p
 one is rendered or failed. A live chunk then gets `clipper live done` (which starts the 3-hour deletion timer of its
 recording), so its source stays while picks are undecided.
 
-Waiting: no Anthropic key -> `waiting_key`, daily budget spent -> `waiting_budget` (both with an alert);
-`resume_waiting()` (scheduler tick, on_settings_changed) puts them back in the queue. Fetch and analyze never need
-the key. Failures: StageError.retryable -> queued again with backoff (BACKOFF_S, MAX_ATTEMPTS tries), otherwise or
-after the last try -> `failed` + alert `job.failed.<id>`; a scan's undownloadable video is `skipped`, not failed.
+Waiting: no Anthropic key -> `waiting_key`; no new Claude task may start (costs.can_start: the daily limit is
+reached, or what running selections may still spend fills the rest of it) -> `waiting_budget` (both with an alert
+when it's the limit). A selection that started (params.select pins its inputs) is never parked by the daily limit:
+it resumes from the agent's checkpoint under its own cap. `resume_waiting()` (scheduler tick, on_settings_changed)
+puts waiting jobs back in the queue. Fetch and analyze never need the key; a download waits while the disk is below
+min_free_gb. Failures: StageError.retryable -> queued again with backoff (BACKOFF_S, MAX_ATTEMPTS tries), otherwise
+or after the last try -> `failed` + alert `job.failed.<id>`; a scan's undownloadable video is `skipped`, not failed.
+Interruptions count as attempts too: a Claude step stopped by a shutdown (_on_canceled) and any job whose worker
+died (release_stale), so a crash loop can't repeat (and repay) a job forever.
+
+Footage: a pick may not use footage that an exported clip or an unrendered pick ahead of it uses
+(_reserved_footage, checked by the bridge `check` op): at the gate (and in Claude's own submit check), on edit, at
+approval and again when its render starts; a render that finds its footage taken sends the pick back to approval
+(pick.error + alert pick.footage.<id>). Every rendered MP4 is checked with ffprobe before it is registered.
 
 Approval mode: manual -> picks `proposed`; auto -> every gated pick is approved and gets its render job at once.
 Switching manual -> auto leaves already proposed picks in the queue (auto applies to picks gated after the switch).
@@ -35,13 +45,16 @@ Public (API):
     scan_running(profile=None) -> bool
     approve_pick(pick_id) -> render job id ; reject_pick(pick_id, reason=None) -> pick row
     update_pick_data(pick_id, changes) -> (pick row, check_report)       raises PickCheckFailed on fails
-    enqueue_dub(video_id, lang) -> job id ; enqueue_upload(variant_id, account_id, privacy) -> job id
+    enqueue_dub(video_id, lang) -> job id ; enqueue_upload(variant_id, account_id, privacy, force=False) -> job id
+                                             (409 already_posted when posted there before, unless force)
     retry_job(job_id) -> job row ; cancel_job(job_id) -> job row
     on_settings_changed(keys) ; resume_waiting(force=False) -> [job ids]
     source_expires_at(job) -> float | None   when `clipper cleanup` deletes the job's source.mp4 (None: gone / never)
     write_picks_file(job_id)                 jobs/<clipper_job>/picks.json = the job's picks in idx order
 Worker / scheduler side:
-    run_job(run) ; settle_parent(job_id) ; enqueue_live_chunks(profile, ready) -> [ids]
+    run_job(run) ; settle_parent(job_id) ; reconcile() -> [ids] ; release_stale(older_than_s=0) -> [ids]
+    enqueue_live_chunks(profile, ready, dropped=None) -> [ids] ; live_stream_active(profile, clipper_job) -> bool
+    disk_low(profile) -> (free_gb, min_free_gb) | None
     close_live_chunks(profile, ready) -> [clipper jobs] ; run_scan(run_id, profile, trigger, cancel=None) -> summary
     youtube_id(url) ; watch_url(vid) ; trailing_json(text) ; profile_config(profile) ; yt_dlp_detail(text)
 """
@@ -68,6 +81,10 @@ BACKOFF_S = (60, 300, 900)            # after the 1st, 2nd, ... failure
 SLOW_BACKOFF_S = (900, 1800, 3600)    # rate limits and YouTube's bot check
 PRIORITY = {"source": 100, "url": 90, "live_chunk": 50, "render": 40, "dub": 60, "upload": 30}
 PARENT_KINDS = ("source", "live_chunk")
+PAID_STAGES = (("source", "select"), ("live_chunk", "select"), ("dub", "dub"))  # interruptions count as attempts
+MIN_LIVE_CHUNK_S = 120  # a stream that drops every minute makes a chunk per drop: shorter ones are not clipped
+PICK_RANK = {"proposed": 1, "approved": 2, "rendering": 3}  # unrendered picks that hold footage, by how far along
+PICK_STATUS_DE = {"proposed": "wartet auf Freigabe", "approved": "freigegeben", "rendering": "wird gerendert"}
 ACTIVE = ("queued", "running", "waiting_approval", "waiting_budget", "waiting_key")
 CANCELABLE = ACTIVE
 RETRYABLE = ("failed", "canceled", "skipped")
@@ -82,6 +99,8 @@ T_CHECK, T_RANK = 300, 900
 T_RENDER, STALL_RENDER = 3 * 3600, 90 * 60
 T_DUB_SEGMENTS, T_TRANSLATE, T_DUB_RENDER = 3600, 30 * 60, 3 * 3600
 T_UPLOAD = 4 * 3600
+T_VERIFY = 300
+DISK_WAIT_S = 15 * 60
 T_LIVE_DONE, T_CLEANUP, T_WATCH = 300, 1800, 3600
 
 KIND_DE = {"source": "Quelle", "live_chunk": "Live-Stück", "render": "Rendern", "dub": "Synchronisation",
@@ -109,6 +128,15 @@ KEY_REJECTED = ("Anthropic hat den gespeicherten API-Schlüssel abgelehnt (ungü
 BILLING = ("Das Anthropic-Konto hat kein Guthaben mehr oder sein Ausgabenlimit erreicht "
            "(console.anthropic.com → Billing).")
 BILLING_RETRY_S = 3600
+LIVE_STREAM_INACTIVE = ("Der Stream dieses Live-Stücks ist pausiert, entfernt oder sein Profil ausgeschaltet: das "
+                        "Stück wird nicht geclippt.")
+SCAN_RETRY_NOTE = ("Eine geplante Suche versucht es alle 15 Minuten erneut (bis zu zwei Stunden lang), danach zur "
+                   "nächsten Suchzeit.")
+INTERRUPTED = ("Der Job wurde {n}-mal mitten in der Arbeit unterbrochen (Neustart, Absturz oder Stromausfall) und ist "
+               "deshalb angehalten, damit er nicht endlos wiederholt – und bei Claude-Schritten nicht immer wieder "
+               "bezahlt – wird. „Erneut versuchen“ setzt ihn an derselben Stelle fort.")
+FOOTAGE_TAKEN = ("Nicht gerendert: {hits}. Dieselben Szenen zweimal zu posten bringt keine Reichweite. Lehne einen der "
+                 "Clips ab oder ändere Start/Ende, dann gib ihn erneut frei.")
 YTDLP_MISSING = ("yt-dlp ist nicht installiert, deshalb kann kein Video geladen werden. Es gehört zu den Python-Paketen: "
                  "Server beenden und mit ./start.sh neu starten (Details unter System).")
 
@@ -265,6 +293,18 @@ def _job_dir(cj):
 
 
 _cfg_cache = {}
+
+
+def disk_low(profile):
+    """(free GB, min_free_gb) when the disk holding jobs/ is below the profile's min_free_gb, else None. New
+    downloads and new live recorders wait while it is (each fills several GB); the health check raises disk.low."""
+    try:
+        need = float(profile_config(profile).get("min_free_gb") or 0)
+        target = paths.jobs_dir() if paths.jobs_dir().exists() else paths.ROOT
+        free = shutil.disk_usage(target).free / 1e9
+    except (OSError, TypeError, ValueError):
+        return None
+    return (round(free, 1), need) if need and free < need else None
 
 
 def profile_config(profile):
@@ -446,7 +486,7 @@ def resume_waiting(force=False):
                                     progress="Schlüssel ist da – geht weiter …"):
                 resumed.append(job["id"])
     credit_due = force or time.time() - float(store.get_meta("anthropic.billing_at") or 0) >= BILLING_RETRY_S
-    budget = costs.budget_ok()
+    budget = can_start_selection()
     for job in store.list_jobs(status="waiting_budget", limit=10000)[0]:
         params = dict(job.get("params") or {})
         if not (credit_due if params.pop("wait", None) == "billing" else budget):
@@ -472,41 +512,67 @@ def _park_key(run, message=None, rejected=False):
 
 
 def _park_budget(run, billing=None):
-    """Daily limit reached, or (`billing` = the agent's German message) the Anthropic account has no credit."""
+    """No new paid task may start (daily limit reached, or what running selections may still spend fills the rest
+    of it), or (`billing` = the agent's German message) the Anthropic account has no credit."""
     params = dict((run.job or {}).get("params") or {})
     params.pop("wait", None)
     if billing:
         params["wait"] = "billing"
         store.set_meta("anthropic.billing_at", time.time())
         store.set_meta("anthropic.billing_message", billing)
+    reserved = not billing and costs.budget_ok()
     run.update(status="waiting_budget", params=params,
                progress="Wartet: das Anthropic-Konto hat kein Guthaben" if billing else
+               "Wartet: das restliche Tagesbudget ist für laufende Auswahlen verplant" if reserved else
                "Wartet: Claude-Tageslimit erreicht (geht morgen weiter)")
-    run.event(billing or "Tageslimit für Claude erreicht: der Job wartet", "warning")
+    run.event(billing or ("Das restliche Tagesbudget ist für laufende Auswahlen verplant: der Job startet, sobald "
+                          "sie fertig sind" if reserved else "Tageslimit für Claude erreicht: der Job wartet"),
+              "warning")
     sync_waiting_alerts()
 
 
-def _claude_ready(run):
-    """False (and the job parked) when Claude can't be asked now."""
+def held_by_paused_selections(exclude_job=None):
+    """What selections that started but aren't running right now (interrupted by a restart, waiting for a retry or a
+    key) may still spend: they continue without asking the daily limit again, so a new selection has to leave room
+    for them. Their spend so far is in the agent's checkpoint, not here: the whole cap counts (running ones reserve
+    their exact rest themselves, costs.reserve)."""
+    n = sum(1 for j in store.list_jobs(status=["queued", "waiting_key", "waiting_budget"], kind=list(PARENT_KINDS),
+                                       limit=100000)[0]
+            if j["id"] != exclude_job and j["stage"] == "select" and isinstance((j.get("params") or {}).get("select"),
+                                                                                  dict))
+    return n * float(store.get_setting("claude.selection_limit_eur")) if n else 0.0
+
+
+def can_start_selection(job_id=None):
+    """costs.can_start for a new selection of `job_id`, also leaving room for paused started selections."""
+    return costs.can_start(exclude=f"select-{job_id}", extra=held_by_paused_selections(exclude_job=job_id))
+
+
+def _claude_ready(run, started=False):
+    """False (and the job parked) when Claude can't be asked now. The daily limit only gates what has not started:
+    a selection that started (and was interrupted) continues under its own cap (agent.py)."""
     state = _key_state()
     if state != "ok":
         _park_key(run, rejected=state == "rejected")
         return False
-    if not costs.budget_ok():
+    if not started and not can_start_selection(run.job_id):
         _park_budget(run)
         return False
     return True
 
 
-def _ask_claude(run, fn, *args, timeout, **kwargs):
+def _ask_claude(run, fn, *args, timeout, started=False, **kwargs):
     """agent.select_picks / translate_dub in the run's helper thread; None when the job was parked instead (no or a
     rejected key, daily limit, no Anthropic credit). Other AgentErrors fail the stage, retried only when the agent
-    says trying again can help."""
-    if not _claude_ready(run):
+    says trying again can help; anything else from the call is a bug and never retried on its own (every try could
+    pay for the same work again)."""
+    if not _claude_ready(run, started):
         return None
     agent = _agent()
     try:
         return run.call(fn, *args, log=run.log, cancel=run.cancel, timeout=timeout, **kwargs)
+    except (Canceled, JobLost, StageError):
+        raise
     except agent.MissingApiKey as e:  # InvalidApiKey (401) is both: the stored key was rejected
         _park_key(run, str(e), rejected=isinstance(e, agent.AgentError))
     except agent.BudgetExceeded:
@@ -518,6 +584,9 @@ def _ask_claude(run, fn, *args, timeout, **kwargs):
             return None
         raise StageError(f"Claude: {e}", retryable=bool(getattr(e, "retryable", False)),
                          slow=code == "rate_limited") from None
+    except Exception as e:
+        log.exception("job %s: %s crashed", run.job_id, getattr(fn, "__name__", fn))
+        raise StageError(f"Interner Fehler bei der Anfrage an Claude: {e!r}"[:500], retryable=False) from None
     return None
 
 
@@ -687,6 +756,18 @@ def run_job(run):
 
 def _on_canceled(run, job, reason):
     if reason == "shutdown":
+        if (job["kind"], job["stage"]) in PAID_STAGES:  # counted, so a restart loop can't repay a Claude step forever
+            attempts = int(job.get("attempts") or 0) + 1
+            if attempts >= MAX_ATTEMPTS:
+                _on_error(run, job, StageError(INTERRUPTED.format(n=attempts), retryable=False))
+                return
+            try:
+                run.update(status="queued", attempts=attempts,
+                           progress=f"Unterbrochen (Server wurde beendet) – geht beim nächsten Start weiter (Versuch "
+                                    f"{attempts + 1} von {MAX_ATTEMPTS})")
+            except JobLost:
+                pass
+            return
         try:
             run.update(status="queued", progress="Unterbrochen (Server wurde beendet) – geht beim nächsten Start "
                                                  "weiter")
@@ -773,6 +854,15 @@ def _stage_fetch(run, job):
         run.event("Quellvideo liegt schon vor: kein neuer Download")
         return {"stage": "analyze", "title": job.get("title") or meta.get("title"),
                 "channel": job.get("channel") or meta.get("channel"), "progress": "Video liegt vor"}
+    low = disk_low(job["profile"])
+    if low:  # a download fills GBs: wait until cleanup (or the owner) made room
+        when = time.time() + DISK_WAIT_S
+        free, need = (f"{x:.1f}".replace(".", ",").replace(",0", "") for x in low)
+        if not str(job.get("progress") or "").startswith("Wartet: nur"):
+            run.event(f"Nur {free} GB frei (mindestens {need} GB, min_free_gb): der Download wartet, bis wieder "
+                      "Platz ist", "warning")
+        return {"status": "queued", "not_before": when,
+                "progress": f"Wartet: nur {free} GB frei – neuer Versuch um {_hhmm(when)}"}
     if not params.get("duration") and not params.get("probed"):
         run.progress("Prüfe das Video …", force=True)
         try:
@@ -870,9 +960,19 @@ def max_picks_for(job, recommended):
         others = [j for j in store.list_jobs(kind="source", run_id=job["run_id"], limit=1000)[0]
                   if j["id"] != job["id"]]
         for other in others:
-            produced += sum(1 for p in _all_picks(other["id"]) if p["status"] != "rejected")
-            if other["status"] in ("queued", "running", "waiting_key", "waiting_budget") \
-                    and other["stage"] in ("fetch", "analyze", "select", "gate"):
+            made = sum(1 for p in _all_picks(other["id"]) if p["status"] != "rejected")
+            produced += made
+            active = other["status"] in ("queued", "running", "waiting_key", "waiting_budget")
+            if made or not active:
+                continue
+            # a selection running in parallel (worker.concurrency > 1) holds what it may still make
+            pinned = (other.get("params") or {}).get("select")
+            chosen = ((other.get("result") or {}).get("selection") or {}).get("picks")
+            if other["stage"] == "gate" and isinstance(chosen, list):
+                produced += len(chosen)
+            elif other["stage"] == "select" and isinstance(pinned, dict):
+                produced += int(pinned.get("max_picks") or 0)
+            elif other["stage"] in ("fetch", "analyze", "select", "gate"):
                 open_sources += 1
     if want == "auto":
         return max(0, min(int(recommended), cap - produced))
@@ -909,6 +1009,9 @@ def _selection(sel):
 
 
 def _stage_select(run, job):
+    """③. The inputs of a selection (max_picks, avoid_openers) are fixed in params.select when it starts, so a
+    selection interrupted by a restart, a 429 or a missing key resumes with the same first message (the agent's
+    checkpoint is keyed on it) and does not count against the daily limit again (agent.py)."""
     cj = job["clipper_job"]
     jd = _job_dir(cj)
     analysis = _read_json(jd / "candidates.json")
@@ -918,21 +1021,35 @@ def _stage_select(run, job):
         raise StageError(f"Das Live-Stück {cj} ist nicht analysiert (candidates.json fehlt)", retryable=False)
     if job["kind"] == "live_chunk" and not (jd / "source.mp4").exists():
         raise StageError(LIVE_SOURCE_GONE, retryable=False)
+    params, result = dict(job.get("params") or {}), dict(job.get("result") or {})
+    pinned = params.pop("select", None)
+    if job["kind"] == "live_chunk" and not live_stream_active(job["profile"], cj):
+        _live_done_quiet(run, job)
+        return {"status": "skipped", "error": LIVE_STREAM_INACTIVE, "progress": "Keine Clips (Stream pausiert)",
+                "params": params, "result": result}
     recommended = int(analysis.get("recommended") or 0)
-    n = max_picks_for(job, recommended)
-    result = dict(job.get("result") or {})
+    if isinstance(pinned, dict):
+        n, openers = int(pinned.get("max_picks") or 0), [str(x) for x in pinned.get("avoid_openers") or []]
+    else:
+        pinned, n, openers = None, max_picks_for(job, recommended), avoid_openers(job)
     if n <= 0:
         reason = ("Die Analyse hält keinen Moment für lohnend (empfohlen: 0)." if recommended <= 0 else
                   "Für diesen Durchlauf sind schon genug Videos ausgewählt (Videos pro Durchlauf).")
         if job["kind"] == "live_chunk":
             _live_done_quiet(run, job)
-        return {"status": "skipped", "error": reason, "progress": "Keine Clips", "result": result}
+        return {"status": "skipped", "error": reason, "progress": "Keine Clips", "params": params, "result": result}
     agent = _agent()
-    openers = avoid_openers(job)
+    if pinned is None:
+        if not _claude_ready(run):  # the daily limit gates a new selection only
+            return None
+        run.update(params={**params, "select": {"max_picks": n, "avoid_openers": openers, "at": time.time()}})
+        run.event(f"Claude wählt bis zu {n} Momente (empfohlen {recommended})"
+                  + (f", vermeidet Anfänge: {', '.join(openers[:8])}" if openers else ""))
+    else:
+        run.event(f"Die begonnene Auswahl geht weiter (bis zu {n} Momente)")
     run.progress("Claude wählt Momente …", force=True)
-    run.event(f"Claude wählt bis zu {n} Momente (empfohlen {recommended})"
-              + (f", vermeidet Anfänge: {', '.join(openers[:8])}" if openers else ""))
-    sel = _ask_claude(run, agent.select_picks, job["id"], max_picks=n, avoid_openers=openers, timeout=T_SELECT)
+    sel = _ask_claude(run, agent.select_picks, job["id"], max_picks=n, avoid_openers=openers,
+                      reserved=_reserved_footage(job_id=job["id"]), timeout=T_SELECT, started=True)
     if sel is None:
         return None
     sel = _selection(sel)
@@ -945,8 +1062,10 @@ def _stage_select(run, job):
         reason = sel.get("no_clip_reason") or "Claude fand keinen Moment, der sich lohnt."
         if job["kind"] == "live_chunk":
             _live_done_quiet(run, job)
-        return {"status": "skipped", "error": f"Keine Clips: {reason}", "progress": "Keine Clips", "result": result}
-    return {"stage": "gate", "result": result, "progress": f"Claude hat {len(sel['picks'])} Momente gewählt"}
+        return {"status": "skipped", "error": f"Keine Clips: {reason}", "progress": "Keine Clips", "params": params,
+                "result": result}
+    return {"stage": "gate", "params": params, "result": result,
+            "progress": f"Claude hat {len(sel['picks'])} Momente gewählt"}
 
 
 # ---------------------------------------------------------------- stage: gate (deterministic ④)
@@ -963,13 +1082,14 @@ def _stage_gate(run, job):
     if not picks:
         return {"stage": "select", "progress": "Auswahl fehlt – frage Claude erneut …"}
     run.progress("Prüfe Hooks, Titel und Footage …", force=True)
-    chk = run.bridge("check", {"picks": picks, "job": cj}, timeout=T_CHECK)
+    reserved = _reserved_footage(job_id=job["id"])
+    chk = run.bridge("check", {"picks": picks, "job": cj, "reserved": reserved}, timeout=T_CHECK)
     if chk.get("fails"):
         return _gate_failed(run, job, chk.get("report") or {})
     run.progress("Bewerte die Hooks (Swipe-Test mit 3.481 Shorts) …", force=True)
     ranked = run.bridge("rank", {"picks": picks, "keep": _hooks_keep()}, timeout=T_RANK)
     picks2, ranking = ranked.get("picks") or picks, ranked.get("ranking") or []
-    chk2 = run.bridge("check", {"picks": picks2, "job": cj}, timeout=T_CHECK)
+    chk2 = run.bridge("check", {"picks": picks2, "job": cj, "reserved": reserved}, timeout=T_CHECK)
     if chk2.get("fails"):
         return _gate_failed(run, job, chk2.get("report") or {})
     report = chk2.get("report") or {}
@@ -1002,12 +1122,54 @@ def _gate_failed(run, job, report):
     rounds = int(params.get("gate_rounds") or 0)
     summary = _fail_summary(report)
     if rounds < 1:
+        params.pop("select", None)
         params.update(gate_rounds=rounds + 1, check_feedback=report)
         run.event(f"Qualitätsprüfung nicht bestanden ({summary}): zurück an Claude", "warning")
         return {"stage": "select", "params": params,
                 "progress": "Qualitätsprüfung: Fehler gefunden – Claude bessert nach …"}
     raise StageError(f"Die Picks bestehen die Qualitätsprüfung auch nach einer Korrektur nicht: {summary}",
                      retryable=False)
+
+
+# ---------------------------------------------------------------- footage held by picks not rendered yet
+
+def _reserved_footage(job_id=None, pick=None):
+    """[{pick, job, label}] for the bridge `check` op's `reserved`: footage that picks not yet rendered hold, which
+    `clipper check` (it only sees exported clips) would otherwise miss, so the same moment could be rendered and
+    posted twice (a multi-streamer edit of chunk B using chunk A's moment while A's own pick waits).
+    For a new selection of job `job_id`: every unrendered pick of the other jobs (its own earlier picks are being
+    replaced). For an existing `pick`: the picks ahead of it, i.e. further along (rendering > approved > proposed) or
+    as far along and older, so of two overlapping picks exactly one may go on and nothing deadlocks; its own job's
+    other picks count too (a submission never overlaps itself, but an edit could)."""
+    rows = store.list_picks(status=list(PICK_RANK), limit=100000)[0]
+    mine = PICK_RANK.get((pick or {}).get("status"), 1)
+    out = []
+    for q in rows:
+        if pick is not None:
+            theirs = PICK_RANK[q["status"]]
+            if q["id"] == pick["id"] or theirs < mine or (theirs == mine and q["id"] > pick["id"]):
+                continue
+        elif q["job_id"] == job_id:
+            continue
+        cj = (q.get("job") or {}).get("clipper_job")
+        if cj and isinstance(q.get("data"), dict):
+            out.append({"pick": q["data"], "job": cj,
+                        "label": f"Clip {q['idx']} von Job #{q['job_id']} ({PICK_STATUS_DE[q['status']]})"})
+    return out
+
+
+def _footage_hits(report):
+    """The footage entries of a one-pick check report (exported clips and held picks using the same footage)."""
+    hits = ((report or {}).get("video 1") or {}).get("footage") or []
+    return [str(h) for h in hits] if isinstance(hits, list) else [str(hits)]
+
+
+def _with_footage(report, hits):
+    """A pick's stored check report with its footage entry replaced by `hits` (removed when there are none)."""
+    out = {k: v for k, v in (report or {}).items() if k != "footage"}
+    if hits:
+        out["footage"] = hits
+    return out
 
 
 # ---------------------------------------------------------------- approval, settle
@@ -1028,29 +1190,78 @@ def _approve_in_tx(pick_id, parent):
 
 def settle_parent(job_id):
     """Recompute a parent's approval/render state; finish it once every pick is decided and every approved one is
-    rendered or failed (a live chunk goes back to the queue for `clipper live done`)."""
-    job = store.get_job(job_id)
-    if not job or job["kind"] not in PARENT_KINDS or job["status"] != "waiting_approval":
-        return job
-    c = Counter(p["status"] for p in _all_picks(job_id))
-    total = sum(c.values())
-    pending = c["approved"] + c["rendering"]
-    if c["proposed"]:
-        return store.transition_job(job_id, ("waiting_approval",), stage="approval",
-                                    progress=f"Wartet auf Freigabe: {c['proposed']} von {total} Clips offen")
-    if pending:
-        return store.transition_job(job_id, ("waiting_approval",), stage="render",
-                                    progress=f"Rendere: {c['rendered']} von {c['rendered'] + pending} Clips fertig")
-    parts = [f"{c['rendered']} gerendert" if c["rendered"] else "", f"{c['rejected']} abgelehnt" if c["rejected"]
-             else "", f"{c['failed']} fehlgeschlagen" if c["failed"] else ""]
-    summary = "Fertig: " + (", ".join(x for x in parts if x) or "keine Clips")
-    if job["kind"] == "live_chunk":
+    rendered or failed (a live chunk goes back to the queue for `clipper live done`). Reading the picks and moving
+    the parent is one transaction, so a decision or a retry in between can't leave it finished with work pending.
+    Idempotent; reconcile() calls it for every waiting parent, which repairs a crash between a pick's change and
+    this call."""
+    with store.transaction():
+        job = store.get_job(job_id)
+        if not job or job["kind"] not in PARENT_KINDS or job["status"] != "waiting_approval":
+            return job
+        c = Counter(p["status"] for p in _all_picks(job_id))
+        total = sum(c.values())
+        pending = c["approved"] + c["rendering"]
+        if c["proposed"]:
+            return store.transition_job(job_id, ("waiting_approval",), stage="approval",
+                                        progress=f"Wartet auf Freigabe: {c['proposed']} von {total} Clips offen")
+        if pending:
+            return store.transition_job(job_id, ("waiting_approval",), stage="render",
+                                        progress=f"Rendere: {c['rendered']} von {c['rendered'] + pending} Clips "
+                                                 "fertig")
+        parts = [f"{c['rendered']} gerendert" if c["rendered"] else "", f"{c['rejected']} abgelehnt" if c["rejected"]
+                 else "", f"{c['failed']} fehlgeschlagen" if c["failed"] else ""]
+        summary = "Fertig: " + (", ".join(x for x in parts if x) or "keine Clips")
+        if job["kind"] != "live_chunk":
+            return store.transition_job(job_id, ("waiting_approval",), status="done", stage="finished",
+                                        progress=summary)
         row = store.transition_job(job_id, ("waiting_approval",), status="queued", stage="finished", not_before=0,
                                    progress="Gibt die Live-Aufnahme frei …", result={**(job.get("result") or {}),
                                                                                     "summary": summary})
-        _wake()
-        return row
-    return store.transition_job(job_id, ("waiting_approval",), status="done", stage="finished", progress=summary)
+    _wake()
+    return row
+
+
+def reconcile():
+    """Repair what a crash between two steps can leave behind (the server calls it at startup, the worker
+    supervisor every minute): every parent waiting for approval or renders is settled again, so one whose last
+    render finished just before a crash finishes (and a live chunk gets its `live done`) instead of waiting forever.
+    Returns the ids whose state changed."""
+    changed = []
+    for job in store.list_jobs(status="waiting_approval", kind=list(PARENT_KINDS), limit=100000)[0]:
+        try:
+            row = settle_parent(job["id"])
+        except Exception:
+            log.exception("settling job %s failed", job["id"])
+            continue
+        if row and (row["status"], row.get("stage")) != (job["status"], job.get("stage")):
+            store.add_job_event(job["id"], "Zustand nach einer Unterbrechung nachgeführt", "warning")
+            changed.append(job["id"])
+    return changed
+
+
+def release_stale(older_than_s=0, now=None):
+    """Running jobs whose worker is gone (a crash, a hard kill, a power cut; at startup: every running job) go back
+    to the queue, each counted as an attempt; one that has used up MAX_ATTEMPTS this way fails instead, so a job
+    that crashes the server (or is cut off again and again) is not repeated, and paid for, forever. Returns the ids
+    released (failed ones included)."""
+    failed = []
+    with store.transaction():
+        ids = store.release_stale_jobs(older_than_s, now=now)
+        for jid in ids:
+            job = store.get_job(jid)
+            if job and int(job.get("attempts") or 0) >= MAX_ATTEMPTS:
+                message = INTERRUPTED.format(n=job["attempts"])
+                store.update_job(jid, status="failed", error=message, progress="Fehlgeschlagen")
+                _after_failure(job, message)
+                failed.append((job, message))
+    for job, message in failed:
+        store.add_job_event(job["id"], message, "error")
+        raise_failed_alert(job, message)
+        if job["kind"] == "render":
+            pick = store.get_pick((job.get("params") or {}).get("pick_id") or 0)
+            if pick:
+                settle_parent(pick["job_id"])
+    return ids
 
 
 def _live_done_quiet(run, job):
@@ -1147,10 +1358,29 @@ def _register_video(job, pick, folder, lang):
     return vid, len(entries)
 
 
+def _verify_outputs(run, folder):
+    """Every MP4 the manifest lists is a playable Short (ffprobe: 1080x1920, sound, a duration): in auto mode nothing
+    else looks at a render before it is offered for upload. A broken folder is deleted, so the retry renders it again
+    instead of adopting it; a check that can't run fails the stage without touching the folder."""
+    entries = _read_json(Path(folder) / "upload.json")
+    files = [str(Path(folder) / Path(str(e.get("file") or "")).name) for e in entries or [] if isinstance(e, dict)]
+    if not files:
+        return
+    run.progress("Prüfe die gerenderten Videos …", force=True)
+    res = run.bridge("verify_videos", {"files": files}, timeout=T_VERIFY)
+    bad = [v for v in res.get("videos") or [] if not v.get("ok")]
+    if bad:
+        what = "; ".join(f"{Path(str(v.get('file'))).name}: {', '.join(v.get('problems') or ['unlesbar'])}"
+                         for v in bad[:2])
+        shutil.rmtree(folder, ignore_errors=True)
+        raise StageError(f"Das gerenderte Video ist fehlerhaft ({what}) und wurde verworfen.", retryable=True)
+
+
 def _finish_with_video(run, job, pick, folder, lang):
     folder = Path(folder)
     if not folder.is_absolute():
         folder = paths.from_rel(folder)
+    _verify_outputs(run, folder)
     with run.owned():
         vid, n = _register_video(job, pick, folder, lang)
         dubs = []
@@ -1202,6 +1432,13 @@ def _stage_render(run, job):
     folder = _adopt_leftovers(run, job, pick, "en")
     if folder:
         return _finish_with_video(run, job, pick, folder, "en")
+    pick = store.get_pick(pick["id"])
+    run.progress("Prüfe, ob die Szenen noch frei sind …", force=True)
+    chk = run.bridge("check", {"picks": [pick["data"]], "job": parent["clipper_job"],
+                               "reserved": _reserved_footage(pick=pick)}, timeout=T_CHECK)
+    hits = _footage_hits(chk.get("report"))
+    if hits:
+        return _back_to_approval(run, job, pick, hits)
     data = pick["data"] or {}
     _ensure_sources(run, parent, data)
     if not (_job_dir(parent["clipper_job"]) / "transcript.json").exists():
@@ -1240,6 +1477,25 @@ def _stage_render(run, job):
             raise StageError("Rendern lief durch, aber es kam kein Ergebnis zurück", retryable=True) from None
         folder = done[0]
     return _finish_with_video(run, job, pick, folder, "en")
+
+
+def _back_to_approval(run, job, pick, hits):
+    """The render start found the pick's footage taken (by a clip rendered or approved since it was checked): the
+    pick goes back to the approval queue with the reason, the render job ends without output, and an alert says so
+    (in auto mode nobody else would look)."""
+    message = FOOTAGE_TAKEN.format(hits="; ".join(hits[:2]))
+    with run.owned():
+        store.transition_pick(pick["id"], ("approved", "rendering"), "proposed", error=message, decided_at=None,
+                              check_report=_with_footage(pick.get("check_report"), hits))
+        store.update_job(job["id"], status="skipped", stage="finished", error=message,
+                         progress="Zurück in der Freigabe: Szenen schon verwendet")
+    run.event(message, "warning")
+    store.raise_alert(f"pick.footage.{pick['id']}", "warning",
+                      f"Clip {pick['idx']} von Job #{pick['job_id']} wurde nicht gerendert, weil seine Szenen schon "
+                      f"ein anderer Clip verwendet ({hits[0]}). Er wartet wieder in der Freigabe: lehne einen der "
+                      "beiden ab oder ändere Start/Ende.", {"pick_id": pick["id"], "job_id": pick["job_id"]})
+    settle_parent(pick["job_id"])
+    return None
 
 
 # ---------------------------------------------------------------- stage: dub
@@ -1335,15 +1591,28 @@ def _stage_upload(run, job):
         if getattr(e, "code", "") == "canceled" and run.cancel.is_set():
             raise Canceled(run.reason or "cancel") from None
         raise StageError(str(e), retryable=bool(getattr(e, "retryable", False))) from None
-    with run.owned():
+    _record_upload(run, job, params, res)
+    return None
+
+
+def _record_upload(run, job, params, res):
+    """The video is on YouTube: its post says so whatever happened to the job meanwhile. A cancel that arrived while
+    the last bytes went out is too late to undo the upload, so the job ends `done` (not canceled with the video
+    forgotten); a job another worker holds by now is left to it (it resumes the same session)."""
+    url = res.get("url") or res.get("video_id")
+    late = False
+    with store.transaction():
         if params.get("post_id"):
             store.update_post(params["post_id"], status="posted", external_id=res.get("video_id"), url=res.get("url"),
                               error=None)
-        store.update_job(job["id"], status="done", stage="finished", error=None,
-                         progress=f"Hochgeladen: {res.get('url') or res.get('video_id')}",
-                         result={**(job.get("result") or {}), **res})
-    run.event(f"Auf YouTube: {res.get('url') or res.get('video_id')}")
-    return None
+        cur = store.get_job(job["id"]) or {}
+        late = cur.get("status") == "canceled"
+        if late or (cur.get("status") == "running" and cur.get("locked_by") == run.worker_id):
+            store.update_job(job["id"], status="done", stage="finished", error=None, progress=f"Hochgeladen: {url}",
+                             result={**(job.get("result") or {}), **res})
+    if late:
+        run.event("Der Abbruch kam zu spät: das Video war schon vollständig bei YouTube", "warning")
+    run.event(f"Auf YouTube: {url}")
 
 
 _STAGES = {
@@ -1446,7 +1715,21 @@ def enqueue_dub(video_id, lang):
     return jid
 
 
-def enqueue_upload(variant_id, account_id, privacy):
+def _earlier_session(variant_id, account_id, privacy):
+    """The resumable session of an earlier upload of this variant to this account (failed or canceled, same
+    privacy), so a new upload asks it first: if that one actually finished, YouTube returns its video instead of a
+    second copy being created."""
+    for j in store.list_jobs(kind="upload", status=["failed", "canceled"], limit=1000)[0]:
+        p = j.get("params") or {}
+        if (p.get("variant_id"), p.get("account_id"), p.get("privacy")) == (variant_id, account_id, privacy) \
+                and p.get("upload_session"):
+            return p["upload_session"]
+    return None
+
+
+def enqueue_upload(variant_id, account_id, privacy, force=False):
+    """A YouTube upload job (and its post, status uploading). Refused while the variant is uploading to that account,
+    and when it is already posted there unless `force` (the owner confirmed a second, identical video)."""
     if privacy not in PRIVACY:
         raise PipelineError("Sichtbarkeit: privat, nicht gelistet oder öffentlich.", "invalid_privacy", 422,
                             {"privacy": "private, unlisted oder public"})
@@ -1462,14 +1745,23 @@ def enqueue_upload(variant_id, account_id, privacy):
     video = store.get_video(variant["video_id"])
     pick = store.get_pick((video or {}).get("pick_id") or 0)
     with store.transaction():
-        if any(p["status"] == "uploading" and p.get("account_id") == account_id for p in store.list_posts(variant_id)):
+        mine = [p for p in store.list_posts(variant_id) if p.get("account_id") == account_id]
+        if any(p["status"] == "uploading" for p in mine):
             raise PipelineError("Diese Variante wird gerade auf dieses Konto hochgeladen.", "already_uploading", 409)
+        done = [p for p in mine if p["status"] == "posted"]
+        if done and not force:
+            where = done[-1].get("url") or done[-1].get("external_id")
+            raise PipelineError(f"Diese Variante ist schon auf „{account['label']}“ hochgeladen"
+                                + (f" ({where})" if where else "") + ". Ein zweiter Upload erzeugt dort ein zweites, "
+                                "identisches Video.", "already_posted", 409)
+        session = None if done else _earlier_session(variant_id, account_id, privacy)
         post_id = store.add_post(variant_id, "youtube", account_id=account_id, status="uploading", privacy=privacy)
         jid = store.create_job("upload", (video or {}).get("profile") or store.get_setting("ui.default_profile"),
                                parent_id=(pick or {}).get("job_id"), title=variant.get("title"),
                                priority=PRIORITY["upload"], progress="Wartet",
                                params={"variant_id": variant_id, "account_id": account_id, "privacy": privacy,
-                                       "post_id": post_id})
+                                       "post_id": post_id, **({"upload_session": session} if session else {}),
+                                       **({"forced": True} if done else {})})
     _wake()
     return jid
 
@@ -1483,19 +1775,46 @@ def _pick_or_404(pick_id):
     return pick
 
 
+def _recheck_footage(pick, parent):
+    """Footage checks depend on other picks and exports, which change after a pick was checked: `clipper check` again
+    with the picks ahead of this one (_reserved_footage); the pick's stored report gets the fresh footage entry.
+    Returns the fresh footage hits ([] = free); PipelineError when the check can't run (nothing is approved then)."""
+    try:
+        chk = runtime.run_bridge("check", {"picks": [pick["data"]], "job": parent["clipper_job"],
+                                           "reserved": _reserved_footage(pick=pick)}, pick["profile"], timeout=T_CHECK)
+    except runtime.BridgeError as e:
+        raise PipelineError(f"Die Prüfung auf doppelt verwendete Szenen lief nicht: {e.message}. Bitte erneut "
+                            "versuchen.", "check_error", 409) from None
+    hits = _footage_hits(chk.get("report"))
+    report = _with_footage(pick.get("check_report"), hits)
+    if report != (pick.get("check_report") or {}):
+        with store.transaction():
+            if store.get_pick(pick["id"])["status"] == "proposed":
+                store.update_pick(pick["id"], check_report=report)
+    return hits, report
+
+
 def approve_pick(pick_id):
-    """proposed -> approved + a render job (atomic: approving twice, or approve racing reject, makes one winner)."""
+    """proposed -> approved + a render job (atomic: approving twice, or approve racing reject, makes one winner).
+    Hook and title rules come from the stored check report (an edit re-checks them); footage is checked again now,
+    against exported clips and the unrendered picks ahead of this one."""
     pick = _pick_or_404(pick_id)
     if pick["status"] != "proposed":
         raise PipelineError(f"Der Clip ist nicht mehr offen (Status: {pick['status']}).", "not_proposed", 409)
-    if _report_fails(pick.get("check_report")):
-        raise PipelineError(f"Der Clip verletzt Regeln der Qualitätsprüfung: {_fail_summary(pick['check_report'])}. "
+    stored = pick.get("check_report") or {}
+    if _report_fails(_with_footage(stored, None)):
+        raise PipelineError(f"Der Clip verletzt Regeln der Qualitätsprüfung: {_fail_summary(stored)}. "
                             "Bitte erst bearbeiten.", "check_failed", 422)
     parent = store.get_job(pick["job_id"])
     if parent["kind"] == "live_chunk" and not (_job_dir(parent["clipper_job"]) / "source.mp4").exists():
         raise PipelineError(LIVE_SOURCE_GONE, "source_gone", 409)
+    hits, report = _recheck_footage(pick, parent)
+    if hits:
+        raise PickCheckFailed(f"Dieser Clip nutzt Szenen, die schon ein anderer Clip verwendet: {hits[0]}. Lehne "
+                              "einen der beiden ab oder ändere Start/Ende.", report)
     with store.transaction():
         jid = _approve_in_tx(pick_id, parent)
+    store.resolve_alert(f"pick.footage.{pick_id}")
     store.add_job_event(parent["id"], f"Clip {pick['idx']} freigegeben → Render-Job #{jid}")
     settle_parent(parent["id"])
     _wake()
@@ -1509,6 +1828,7 @@ def reject_pick(pick_id, reason=None):
     if row is None:
         cur = store.get_pick(pick_id)
         raise PipelineError(f"Der Clip ist nicht mehr offen (Status: {cur['status']}).", "not_proposed", 409)
+    store.resolve_alert(f"pick.footage.{pick_id}")
     store.add_job_event(pick["job_id"], f"Clip {pick['idx']} abgelehnt" + (f": {reason}" if reason else ""))
     settle_parent(pick["job_id"])
     return store.get_pick(pick_id)
@@ -1579,7 +1899,8 @@ def update_pick_data(pick_id, changes):
     job = store.get_job(pick["job_id"])
     profile = pick["profile"]
     try:
-        chk = runtime.run_bridge("check", {"picks": [new], "job": job["clipper_job"]}, profile, timeout=T_CHECK)
+        chk = runtime.run_bridge("check", {"picks": [new], "job": job["clipper_job"],
+                                           "reserved": _reserved_footage(pick=pick)}, profile, timeout=T_CHECK)
     except runtime.BridgeError as e:
         raise PipelineError(f"Die Qualitätsprüfung lief nicht: {e.message}", "check_error", 409) from None
     report = (chk.get("report") or {}).get("video 1") or {}
@@ -1599,7 +1920,7 @@ def update_pick_data(pick_id, changes):
                                 409)
         if cur["data"] != base:
             raise PipelineError("Der Clip wurde inzwischen anders bearbeitet. Bitte neu laden.", "conflict", 409)
-        row = store.update_pick(pick_id, data=new, check_report=report, simulate_report=simulate)
+        row = store.update_pick(pick_id, data=new, check_report=report, simulate_report=simulate, error=None)
     write_picks_file(pick["job_id"])
     store.add_job_event(pick["job_id"], f"Clip {pick['idx']} bearbeitet: {', '.join(sorted(changes))}")
     return row, report
@@ -1631,6 +1952,8 @@ def retry_job(job_id):
                                     "den einzelnen Render-Job.", "has_rendered_picks", 409)
             if job["stage"] in ("approval", "render"):  # canceled while waiting: ask Claude again
                 fields["stage"] = "select"
+                params.pop("select", None)
+            # an interrupted selection (params.select) is kept: the retry continues it from its checkpoint
             params.pop("gate_rounds", None)
             params.pop("check_feedback", None)
             fields["params"] = params
@@ -1694,13 +2017,21 @@ def cancel_job(job_id, _pick_status="proposed"):
 
 def on_settings_changed(keys=()):
     """The API calls this after any settings / secret / source change: re-materialize the clipper overlay, resume
-    jobs that waited for a key or budget, and wake the workers and the scheduler (they re-read settings anyway)."""
+    jobs that waited for a key or budget, stop the recorders of streams that are no longer active (a stream paused
+    or deleted, a profile or live recording switched off), and wake the workers and the scheduler (they re-read
+    settings anyway)."""
     _cfg_cache.clear()
     try:
         runtime.materialize()
     except Exception:
         log.exception("materialize after settings change failed")
     keys = [str(k) for k in keys or ()]
+    if not keys or any(k in ("streams", "profiles", "automation.live_enabled") for k in keys):
+        try:
+            from . import scheduler
+            scheduler.stop_inactive_recorders()
+        except Exception:
+            log.exception("stopping inactive recorders failed")
     if not keys or any("anthropic" in k for k in keys):
         store.set_meta("anthropic.rejected_key", None)  # saved again: give it another try
     resume_waiting(force=not keys or any(k.startswith(("secrets.", "claude.")) or "anthropic" in k for k in keys))
@@ -1798,10 +2129,10 @@ def run_scan(rid, profile, trigger, cancel=None):
         data = None
     if not isinstance(data, dict):
         err = _fetch_error(res, scan=False).message if res.returncode else "„clipper watch“ lieferte kein Ergebnis"
-        summary["message"] = f"Suche fehlgeschlagen: {err}"
+        summary.update(message=f"Suche fehlgeschlagen: {err}", retry=True)
         store.finish_run(rid, False, summary)
         store.raise_alert(f"scan.failed.{profile}", "warning", f"Die Suche nach neuen Videos ({profile}) ist "
-                          f"fehlgeschlagen: {err}", {"run_id": rid})
+                          f"fehlgeschlagen: {err} {SCAN_RETRY_NOTE}", {"run_id": rid})
         return summary
     videos = data.get("videos") or []
     errors = data.get("errors") or []
@@ -1811,12 +2142,12 @@ def run_scan(rid, profile, trigger, cancel=None):
         first = str((errors[0] or {}).get("error") if isinstance(errors[0], dict) else errors[0])
         known = _fetch_error(first, scan=False)
         err = known.message if not known.retryable or known.slow else f"yt-dlp meldet: {yt_dlp_detail(first)}"
-        summary["message"] = f"Keine Quelle erreichbar ({len(errors)} von {len(errors)}): {err}"
+        summary.update(message=f"Keine Quelle erreichbar ({len(errors)} von {len(errors)}): {err}", retry=True)
         store.finish_run(rid, False, summary)
         store.raise_alert(f"scan.failed.{profile}", "warning",
                           f"Die Suche nach neuen Videos ({profile}) hat keine einzige Quelle erreicht: {err} Prüfe die "
                           "Internetverbindung; meldet YouTube eine Bot-Prüfung, hilft meist ein yt-dlp-Update (siehe "
-                          "System).", {"run_id": rid, "errors": len(errors)})
+                          f"System). {SCAN_RETRY_NOTE}", {"run_id": rid, "errors": len(errors)})
         return summary
     store.resolve_alert(f"scan.failed.{profile}")
     fresh = [v for v in videos if not v.get("processed")]
@@ -1863,13 +2194,48 @@ def run_scan(rid, profile, trigger, cancel=None):
 
 # ---------------------------------------------------------------- live chunks
 
-def enqueue_live_chunks(profile, ready):
-    """A live_chunk job for every analyzed chunk (`live watch`'s `ready`) that has none yet."""
-    made = []
+def _slug(text):
+    """clipper.live.slug: a stream's recorder folder and chunk-name part."""
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")[:40]
+
+
+def _norm_url(url):
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def live_stream_active(profile, cj, meta=None):
+    """Whether the stream a live chunk was recorded from is still wanted: a stream row of `profile` (by the URL the
+    recorder got, or by the chunk's `live-<stream>-<time>` name) that isn't paused, in an enabled profile. A chunk of
+    a paused or deleted stream, of a switched-off profile or of a recorder the dashboard doesn't know is not clipped."""
+    if profile not in store.enabled_profiles():
+        return False
+    meta = meta if meta is not None else (_read_json(_job_dir(cj) / "job.json", {}) or {})
+    url = _norm_url(meta.get("url"))
+    for s in store.list_streams(profile, include_paused=False):
+        if (url and _norm_url(s["url"]) == url) or re.fullmatch(rf"live-{re.escape(_slug(s['name']))}-\d{{8}}-\d{{6}}"
+                                                                 r"(-\d+)?", str(cj)):
+            return True
+    return False
+
+
+def enqueue_live_chunks(profile, ready, dropped=None):
+    """A live_chunk job for every analyzed chunk (`live watch`'s `ready`) that has none yet. Chunks of a stream that
+    is no longer active (live_stream_active) and chunks shorter than MIN_LIVE_CHUNK_S (a stream that keeps dropping)
+    get no job: they are marked `live done`, so cleanup deletes their recording, and appended to `dropped`."""
+    made, drop = [], []
     for cj in ready or []:
         jd = _job_dir(cj)
         meta = _read_json(jd / "job.json", {}) or {}
         if not (jd / "candidates.json").exists() or (meta.get("profile") or profile) != profile:
+            continue
+        if store.find_job_by_clipper_job(cj, kinds=("live_chunk", "source")):
+            continue
+        try:
+            short = float(meta.get("duration") or 0) < MIN_LIVE_CHUNK_S
+        except (TypeError, ValueError):
+            short = False
+        if short or not live_stream_active(profile, cj, meta):
+            drop.append(cj)
             continue
         with store.transaction():
             if store.find_job_by_clipper_job(cj, kinds=("live_chunk", "source")):
@@ -1881,6 +2247,13 @@ def enqueue_live_chunks(profile, ready):
                                    progress="Wartet")
         store.add_job_event(jid, f"Live-Stück aufgenommen und analysiert: {cj}")
         made.append(jid)
+    if drop:
+        res = runtime.run_clipper(["live", "done", "--", *drop], profile, timeout=T_LIVE_DONE)
+        if res.returncode == 0:
+            if dropped is not None:
+                dropped.extend(drop)
+        else:  # still ready: the next live tick drops them again
+            log.warning("live done for dropped chunks %s failed: %s", drop, _tail(res))
     if made:
         _wake()
     return made

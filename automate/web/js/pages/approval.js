@@ -188,7 +188,10 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
   useEffect(() => () => onDirty(false), []);
   const check = readCheck(report.data);
   const reportCurrent = report.forKey === draftKey;
-  const blocked = reportCurrent && check.failCount > 0;
+  // Footage fails depend on other clips (one rejected or deleted frees it): "Freigeben" checks them again on the
+  // server, so they don't block the button; hook/title fails only an edit can fix.
+  const footageOnly = check.failCount > 0 && check.fails.length === check.failCount && check.fails.every((f) => f.section === 'footage');
+  const blocked = reportCurrent && check.failCount > 0 && !footageOnly;
   const emptyHook = draft.pairs.some((p) => !p.hook.trim());
 
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
@@ -259,6 +262,7 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
   const headingId = `pick-${pick.id}-h`;
   return html`<article class=${cx('card pick-card', selected && 'is-selected')} ref=${ref} aria-labelledby=${headingId} id=${`pick-${pick.id}`}>
     <${PickHead} pick=${pick} headingId=${headingId} selectable selected=${selected} onSelect=${onSelect} />
+    ${pick.error && html`<div style="padding:0 18px"><${Callout} tone="warning" title="Zurück in der Freigabe">${pick.error}<//></div>`}
     <div class="pick-body">
       <aside class="pick-side">
         <${Sheets} sheets=${pick.sheets} title=${pick.job && pick.job.title} />
@@ -278,7 +282,7 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
             <span class="muted small">2–6 Wörter, jede Variante mit anderer Struktur. Ein Schlüsselwort mit <code>*Sternchen*</code> markieren.</span>
           </div>
         </section>
-        <${CheckSummary} check=${check} current=${reportCurrent} dirty=${isDirty} error=${saveError} />
+        <${CheckSummary} check=${check} current=${reportCurrent} dirty=${isDirty} error=${saveError} footageOnly=${footageOnly} />
         <section class="stack">
           <h3 class="section-label">Text zum Posten</h3>
           <${TextareaField} label="Beschreibung" value=${draft.description} onInput=${(v) => set({ description: v })} rows=${3}
@@ -315,6 +319,7 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
     </div>
     <footer class="pick-foot">
       <span class="grow" role="status">${blocked ? html`<span style="color:var(--red)">Der Check hat Fehler – erst beheben, dann freigeben.</span>`
+        : reportCurrent && footageOnly ? html`<span style="color:var(--red)">Szenen schon verwendet – „Freigeben“ prüft erneut.</span>`
         : emptyHook ? 'Leere Hooks bitte ausfüllen oder entfernen.'
         : isDirty ? 'Ungespeicherte Änderungen.' : `Vorgeschlagen ${fmt.dateTime(pick.created_at)}`}</span>
       ${isDirty && html`<${Button} variant="ghost" disabled=${!!busy} onClick=${() => { setDraft(base); setSaveError(null); setReport({ data: pick.check_report, forKey: keyOf(base) }); }}>Verwerfen<//>`}
@@ -428,7 +433,7 @@ function HookRow({ i, n, pair, pick, check, onChange, onMove, onRemove }) {
   </li>`;
 }
 
-function CheckSummary({ check, current, dirty, error }) {
+function CheckSummary({ check, current, dirty, error, footageOnly }) {
   const general = [...check.fails.map((x) => ({ ...x, fail: true })), ...check.notes];
   if (!current && dirty) {
     return html`<div class="check-summary"><p class="issue" style="color:var(--text-2)"><${Icon} name="info" size=${14} />
@@ -441,9 +446,11 @@ function CheckSummary({ check, current, dirty, error }) {
   return html`<div class=${cx('check-summary', check.failCount && 'has-fail')} role=${check.failCount ? 'alert' : undefined}>
     <p class="issue" style=${check.failCount ? 'color:var(--red);font-weight:600' : 'font-weight:600'}>
       <${Icon} name=${check.failCount ? 'alert-circle' : 'info'} size=${14} />
-      <span>${check.failCount ? `${fmt.plural(check.failCount, 'Fehler', 'Fehler')} im Qualitäts-Check (blockiert die Freigabe)` : 'Hinweise aus dem Qualitäts-Check'}${error && error.check_report ? ' – nicht gespeichert.' : ''}</span></p>
+      <span>${footageOnly ? 'Diese Szenen nutzt schon ein anderer Clip'
+        : check.failCount ? `${fmt.plural(check.failCount, 'Fehler', 'Fehler')} im Qualitäts-Check (blockiert die Freigabe)` : 'Hinweise aus dem Qualitäts-Check'}${error && error.check_report ? ' – nicht gespeichert.' : ''}</span></p>
     ${general.map((g) => html`<p class=${cx('issue', g.fail ? 'issue-fail' : 'issue-note')}>
       <${Icon} name=${g.fail ? 'alert-circle' : 'info'} size=${14} /><span><span class="issue-label">${g.label}:</span> ${g.text}</span></p>`)}
+    ${footageOnly && html`<p class="issue issue-note"><${Icon} name="info" size=${14} /><span>Dieselben Szenen zweimal zu posten bringt keine Reichweite. Lehne einen der beiden Clips ab oder ändere Start/Ende. „Freigeben“ prüft das erneut – ist der andere Clip inzwischen abgelehnt, geht es durch.</span></p>`}
   </div>`;
 }
 

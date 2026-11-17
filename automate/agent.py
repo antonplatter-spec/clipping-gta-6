@@ -2,19 +2,35 @@
 tool use. The loop is hosted here because the tools read local files and run local clipper commands, and every
 submission is validated before it is accepted.
 
-    select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None) -> Selection
+    select_picks(job_id, *, max_picks, avoid_openers=(), reserved=(), log=None, cancel=None) -> Selection
     translate_dub(job_id, pick_idx, lang, segments_report, *, log=None, cancel=None) -> dict   (the --translation JSON)
     test_key(api_key=None) -> (ok, German message)
     build_system_prompt(profile) -> [system blocks] ; system_prompt_chars(profile) -> int
     build_select_request(job_row, *, max_picks, avoid_openers=()) -> (JobContext, request params)   (for --dry-run)
     make_client(api_key)     the SDK client; tests replace it with a scripted fake
 
-Errors: MissingApiKey (no key; InvalidApiKey, a subclass, when Anthropic rejects the stored one), BudgetExceeded (the
-daily limit, checked before every request), AgentError (.retryable, .code; str(e) is German for the dashboard;
-AgentCanceled when `cancel` is set). The agent never writes the DB except usage rows; it keeps a copy of each
-conversation (images elided) in data/tmp/agent/job-<id>/ for debugging, and a resumable checkpoint of an unfinished
-selection there (select.resume.json, see _Resume): a selection interrupted by a server stop, a retryable API error,
-a missing key or the daily limit continues after its last completed turn instead of paying for them again.
+`reserved`: footage other pending picks hold ([{pick, job, label}], pipeline._reserved_footage); submit_picks and the
+check tool fail a pick that uses it, so Claude picks another moment instead of the gate rejecting the whole selection.
+
+Errors: select_picks / translate_dub raise only these: MissingApiKey (no key; InvalidApiKey, a subclass, when
+Anthropic rejects the stored one), BudgetExceeded (a NEW selection or translation can't start: costs.can_start), and
+AgentError (.retryable, .code; str(e) is German for the dashboard; AgentCanceled when `cancel` is set;
+SelectionCapReached when a selection used up claude.selection_limit_eur; code "internal" for anything unexpected,
+never retryable: an automatic retry could pay for the same selection again).
+
+Money: the daily limit is checked once, before a selection starts (costs.can_start, which also counts what running
+selections may still spend). A started selection is never killed by the daily limit; instead it has its own cap
+(claude.selection_limit_eur) for all its requests together, across restarts: before each request, spent + the last
+request's cost must stay within it; when only ~2 requests are left Claude is told to submit. While it runs, the
+selection reserves its remaining cap (costs.reserve; the pipeline counts paused ones), so the day ends about one cap
+above the limit at most.
+
+The agent never writes the DB except usage rows; it keeps a copy of each conversation (images elided) in
+data/tmp/agent/job-<id>/ for debugging, and a resumable checkpoint of an unfinished selection there
+(select.resume.json, see _Resume): a selection interrupted by a server stop, a retryable API error, a missing key, a
+spent Anthropic balance or an internal error continues after its last completed turn (at most one request repeats)
+with what it already spent counted against its cap. Only an accepted selection or a final failure (refusal, failed
+fix rounds, max_turns, the cap, ...) drops it.
 
 Request shape: model from claude.model, adaptive thinking (the only mode on Sonnet 5.5 / Opus 5.5; summarized, so
 the saved conversations show Claude's reasoning) with effort from claude.effort, tool_choice auto (forced tool use
@@ -32,6 +48,7 @@ prints the request (system block sizes, tools, first message outline, images) wi
 import argparse
 import hashlib
 import json
+import logging
 import re
 import sys
 import time
@@ -51,7 +68,9 @@ MAX_NUDGES = 2  # turns without a tool call (or cut off at max_tokens) before gi
 MAX_PAUSES = 3
 MAX_UPFRONT_SHEETS = 10
 CANDIDATES_MD_CHARS = 60000
-RESUME_MAX_AGE_S = 12 * 3600  # an interrupted selection older than this starts over
+RESUME_MAX_AGE_S = 3 * 86400  # an interrupted selection older than this starts over (data/tmp is pruned after 5 days)
+CAP_WARN_REQUESTS = 2  # tell Claude to submit when the cap leaves about this many requests
+MAX_CHECK_ERRORS = 2  # submit_picks whose `clipper check` couldn't run (not the picks' fault) before the job retries
 MODEL_LABELS = {"claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-opus-5-5": "Claude Opus 5.5"}
 # Thinking is always on for these models; "summarized" costs the same and makes the saved conversations readable.
 THINKING = {"type": "adaptive", "display": "summarized"}
@@ -89,6 +108,16 @@ class InvalidApiKey(MissingApiKey, AgentError):
 class AgentCanceled(AgentError):
     def __init__(self, message="Abgebrochen."):
         super().__init__(message, retryable=False, code="canceled")
+
+
+class SelectionCapReached(AgentError):
+    """The selection's own cost cap (claude.selection_limit_eur) is used up before Claude submitted."""
+
+    def __init__(self, spent, cap):
+        super().__init__(f"Die Auswahl hat ihr Kostenlimit erreicht ({costs.eur_text(spent)} von "
+                         f"{costs.eur_text(cap)} pro Auswahl), bevor Claude eine gültige Auswahl abgegeben hat. Wenn "
+                         "das öfter passiert, erhöhe „Höchstens pro Auswahl“ unter Einstellungen → Claude. „Erneut "
+                         "versuchen“ startet die Auswahl neu.", retryable=False, code="selection_cap")
 
 
 @dataclass
@@ -176,6 +205,9 @@ def _api_error(e, model):
 
 def _budget_message():
     limit = store.get_setting("claude.daily_limit_eur")
+    if costs.budget_ok():  # only what running selections may still spend stands in the way
+        return (f"Das restliche Tagesbudget ({costs.eur_text(costs.budget_left_eur() or 0)}) ist für laufende "
+                "Auswahlen verplant. Der Job startet, sobald sie fertig sind.")
     return (f"Das Tageslimit für Claude ist erreicht ({costs.eur_text(costs.spent_today_eur())} von "
             f"{costs.eur_text(limit)}). "
             "Der Job läuft am nächsten Tag weiter oder sobald das Limit erhöht wird.")
@@ -204,20 +236,43 @@ def record_usage(job_id, purpose, message, requested_model, request_id=None):
 
 
 class _Session:
-    """One job's requests: cancel and budget checks before each, streaming, error mapping, usage logging + totals."""
+    """One job's requests: a cancel check (and, for a selection, the cap check) before each, streaming, error
+    mapping, usage logging + totals. The daily limit is not checked here: it gates the start of a task (module doc).
+    For a selection: `cap_eur` its cap, `spent_before` / `last_eur` what earlier runs of the same selection paid in
+    total / for their last request (from the checkpoint), `reserve_key` its reservation, kept at what it may still
+    spend."""
 
-    def __init__(self, client, job_id, cancel=None):
+    def __init__(self, client, job_id, cancel=None, *, cap_eur=None, spent_before=0.0, last_eur=0.0,
+                 reserve_key=None):
         self.client, self.job_id, self.cancel = client, job_id, cancel
         self.rows, self.requests = [], 0
+        self.cap, self.spent_before, self.last_eur = cap_eur, float(spent_before or 0), float(last_eur or 0)
+        self.reserve_key = reserve_key
+        self._reserve()
 
     def check_cancel(self):
         if self.cancel is not None and self.cancel.is_set():
             raise AgentCanceled()
 
+    def spent_eur(self):
+        """Everything this selection has paid so far (earlier runs included)."""
+        return round(self.spent_before + sum(r.get("cost_eur") or 0 for r in self.rows), 6)
+
+    def requests_left(self):
+        """How many more requests the cap allows at the last request's cost; None without a cap or a known cost."""
+        if self.cap is None or self.last_eur <= 0:
+            return None
+        return max(0, int((self.cap - self.spent_eur()) / self.last_eur))
+
+    def _reserve(self):
+        if self.reserve_key is not None and self.cap is not None:
+            costs.reserve(self.reserve_key, max(0.0, self.cap - self.spent_eur()))
+
     def request(self, params, purpose):
         self.check_cancel()
-        if not costs.budget_ok():
-            raise BudgetExceeded(_budget_message())
+        if self.cap is not None and self.spent_eur() + self.last_eur > self.cap:
+            raise SelectionCapReached(self.spent_eur(), self.cap)
+        before = len(self.rows)
         try:
             with self.client.beta.messages.stream(**params) as stream:
                 for _event in stream:
@@ -228,8 +283,12 @@ class _Session:
                 request_id = getattr(stream, "request_id", None)
         except anthropic.APIError as e:
             raise _api_error(e, params["model"]) from e
+        finally:
+            self._reserve()
         self.requests += 1
         self.rows += record_usage(self.job_id, purpose, message, params["model"], request_id)
+        self.last_eur = round(sum(r.get("cost_eur") or 0 for r in self.rows[before:]), 6)
+        self._reserve()
         return message
 
     def _partial(self, stream, model, purpose):
@@ -398,12 +457,13 @@ def _first_message(ctx, max_turns, max_fix):
     return {"role": "user", "content": prompts.select_message(facts, "\n".join(lines), md, sheets, feedback)}
 
 
-def build_select_request(job, *, max_picks, avoid_openers=(), cancel=None, log=None):
+def build_select_request(job, *, max_picks, avoid_openers=(), reserved=(), cancel=None, log=None):
     """(JobContext, request params) exactly as select_picks sends its first request. Raises AgentError when the job
-    has nothing to select from."""
+    has nothing to select from. `reserved` only reaches the checks (ctx.reserved), never the request."""
     model, effort, max_turns, max_fix = _settings()
     try:
-        ctx = T.JobContext.load(job, max_picks=max_picks, avoid_openers=avoid_openers, cancel=cancel, log=log)
+        ctx = T.JobContext.load(job, max_picks=max_picks, avoid_openers=avoid_openers, cancel=cancel, log=log,
+                                reserved=reserved)
         first = _first_message(ctx, max_turns, max_fix)
     except LookupError as e:
         raise AgentError(str(e), code="no_analysis") from None
@@ -445,35 +505,56 @@ def _tool_result(block, res):
     return out
 
 
-def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
+def select_picks(job_id, *, max_picks, avoid_openers=(), reserved=(), log=None, cancel=None):
     """Claude picks the moments of an analyzed source or live chunk. Returns a Selection whose picks are exactly what
-    `clipper render` accepts and pass `clipper check --job` without fails (or none, with no_clip_reason)."""
+    `clipper render` accepts and pass `clipper check --job` without fails (or none, with no_clip_reason). Raises only
+    the module's errors (see the module doc): anything unexpected becomes a non-retryable AgentError ("internal")."""
+    try:
+        return _select(job_id, int(max_picks), avoid_openers, reserved, log, cancel)
+    except (AgentError, BudgetExceeded, MissingApiKey):
+        raise
+    except T.ToolCanceled:
+        raise AgentCanceled() from None
+    except Exception as e:  # a bug: the job must not retry (and pay for) the selection on its own
+        logging.getLogger("automate.agent").exception("select_picks for job %s crashed", job_id)
+        raise AgentError(f"Interner Fehler bei der Auswahl: {e!r}"[:400], code="internal") from e
+
+
+def _select(job_id, max_picks, avoid_openers, reserved, log, cancel):
     job = store.get_job(job_id)
     if not job:
         raise AgentError(f"Job {job_id} gibt es nicht.", code="no_job")
-    if int(max_picks) < 1:
-        raise ValueError("max_picks must be at least 1")
+    if max_picks < 1:
+        raise AgentError("Es dürfen keine Videos mehr aus dieser Quelle kommen (max_picks < 1).", code="no_picks")
     key = _api_key()
-    if not costs.budget_ok():
-        raise BudgetExceeded(_budget_message())
     model, _, max_turns, max_fix = _settings()
-    ctx, params = build_select_request(job, max_picks=max_picks, avoid_openers=avoid_openers, cancel=cancel, log=log)
-    sess = _Session(make_client(key), job_id, cancel)
+    cap = float(store.get_setting("claude.selection_limit_eur"))
+    reserve_key = f"select-{job_id}"
+    ctx, params = build_select_request(job, max_picks=max_picks, avoid_openers=avoid_openers, reserved=reserved,
+                                       cancel=cancel, log=log)
     messages = params["messages"]
-    turns = nudges = pauses = rejections = 0
-    outcome, keep = "unfinished", False
-    resume = _Resume(ctx, model, messages[0])
+    turns = nudges = pauses = rejections = check_errors = 0
+    cap_warned, outcome, keep, sess = False, "unfinished", False, None
+    resume = _Resume(ctx, model, params)
     state = resume.load()
+    if state is None and not costs.can_start(exclude=reserve_key):  # the daily limit only gates a new selection
+        raise BudgetExceeded(_budget_message())
     if state:
         messages[:] = state["messages"]
-        turns, nudges, pauses, rejections = (int(state[k]) for k in ("turns", "nudges", "pauses", "rejections"))
+        turns, nudges, pauses, rejections = (int(state.get(k) or 0) for k in ("turns", "nudges", "pauses",
+                                                                             "rejections"))
         ctx.views, ctx.sheets_attached = int(state.get("views") or 0), set(state.get("sheets") or ())
-        ctx.say(f"Setzt die unterbrochene Auswahl nach {turns} Anfrage(n) fort (bereits bezahlt, nicht wiederholt)")
+        cap_warned = bool(state.get("cap_warned"))
+        if turns:
+            ctx.say(f"Setzt die unterbrochene Auswahl nach {turns} Anfrage(n) fort (bereits bezahlt: "
+                    f"{costs.eur_text(state.get('spent_eur') or 0)}, nicht wiederholt)")
     try:
+        sess = _Session(make_client(key), job_id, cancel, cap_eur=cap, spent_before=(state or {}).get("spent_eur"),
+                        last_eur=(state or {}).get("last_eur"), reserve_key=reserve_key)
         while turns < max_turns:
-            if turns:
-                resume.save(messages, turns=turns, nudges=nudges, pauses=pauses, rejections=rejections,
-                            views=ctx.views, sheets=sorted(ctx.sheets_attached))
+            resume.save(messages, turns=turns, nudges=nudges, pauses=pauses, rejections=rejections,
+                        views=ctx.views, sheets=sorted(ctx.sheets_attached), cap_warned=cap_warned,
+                        spent_eur=sess.spent_eur(), last_eur=sess.last_eur)
             ctx.say(f"Claude ({_label(model)}) denkt nach … (Anfrage {turns + 1} von {max_turns})")
             message = sess.request(params, "fix" if rejections else "select")
             turns += 1
@@ -520,13 +601,25 @@ def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
                                                                      "ignored.", is_error=True)))
                     continue
                 submitted = True
-                out = T.submit(ctx, block.input if isinstance(block.input, dict) else {}, round_no=rejections + 1,
-                               max_rounds=max_fix)
+                try:
+                    out = T.submit(ctx, block.input if isinstance(block.input, dict) else {},
+                                   round_no=rejections + 1, max_rounds=max_fix)
+                except T.ToolError as e:  # `clipper check` itself couldn't run: not the picks' fault
+                    check_errors += 1
+                    if check_errors >= MAX_CHECK_ERRORS:
+                        raise AgentError(f"Die Qualitätsprüfung (clipper check) lief mehrmals nicht: {e}. Der Job "
+                                         "wird später erneut versucht.", retryable=True,
+                                         code="check_unavailable") from None
+                    ctx.say(f"Die Qualitätsprüfung lief nicht ({e}) – Claude gibt dieselben Picks erneut ab")
+                    results.append(_tool_result(block, T.ToolResult(
+                        f"The quality check couldn't run ({e}). That is a problem on the worker's side, not with "
+                        "your picks: call submit_picks again with the same picks.", is_error=True)))
+                    continue
                 if isinstance(out, T.Submission):
                     outcome = "accepted"
-                    usage = sess.totals()
+                    usage = {**sess.totals(), "selection_eur": sess.spent_eur()}
                     ctx.say(f"Auswahl angenommen: {len(out.picks)} Pick(s) nach {turns} Anfragen "
-                            f"({costs.eur_text(usage['cost_eur'])})" if out.picks else
+                            f"({costs.eur_text(usage['selection_eur'])})" if out.picks else
                             f"Kein Clip aus dieser Quelle: {out.no_clip_reason}")
                     return Selection(picks=out.picks, reasons=out.reasons, click_triggers=out.click_triggers,
                                      no_clip_reason=out.no_clip_reason, check_report=out.check_report, turns=turns,
@@ -546,6 +639,14 @@ def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
                     f"Note from the worker: {left} request{'s are' if left > 1 else ' is'} left for this job. "
                     + ("Finish with submit_picks: the picks you are sure of, or an empty list with no_clip_reason."
                        if left > 1 else "Call submit_picks now."))})
+            by_cap = sess.requests_left()
+            if by_cap is not None and 0 < by_cap <= CAP_WARN_REQUESTS and not cap_warned:
+                cap_warned = True
+                ctx.say("Das Kostenlimit dieser Auswahl ist fast erreicht: Claude soll jetzt abgeben")
+                results.append({"type": "text", "text": (
+                    f"Note from the worker: the spending limit for this selection is almost used up (about {by_cap} "
+                    f"more request{'s' if by_cap > 1 else ''}). Call submit_picks now: the picks you are sure of, or "
+                    "an empty list with no_clip_reason.")})
             messages.append({"role": "user", "content": results})
         outcome = "max_turns"
         raise AgentError(f"Claude hat nach {max_turns} Anfragen keine gültige Auswahl abgegeben (Limit „Höchstens "
@@ -556,25 +657,37 @@ def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
     except (BudgetExceeded, MissingApiKey, AgentCanceled):  # the job waits or stops and comes back to this selection
         keep = True
         raise
-    except AgentError as e:
-        keep = e.retryable
+    except AgentError as e:  # a retry later (429, overload) or once the account has credit again continues it
+        keep = e.retryable or e.code == "billing"
+        if e.code == "selection_cap":
+            outcome = "cap"
+        raise
+    except Exception:  # a bug (select_picks reports it): keep what was paid for a manual retry
+        keep = True
         raise
     finally:
+        if sess is not None:
+            costs.release(reserve_key)
+            if keep:
+                resume.update(spent_eur=sess.spent_eur(), last_eur=sess.last_eur)
         if not keep:
             resume.clear()
         _save_conversation(ctx, params, outcome, sess)
 
 
 class _Resume:
-    """The select conversation after each completed turn, so a job interrupted mid-selection (server stopped, a
-    429 retried later, the budget spent) continues where it was instead of paying for the same turns again. Valid
-    only for the same model and the same first message (same analysis, max_picks, openers, gate feedback) and for
-    RESUME_MAX_AGE_S; images and thinking signatures are kept (the turns go back to the API unchanged)."""
+    """The select conversation after each completed turn (and before the first request: the selection has started),
+    so a job interrupted mid-selection (server stopped, a 429 retried later, no credit, a missing key) continues
+    where it was instead of paying for the same turns again, with what it spent so far (`spent_eur`) still counted
+    against its cap. Valid only for the same model, system prompt, tools and first message (same analysis,
+    max_picks, openers, gate feedback; a changed prompt would make Anthropic reject the replayed thinking blocks) and
+    for RESUME_MAX_AGE_S; images and thinking signatures are kept (the turns go back to the API unchanged)."""
 
-    def __init__(self, ctx, model, first):
+    def __init__(self, ctx, model, params):
         self.path = ctx.scratch / "select.resume.json"
         self.model = model
-        self.key = hashlib.sha256(json.dumps(_raw(first), sort_keys=True).encode("utf-8")).hexdigest()
+        prefix = [params.get("system"), params.get("tools"), params["messages"][0]]
+        self.key = hashlib.sha256(json.dumps(_raw(prefix), sort_keys=True).encode("utf-8")).hexdigest()
 
     def load(self):
         try:
@@ -583,17 +696,25 @@ class _Resume:
             return None
         if not isinstance(data, dict) or data.get("key") != self.key or data.get("model") != self.model \
                 or time.time() - float(data.get("saved_at") or 0) > RESUME_MAX_AGE_S \
-                or not isinstance(data.get("messages"), list) or len(data["messages"]) < 2:
+                or not isinstance(data.get("messages"), list) or not data["messages"]:
             return None
         return data
 
     def save(self, messages, **counters):
+        self._write({"key": self.key, "model": self.model, "saved_at": time.time(), "messages": _raw(messages),
+                     **counters})
+
+    def update(self, **fields):
+        """Change fields of the saved checkpoint (what the selection spent after its last completed turn)."""
+        data = self.load()
+        if data is not None:
+            self._write({**data, **fields})
+
+    def _write(self, data):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(f".{self.path.name}.tmp")
-            tmp.write_text(json.dumps({"key": self.key, "model": self.model, "saved_at": time.time(),
-                                       "messages": _raw(messages), **counters}, ensure_ascii=False),
-                           encoding="utf-8")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             tmp.replace(self.path)
         except (OSError, TypeError, ValueError):  # a missing checkpoint only costs a fresh start
             pass
@@ -759,7 +880,17 @@ def _parse_translation(message, lang):
 def translate_dub(job_id, pick_idx, lang, segments_report, *, log=None, cancel=None):
     """The translation JSON `clipper dub render --translation` accepts, for pick `pick_idx` (1-based) of the job's
     picks.json. One request with a JSON-schema output; validated (locally, then by clipper's validator) and retried
-    once with the validator's message."""
+    once with the validator's message. Raises only the module's errors (like select_picks)."""
+    try:
+        return _translate_dub(job_id, pick_idx, lang, segments_report, log=log, cancel=cancel)
+    except (AgentError, BudgetExceeded, MissingApiKey):
+        raise
+    except Exception as e:
+        logging.getLogger("automate.agent").exception("translate_dub for job %s crashed", job_id)
+        raise AgentError(f"Interner Fehler bei der Übersetzung: {e!r}"[:400], code="internal") from e
+
+
+def _translate_dub(job_id, pick_idx, lang, segments_report, *, log=None, cancel=None):
     job = store.get_job(job_id)
     if not job:
         raise AgentError(f"Job {job_id} gibt es nicht.", code="no_job")
@@ -767,6 +898,8 @@ def translate_dub(job_id, pick_idx, lang, segments_report, *, log=None, cancel=N
     if not isinstance(segs, list) or not segs:
         raise AgentError("Der Clip hat keine gesprochenen Zeilen, die übersetzt werden könnten.", code="no_lines")
     key = _api_key()
+    if not costs.can_start():  # the start gate; the (at most two) requests of a started translation all go out
+        raise BudgetExceeded(_budget_message())
     model, effort, _, _ = _settings()
     sess = _Session(make_client(key), job_id, cancel)
     messages = [{"role": "user", "content": prompts.dub_message(lang, segments_report)}]

@@ -213,16 +213,40 @@ function PostModal({ v, accounts, onClose, onDone }) {
   <//>`;
 }
 
+// Uploading a variant that is already on the chosen channel makes a second, identical video there: the server refuses
+// it (409 already_posted) unless the owner confirms here, which sends `force: true`.
+function confirmSecondUpload(account, post) {
+  const where = post && post.url ? ` (${post.url})` : '';
+  return confirmDialog({
+    title: 'Schon auf diesem Kanal', confirmLabel: 'Trotzdem hochladen', danger: true,
+    message: `Diese Variante ist schon auf „${account ? account.label : 'diesem Kanal'}“ hochgeladen${where}. Ein zweiter Upload erzeugt dort ein zweites, identisches Video. Nur hochladen, wenn das wirklich gewollt ist – zum Beispiel, weil du das erste auf YouTube gelöscht hast.`,
+  });
+}
+
 function UploadModal({ v, accounts, onClose, onDone }) {
   const yt = accounts.filter((a) => a.platform === 'youtube' && a.connected);
   const [accountId, setAccountId] = useState(yt[0] ? String(yt[0].id) : '');
   const [privacy, setPrivacy] = useState('private');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const account = yt.find((a) => String(a.id) === String(accountId));
+  const posted = (v.posts || []).find((p) => p.status === 'posted' && String(p.account_id) === String(accountId));
   const submit = async () => {
     setBusy(true); setError(null);
     try {
-      const res = await api.uploadVariant(v.id, { account_id: Number(accountId), privacy });
+      let force = false;
+      if (posted) {
+        if (!(await confirmSecondUpload(account, posted))) return;
+        force = true;
+      }
+      let res;
+      try {
+        res = await api.uploadVariant(v.id, { account_id: Number(accountId), privacy, ...(force ? { force: true } : {}) });
+      } catch (err) {
+        if (err.code !== 'already_posted' || force) throw err;
+        if (!(await confirmSecondUpload(account, null))) return;  // posted meanwhile (another tab, a late upload)
+        res = await api.uploadVariant(v.id, { account_id: Number(accountId), privacy, force: true });
+      }
       toast.success(`Upload gestartet (Job #${res.job_id}).`, { action: { href: `#/jobs?job=${res.job_id}`, label: 'Job ansehen' } });
       onDone(); onClose();
     } catch (err) { setError(err); } finally { setBusy(false); }
@@ -233,6 +257,7 @@ function UploadModal({ v, accounts, onClose, onDone }) {
     <div class="stack-sm"><span class="field-label">Titel</span><p class="text-2">${v.title}</p></div>
     <${SelectField} label="YouTube-Konto" value=${accountId} onChange=${setAccountId}
       options=${yt.map((a) => ({ value: a.id, label: `${a.label}${a.handle ? ` (${a.handle})` : ''}` }))} />
+    ${posted && html`<${Callout} tone="warning">Diese Variante ist auf diesem Kanal schon online. Hochladen fragt noch einmal nach.<//>`}
     <div class="field"><span class="field-label">Sichtbarkeit</span>
       <${Segmented} label="Sichtbarkeit" value=${privacy} onChange=${setPrivacy} options=${Object.entries(PRIVACY).map(([value, label]) => ({ value, label }))} />
       <p class="field-help">Tipp: erst „Privat“ hochladen, in YouTube Studio prüfen, dann veröffentlichen.</p></div>

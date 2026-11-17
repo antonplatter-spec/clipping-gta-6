@@ -219,6 +219,8 @@ class JobTests(TempData):
         self.assertEqual(sorted(store.release_stale_jobs(60, now=now + 7300)), sorted([low, late]))
         self.assertEqual(store.get_job(low)["status"], "queued")
         self.assertIsNone(store.get_job(low)["locked_by"])
+        self.assertEqual(store.get_job(low)["attempts"], 1)  # a dead worker counts as an attempt
+        self.assertEqual(store.get_job(first)["attempts"], 0)
         self.assertEqual(store.get_job(first)["status"], "running")
         self.assertIn("wieder eingereiht", store.job_events(low)[-1]["message"])
 

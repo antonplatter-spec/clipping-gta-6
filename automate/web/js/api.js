@@ -256,7 +256,10 @@ export const confirmTotp = (body) => request('POST', '/account/totp/confirm', { 
 /**
  * @typedef {Object} Alert
  * @property {number} id
- * @property {string} key        e.g. "live.not_recording", "disk.low", "key.anthropic_missing", "job.failed.12"
+ * @property {string} key        e.g. "live.not_recording", "disk.low", "key.anthropic_missing", "job.failed.12";
+ *   also "pick.footage.<pick id>" (a render found its footage taken: the pick is back in approval),
+ *   "prices.unknown.<model>" (usage of a model without a price row), "schedule.old" (the old `clipper schedule`
+ *   timers are installed), "service.restarted" (a background thread died and was restarted)
  * @property {"info"|"warning"|"error"} level
  * @property {string} message    German
  * @property {Object|null} details
@@ -307,7 +310,9 @@ export const confirmTotp = (body) => request('POST', '/account/totp/confirm', { 
 export const getOverview = () => request('GET', '/overview');
 
 /**
- * POST /api/automation — switch the scheduler (scans) and/or the live service.
+ * POST /api/automation — switch the scheduler (scans) and/or the live service. Switching `enabled` on after
+ * today's last scan time has passed starts that missed scan at once (not within 2 minutes of a server start or a
+ * wake from sleep). Switching `live_enabled` off stops every running recorder of this checkout.
  * @param {{enabled?: boolean, live_enabled?: boolean}} body
  * @returns {Promise<Overview["automation"]>}  ADDITION: the updated automation block
  */
@@ -466,7 +471,9 @@ export const scanNow = (body = {}) => request('POST', '/scan', { body });
  * @property {PickData} data
  * @property {CheckReport|null} check_report
  * @property {SimulateReport|null} simulate_report
- * @property {string|null} error          render error (status failed) or reject reason (status rejected)
+ * @property {string|null} error          render error (status failed), reject reason (status rejected), or for a
+ *   proposed pick why its render sent it back to approval (its footage was taken meanwhile; German, cleared when it
+ *   is approved or edited)
  * @property {number} created_at
  * @property {number|null} decided_at
  * @property {{id: number, title: string|null, channel: string|null, source_url: string|null, kind: JobKind,
@@ -502,7 +509,10 @@ export const getPick = (id) => request('GET', `/picks/${id}`);
 export const updatePick = (id, changes) => request('PATCH', `/picks/${id}`, { body: changes });
 
 /**
- * POST /api/picks/{id}/approve — queues the render job. Pick with fails → 422; not proposed → 409.
+ * POST /api/picks/{id}/approve — queues the render job. Pick with hook/title fails → 422; not proposed → 409.
+ * Footage is checked again on the server (exported clips and the unrendered picks ahead of this one): taken → 422
+ * `check_failed` with `check_report` (its `footage` entry, also stored on the pick); free → a stale footage entry
+ * is removed. The check can't run → 409 `check_error`.
  * @returns {Promise<{pick: Pick, job_id: number}>}
  */
 export const approvePick = (id) => request('POST', `/picks/${id}/approve`);
@@ -616,9 +626,13 @@ export const deletePost = (id) => request('DELETE', `/posts/${id}`);
 
 /**
  * POST /api/variants/{id}/upload — YouTube upload as a job (creates a Post with status "uploading").
- * Account not connected → 409 `not_connected`.
+ * Account not connected → 409 `not_connected`; the variant is uploading to that account right now → 409
+ * `already_uploading`; it is already posted to that account → 409 `already_posted` unless `force: true` (send it
+ * only after the owner confirmed a second, identical video on that channel). A new upload first asks the resumable
+ * session of an earlier failed/canceled upload of the same variant, account and privacy, so a video that reached
+ * YouTube anyway is recorded instead of uploaded again.
  * @param {number} variantId
- * @param {{account_id: number, privacy: "private"|"unlisted"|"public"}} body
+ * @param {{account_id: number, privacy: "private"|"unlisted"|"public", force?: boolean}} body
  * @returns {Promise<{job_id: number}>}
  */
 export const uploadVariant = (variantId, body) => request('POST', `/variants/${variantId}/upload`, { body });
@@ -647,7 +661,10 @@ export const dubVideo = (videoId, body) => request('POST', `/videos/${videoId}/d
 /** GET /api/profiles @returns {Promise<{items: Profile[], total: number}>} */
 export const listProfiles = () => request('GET', '/profiles');
 
-/** PATCH /api/profiles/{name} @param {string} name @param {{enabled: boolean}} body @returns {Promise<Profile>} */
+/**
+ * PATCH /api/profiles/{name} — switching a profile off also stops the recorders of its streams.
+ * @param {string} name @param {{enabled: boolean}} body @returns {Promise<Profile>}
+ */
 export const updateProfile = (name, body) => request('PATCH', `/profiles/${encodeURIComponent(name)}`, { body });
 
 /**
@@ -708,14 +725,15 @@ export const listStreams = (params) => request('GET', '/streams', { params });
 export const addStream = (body) => request('POST', '/streams', { body });
 
 /**
- * PATCH /api/streams/{id}
+ * PATCH /api/streams/{id} — pausing stops the stream's running recorder at once (it saves its partial chunk, which
+ * is not clipped: chunks of paused, deleted or switched-off streams never reach Claude).
  * @param {number} id
  * @param {{paused?: boolean, priority?: number, topic_only?: boolean}} body
  * @returns {Promise<Stream>}
  */
 export const updateStream = (id, body) => request('PATCH', `/streams/${id}`, { body });
 
-/** DELETE /api/streams/{id} @returns {Promise<Ok>} */
+/** DELETE /api/streams/{id} — also stops its running recorder (as pausing does). @returns {Promise<Ok>} */
 export const deleteStream = (id) => request('DELETE', `/streams/${id}`);
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -733,7 +751,8 @@ export const deleteStream = (id) => request('DELETE', `/streams/${id}`);
  * @property {string} group       page section: "automation" (Zeitplan & Automatik), "clips", "approval",
  *   "claude", or any other id (shown under "Weitere"). Suggested mapping of spec §3.2:
  *   automation: automation.*, schedule.*, worker.concurrency · clips: prefs.*, render.*, dub.auto_languages ·
- *   approval: approval.mode · claude: claude.model/effort/max_turns/max_fix_rounds/daily_limit_eur/usd_to_eur/prices
+ *   approval: approval.mode · claude: claude.model/effort/max_turns/max_fix_rounds/daily_limit_eur/
+ *   selection_limit_eur/usd_to_eur/prices
  * @property {Array<{value: any, label: string, help?: string}>} [choices]  for "choice" (and suggestions)
  * @property {number} [min]
  * @property {number} [max]
@@ -853,7 +872,12 @@ export const updateMusic = (id, body) => request('PATCH', `/assets/music/${encod
  * @typedef {Object} CostsReport
  * @property {{eur: number, usd: number, requests: number, input_tokens: number, output_tokens: number,
  *   cache_read_tokens: number, cache_creation_tokens: number}} today
- * @property {number} limit_eur   claude.daily_limit_eur (0 = no limit)
+ * @property {number} limit_eur   claude.daily_limit_eur (0 = no limit): a start gate for new selections, not a
+ *   mid-flight kill (a started selection finishes under its own cap)
+ * @property {number} selection_limit_eur  claude.selection_limit_eur: the cap of one selection (all its requests,
+ *   across restarts); also how far one running selection can take the day past the limit
+ * @property {number} reserved_eur  what the selections running right now may still spend (they reserve it: a new
+ *   one starts only while today + reserved stays below the limit)
  * @property {number} usd_to_eur  claude.usd_to_eur
  * @property {Array<{day: string, eur: number, usd: number, requests: number, tokens: number}>} days
  *   one entry per local day of the window, oldest first, days without requests included with zeros
@@ -987,6 +1011,10 @@ export const disconnectAccount = (id) => request('POST', `/social/accounts/${id}
  * @property {{path: string, free_gb: number, total_gb: number, min_free_gb: number}} disk
  * @property {ToolCheck[]} tools
  * @property {string|null} setup_report    plain text of `clipper setup`
+ * @property {"parakeet"|"whisper"|null} [asr]  the transcription backend of the default profile
+ * @property {{name: string, quantization: string|null, cached: boolean|null}|null} [asr_model]
+ *   Parakeet only: whether its speech model is already downloaded (found in the Hugging Face cache without network);
+ *   false = the first analysis downloads it (~650 MB); null = can't be told
  */
 
 /** GET /api/system @returns {Promise<SystemReport>} */

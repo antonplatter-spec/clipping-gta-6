@@ -738,6 +738,353 @@ class DubAndUploadTests(Helpers):
         self.assertEqual(self.job(uid2)["params"]["upload_session"], self.yt.sessions[-1])
 
 
+class MoneyTests(Helpers):
+    """Claude is never paid twice for the same work without the owner knowing (reliability findings #4, #5, #9)."""
+
+    def interrupted(self, stop):
+        def select(job_id, max_picks, cancel):
+            stop.set()  # the server is stopped while Claude works
+            cancel.wait(5)
+            raise self.agent.AgentCanceled()
+        return select
+
+    def test_an_unexpected_error_from_a_claude_call_fails_at_once_instead_of_paying_again(self):
+        from automate import agent_tools as T
+        self.agent.script = [T.ToolError("check failed: Zeitüberschreitung")] * 3  # was retried as "Interner Fehler"
+        with self.assertLogs("automate.pipeline", "ERROR"):
+            jid = self.gated()
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["attempts"], len(self.agent.calls)), ("failed", 1, 1))
+        self.assertIn("Interner Fehler bei der Anfrage an Claude", job["error"])
+
+    def test_an_interrupted_selection_counts_as_an_attempt_and_continues_with_the_same_inputs(self):
+        store.set_settings({"prefs.max_videos_per_run": 3})
+        stop = threading.Event()
+        jid = pipeline.enqueue_url(URL, "gta6")
+        for i in range(2):
+            self.agent.script.append(self.interrupted(stop))
+            stop.clear()
+            worker.process_next(f"w{i}", stop=stop)
+            job = self.job(jid)
+            self.assertEqual((job["status"], job["stage"], job["attempts"]), ("queued", "select", i + 1))
+            self.assertIn(f"Versuch {i + 2} von 3", job["progress"])
+            store.set_settings({"prefs.max_videos_per_run": 1})  # would change max_picks, and so the first message
+        self.assertEqual([c["max_picks"] for c in self.agent.calls], [2, 2])  # pinned: the checkpoint still fits
+        self.agent.script.append(self.interrupted(stop))
+        stop.clear()
+        worker.process_next("w3", stop=stop)
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["attempts"]), ("failed", 3))
+        self.assertIn("3-mal mitten in der Arbeit unterbrochen", job["error"])
+        self.assertIsNotNone(store.get_alert(f"job.failed.{jid}"))
+        pipeline.retry_job(jid)  # the owner's retry continues the same selection
+        self.drive()
+        self.assertEqual(self.agent.calls[-1]["max_picks"], 2)
+        job = self.job(jid)
+        self.assertEqual(job["status"], "waiting_approval")
+        self.assertNotIn("select", job["params"])
+
+    def test_a_dead_worker_counts_as_an_attempt_and_the_third_one_fails_the_job(self):
+        jid = pipeline.enqueue_url(URL, "gta6")
+        for i in range(3):
+            self.assertEqual(store.claim_next_job(f"dead-{i}")["id"], jid)  # claimed, then the server dies hard
+            self.assertEqual(pipeline.release_stale(0), [jid])
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["attempts"]), ("failed", 3))
+        self.assertIn("3-mal mitten in der Arbeit unterbrochen", job["error"])
+        self.assertIsNotNone(store.get_alert(f"job.failed.{jid}"))
+        # a render that keeps killing the server: its pick fails and the parent finishes
+        jid2 = self.gated("https://youtu.be/BBBBBBBBBBB")
+        a, b = self.picks(jid2)
+        rid = pipeline.approve_pick(a["id"])
+        pipeline.reject_pick(b["id"])
+        for i in range(3):
+            store.claim_next_job(f"dead-r{i}", ["render"])
+            pipeline.release_stale(0)
+        self.assertEqual(self.job(rid)["status"], "failed")
+        self.assertEqual(store.get_pick(a["id"])["status"], "failed")
+        self.assertEqual(self.job(jid2)["status"], "done")
+
+    def test_the_daily_limit_parks_a_new_selection_but_not_one_that_already_started(self):
+        stop = threading.Event()
+        started = pipeline.enqueue_url(URL, "gta6")
+        self.agent.script.append(self.interrupted(stop))
+        worker.process_next("w", stop=stop)  # its selection started, then the server stopped
+        fresh = pipeline.enqueue_url("https://youtu.be/BBBBBBBBBBB", "gta6")
+        with mock.patch.object(costs, "budget_ok", return_value=False):
+            self.drive()
+            self.assertEqual(self.job(fresh)["status"], "waiting_budget")
+            self.assertEqual(self.job(started)["status"], "waiting_approval")  # finished under its own cap
+        self.assertEqual({c["job_id"] for c in self.agent.calls}, {started})
+
+    def test_a_selection_paused_by_a_restart_keeps_its_room_in_the_daily_limit(self):
+        store.set_settings({"claude.daily_limit_eur": 3.0, "claude.selection_limit_eur": 2.0})
+        stop = threading.Event()
+        started = pipeline.enqueue_url(URL, "gta6")
+        self.agent.script.append(self.interrupted(stop))
+        worker.process_next("w", stop=stop)  # started, then the server stopped: no reservation in memory any more
+        store.add_usage(None, "select", "claude-sonnet-5-5", input_tokens=600_000)  # 1,10 € spent today
+        fresh = pipeline.enqueue_url("https://youtu.be/BBBBBBBBBBB", "gta6")
+        store.update_job(fresh, priority=1)  # the new one is claimed first
+        worker.process_next("w2")
+        self.assertEqual(self.job(fresh)["status"], "waiting_budget")  # 1,10 € + 2,00 € the paused one may spend
+        self.assertEqual(pipeline.held_by_paused_selections(), 2.0)
+        self.drive()
+        self.assertEqual(self.job(started)["status"], "waiting_approval")  # resumed without asking the limit
+        self.assertEqual(pipeline.held_by_paused_selections(), 0.0)
+        self.assertEqual(pipeline.resume_waiting(), [fresh])
+        self.drive()
+        self.assertEqual(self.job(fresh)["status"], "waiting_approval")
+
+    def test_what_running_selections_may_still_spend_holds_back_a_new_one(self):
+        costs.reserve("select-999", 5.0)  # a selection elsewhere may still spend the whole 5,00 € limit
+        self.addCleanup(costs.release, "select-999")
+        jid = self.gated()
+        job = self.job(jid)
+        self.assertEqual(job["status"], "waiting_budget")
+        self.assertIn("für laufende Auswahlen verplant", job["progress"])
+        self.assertIsNone(store.get_alert("budget.reached"))  # the limit itself isn't reached
+        self.assertEqual(pipeline.resume_waiting(), [])
+        costs.release("select-999")
+        self.assertEqual(pipeline.resume_waiting(), [jid])
+        self.drive()
+        self.assertEqual(self.job(jid)["status"], "waiting_approval")
+
+    def test_parallel_selections_of_one_run_share_max_videos_per_run(self):
+        store.set_settings({"prefs.max_videos_per_run": 3})
+        rid = store.start_run("scan", "gta6", "schedule")
+        a = store.create_job("source", "gta6", clipper_job="AAAAAAAAAAA", source_url=URL, run_id=rid,
+                             stage="select", params={"select": {"max_picks": 2, "avoid_openers": []}})
+        b = store.create_job("source", "gta6", clipper_job="BBBBBBBBBBB", source_url="https://youtu.be/BBBBBBBBBBB",
+                             run_id=rid)
+        # a's selection runs on another worker (worker.concurrency 2) and may still make 2 of the 3
+        self.assertEqual(pipeline.max_picks_for(self.job(b), 5), 1)
+        store.update_job(a, stage="gate", params={}, result={"selection": {"picks": [make_pick(1)]}})
+        self.assertEqual(pipeline.max_picks_for(self.job(b), 5), 2)
+
+
+class LiveStopTests(Helpers):
+    """Paused, deleted or switched-off streams: no more chunks for Claude (finding #3; the recorders: scheduler)."""
+
+    def test_chunks_of_paused_deleted_or_switched_off_streams_are_not_clipped(self):
+        cj = "live-xqc-twitch-20261117-100000"
+        write_live_chunk(cj)
+        sid = store.list_streams("gta6")[0]["id"]
+        store.update_stream(sid, paused=True)
+        dropped = []
+        self.assertEqual(pipeline.enqueue_live_chunks("gta6", [cj], dropped=dropped), [])
+        self.assertEqual(dropped, [cj])
+        self.assertEqual(self.clip.args_of("live done"), [["live", "done", "--", cj]])  # cleanup deletes it in 3 h
+        store.update_stream(sid, paused=False)
+        short = "live-xqc-twitch-20261117-103000"
+        write_live_chunk(short, duration=45)  # a stream that drops every minute makes a chunk per drop
+        self.assertEqual(pipeline.enqueue_live_chunks("gta6", [short]), [])
+        # a chunk queued before its stream was deleted: skipped at ③, Claude is never asked
+        queued = "live-xqc-twitch-20261117-110000"
+        write_live_chunk(queued)
+        [jid] = pipeline.enqueue_live_chunks("gta6", [queued])
+        store.delete_stream(sid)
+        self.drive(kinds=("live_chunk",))
+        job = self.job(jid)
+        self.assertEqual(job["status"], "skipped")
+        self.assertIn("pausiert, entfernt", job["error"])
+        self.assertEqual(self.agent.calls, [])
+        self.assertIn(["live", "done", "--", queued], self.clip.args_of("live done"))
+        # a switched-off profile, and a recording the dashboard doesn't know at all
+        off = "live-xqc-twitch-20261117-113000"
+        write_live_chunk(off)
+        store.update_profile("gta6", enabled=False)
+        self.assertEqual(pipeline.enqueue_live_chunks("gta6", [off]), [])
+        store.update_profile("gta6", enabled=True)
+        stranger = "live-someone-kick-20261117-113000"
+        write_live_chunk(stranger, stream=False)
+        jd = paths.jobs_dir() / stranger
+        (jd / "job.json").write_text(json.dumps({**json.loads((jd / "job.json").read_text()),
+                                                 "url": "https://kick.com/someone"}))
+        self.assertEqual(pipeline.enqueue_live_chunks("gta6", [stranger]), [])
+        self.assertFalse(pipeline.live_stream_active("gta6", stranger))
+        self.assertTrue(pipeline.live_stream_active("gta6", off))
+
+
+class FootageTests(Helpers):
+    """The same footage is never rendered twice, also while a pick is still waiting (finding #1)."""
+
+    def overlapping(self, jid):
+        a, b = self.picks(jid)
+        store.update_pick(b["id"], data={**b["data"], "start": a["data"]["start"] + 2, "end": a["data"]["end"]})
+        return a, store.get_pick(b["id"])
+
+    def test_a_moment_another_pending_pick_holds_goes_back_to_claude_at_the_gate(self):
+        a_cj, b_cj = "live-xqc-twitch-20261117-100000", "live-xqc-twitch-20261117-103000"
+        write_live_chunk(a_cj)
+        write_live_chunk(b_cj)
+        [ja] = pipeline.enqueue_live_chunks("gta6", [a_cj])
+        self.drive(kinds=("live_chunk",))
+        held = self.picks(ja)[0]["data"]  # chunk A's own pick waits for approval
+        edit = {k: v for k, v in make_pick(5).items() if k not in ("start", "end")}
+        edit["segments"] = [{"start": 0.0, "end": 8.0}, {"start": held["start"], "end": held["start"] + 10,
+                                                          "job": a_cj}]  # chunk B's multi-streamer edit
+        self.agent.script = [lambda job_id, n, cancel: self.agent.Selection([edit], ["w"], ["curiosity: x"])]
+        [jb] = pipeline.enqueue_live_chunks("gta6", [b_cj])
+        self.drive(kinds=("live_chunk",))
+        calls = [c for c in self.agent.calls if c["job_id"] == jb]
+        self.assertEqual(len(calls), 2)  # back to Claude once, with the reason
+        self.assertIn(a_cj, [r["job"] for r in calls[0]["reserved"]])  # Claude's own check knew it too
+        reason = calls[1]["params"]["check_feedback"]["video 1"]["footage"][0]
+        self.assertIn(f"Clip 1 von Job #{ja} (wartet auf Freigabe) nutzt schon 10 s", reason)
+        self.assertEqual(self.job(jb)["status"], "waiting_approval")
+        self.assertNotIn("segments", self.picks(jb)[0]["data"])
+
+    def test_of_two_overlapping_picks_only_one_can_be_approved_and_approval_checks_again(self):
+        jid = self.gated()
+        a, b = self.overlapping(jid)
+        with self.assertRaises(pipeline.PickCheckFailed) as e:
+            pipeline.approve_pick(b["id"])  # a is older: a goes first
+        self.assertIn(f"Clip 1 von Job #{jid}", str(e.exception))
+        self.assertIn("footage", store.get_pick(b["id"])["check_report"])  # shown in the approval queue
+        rid = pipeline.approve_pick(a["id"])  # b is newer and only proposed: it doesn't hold a back
+        with self.assertRaises(pipeline.PickCheckFailed):
+            pipeline.approve_pick(b["id"])
+        pipeline.cancel_job(rid)
+        pipeline.reject_pick(a["id"])
+        pipeline.approve_pick(b["id"])  # free now: the fresh check clears the stale footage entry
+        self.assertNotIn("footage", store.get_pick(b["id"])["check_report"])
+        with self.assertRaises(pipeline.PickCheckFailed):  # an edit onto footage a held would be refused too
+            c = self.gated("https://youtu.be/BBBBBBBBBBB")
+            first = self.picks(c)[0]
+            pipeline.approve_pick(first["id"])
+            pipeline.update_pick_data(self.picks(c)[1]["id"], {"start": first["data"]["start"],
+                                                               "end": first["data"]["start"] + 20})
+
+    def test_a_render_whose_footage_was_taken_meanwhile_sends_the_pick_back_to_approval(self):
+        jid = self.gated()
+        a, b = self.overlapping(jid)
+        with store.transaction():  # both approved before either was checked against the other (a race)
+            ra = pipeline._approve_in_tx(a["id"], self.job(jid))
+            pipeline._approve_in_tx(b["id"], self.job(jid))
+        store.update_job(ra, priority=99)  # b's render comes first: b wins, a must not render the same moment
+        self.drive(kinds=["render"])
+        self.assertEqual(store.get_pick(b["id"])["status"], "rendered")
+        pa = store.get_pick(a["id"])
+        self.assertEqual(pa["status"], "proposed")
+        self.assertIn("Nicht gerendert", pa["error"])
+        self.assertIn("already uses 18s of this footage", pa["error"])
+        self.assertIn("footage", pa["check_report"])
+        self.assertEqual(self.job(ra)["status"], "skipped")
+        self.assertEqual(len(self.clip.args_of("render")), 1)  # only b was rendered
+        self.assertIsNotNone(store.get_alert(f"pick.footage.{a['id']}"))
+        self.assertEqual(self.job(jid)["stage"], "approval")
+        with self.assertRaises(pipeline.PickCheckFailed):  # approving it again is refused while b's clip exists
+            pipeline.approve_pick(a["id"])
+        pipeline.reject_pick(a["id"])
+        self.assertIsNotNone(store.get_alert(f"pick.footage.{a['id']}")["resolved_at"])
+        self.assertEqual(self.job(jid)["status"], "done")
+
+
+class RepairTests(Helpers):
+    def test_a_crash_between_a_render_and_settling_its_parent_is_repaired(self):
+        store.set_settings({"approval.mode": "auto"})
+        cj = "live-xqc-twitch-20261117-100000"
+        write_live_chunk(cj)
+        [jid] = pipeline.enqueue_live_chunks("gta6", [cj])
+        self.agent.script = [1]
+        self.drive(kinds=("live_chunk",))
+
+        class PowerCut(BaseException):
+            pass
+        with mock.patch.object(pipeline, "settle_parent", side_effect=PowerCut()), self.assertRaises(PowerCut):
+            self.drive(kinds=("render",))  # the render is committed, then the process dies
+        pipeline.release_stale(0)
+        self.drive()
+        self.assertEqual(self.job(jid)["status"], "waiting_approval")  # nothing else would ever settle it
+        self.assertEqual(pipeline.reconcile(), [jid])
+        self.drive()
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["result"].get("live_done")), ("done", True))
+        self.assertEqual(pipeline.reconcile(), [])
+
+    def test_a_broken_render_is_discarded_and_rendered_again(self):
+        jid = self.gated()
+        pick = self.picks(jid)[0]
+        self.clip.bad_videos = [[pick["data"]["hooks"][0].replace("*", "").replace("?", "") + ".mp4"]]
+        rid = pipeline.approve_pick(pick["id"])
+        self.drive()
+        job = self.job(rid)
+        self.assertEqual((job["status"], job["attempts"]), ("queued", 1))
+        self.assertIn("fehlerhaft", job["error"])
+        self.assertIn("kein Ton", job["error"])
+        self.assertEqual(list((paths.exports_dir() / "gta6" / date.today().isoformat()).glob("video *")), [])
+        self.assertEqual(store.list_videos(pick_id=pick["id"])[1], 0)
+        self.drive(now=time.time() + 120)
+        self.assertEqual(self.job(rid)["status"], "done")
+        self.assertEqual(store.list_videos(pick_id=pick["id"])[1], 1)
+
+    def test_downloads_wait_while_the_disk_is_below_min_free_gb(self):
+        jid = pipeline.enqueue_url(URL, "gta6")
+        with mock.patch.object(pipeline, "disk_low", return_value=(12.3, 30.0)):
+            self.drive()
+            worker.process_next("w", now=time.time() + 1000)  # a quarter of an hour later: still too full
+        job = self.job(jid)
+        self.assertEqual((job["status"], job["attempts"]), ("queued", 0))
+        self.assertIn("nur 12,3 GB frei", job["progress"])
+        self.assertEqual(self.clip.args_of("fetch"), [])
+        self.assertEqual(sum("der Download wartet" in e["message"] for e in store.job_events(jid)), 1)
+        self.drive(now=time.time() + 1000)
+        self.assertEqual(self.job(jid)["status"], "waiting_approval")
+
+
+class UploadTests(Helpers):
+    """A finished upload is never forgotten, and a variant is not posted twice to one channel by accident (#2)."""
+
+    def setup_variant(self):
+        _, _, video = self.rendered_video()
+        acc = store.add_account("youtube", "Main", connected=True, credentials={"access_token": "x"})
+        return video["variants"][0]["id"], acc
+
+    def test_a_cancel_during_the_last_chunk_keeps_the_finished_upload(self):
+        var, acc = self.setup_variant()
+        up = pipeline.enqueue_upload(var, acc, "public")
+        real = self.yt.upload_variant
+
+        def upload(variant_id, account_id, privacy, *, on_session, **kw):
+            def started(uri):
+                on_session(uri)
+                pipeline.cancel_job(up)  # the owner clicks "Abbrechen" while the bytes go out ...
+            return real(variant_id, account_id, privacy, on_session=started, **kw)  # ... and YouTube takes them
+        self.yt.upload_variant = upload
+        self.drive(kinds=("upload",))
+        post = store.list_posts(var)[0]
+        self.assertEqual((post["status"], post["external_id"], post["error"]), ("posted", "yt123", None))
+        self.assertEqual(self.job(up)["status"], "done")
+        self.assertTrue(any("Abbruch kam zu spät" in e["message"] for e in store.job_events(up)))
+
+    def test_a_posted_variant_goes_to_the_same_channel_again_only_when_forced(self):
+        var, acc = self.setup_variant()
+        pipeline.enqueue_upload(var, acc, "public")
+        self.drive(kinds=("upload",))
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.enqueue_upload(var, acc, "public")
+        self.assertEqual((e.exception.code, e.exception.status), ("already_posted", 409))
+        self.assertIn("schon auf „Main“ hochgeladen (https://youtu.be/yt123)", e.exception.message)
+        other = store.add_account("youtube", "Zweitkanal", connected=True, credentials={"access_token": "y"})
+        pipeline.enqueue_upload(var, other, "public")  # another channel: fine
+        pipeline.enqueue_upload(var, acc, "public", force=True)  # the owner confirmed a second copy
+        self.drive(kinds=("upload",))
+        self.assertEqual([p["status"] for p in store.list_posts(var)], ["posted"] * 3)
+
+    def test_a_new_upload_asks_the_session_of_an_earlier_failed_one_first(self):
+        var, acc = self.setup_variant()
+        self.yt.script = [self.yt.YouTubeError("Verbindung verloren", retryable=False)]
+        up = pipeline.enqueue_upload(var, acc, "private")
+        self.drive(kinds=("upload",))
+        self.assertEqual(self.job(up)["status"], "failed")
+        up2 = pipeline.enqueue_upload(var, acc, "private")  # maybe the first one reached YouTube after all
+        self.assertEqual(self.job(up2)["params"]["upload_session"], "https://upload.example/session-1")
+        self.drive(kinds=("upload",))
+        self.assertEqual(self.yt.sessions[-1], "https://upload.example/session-1")
+        self.assertEqual(store.list_posts(var)[-1]["status"], "posted")
+
+
 class ConcurrencyTests(Helpers):
     def test_two_workers_never_render_at_the_same_time_and_number_videos_uniquely(self):
         store.set_settings({"approval.mode": "auto", "prefs.videos_per_run": 4})

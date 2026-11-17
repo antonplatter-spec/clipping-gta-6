@@ -19,9 +19,25 @@ write costs 2x input). "Today" is the local day of this PC (`local_day()`), the 
     budget_left_eur() -> float | None                None = no limit (claude.daily_limit_eur == 0)
     budget_ok() -> bool                              False once today's spend reached the limit
     eur_text(eur) -> "0,27 €"                        German money for messages shown in the dashboard
+
+The daily limit is a start gate, not a mid-flight kill: a paid task (a selection, a dub translation) starts only
+while `can_start()`, and a started selection may finish under its own cap (claude.selection_limit_eur, enforced by
+agent.py). So nothing already paid for is thrown away at the limit, and the day's spend stays below about
+"limit + one selection's cap": a running selection reserves what it may still spend, a started one that isn't
+running right now (a restart, a retry) holds its whole cap (pipeline.held_by_paused_selections, passed as `extra`),
+and a new one starts only while today's spend plus all of that stays below the limit. Not reserved: a running dub
+translation (at most two small requests) and the last request of a selection beyond its estimate (the cap check
+uses the previous request's cost).
+
+    reserve(key, eur) / release(key) / reservation(key, eur)   (context manager)   in-process, thread-safe
+    reserved_eur(exclude=None) -> float              what the running selections may still spend
+    can_start(exclude=None, extra=0.0) -> bool      budget_ok() and spent + reserved (other than `exclude`) + extra
+                                                     < limit
 """
 import logging
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 from . import settings
@@ -29,6 +45,8 @@ from . import settings
 log = logging.getLogger("automate.costs")
 FALLBACK_MODEL = "claude-sonnet-5-5"
 _warned = set()
+_reserved = {}
+_reserved_lock = threading.Lock()
 
 
 def local_day(ts=None):
@@ -121,6 +139,39 @@ def budget_left_eur():
 def budget_ok():
     left = budget_left_eur()
     return left is None or left > 0
+
+
+def reserve(key, eur):
+    with _reserved_lock:
+        _reserved[key] = max(0.0, float(eur))
+
+
+def release(key):
+    with _reserved_lock:
+        _reserved.pop(key, None)
+
+
+@contextmanager
+def reservation(key, eur):
+    reserve(key, eur)
+    try:
+        yield
+    finally:
+        release(key)
+
+
+def reserved_eur(exclude=None):
+    with _reserved_lock:
+        return round(sum(v for k, v in _reserved.items() if k != exclude), 6)
+
+
+def can_start(exclude=None, extra=0.0):
+    """Whether a new paid task may start now (see the module doc). `extra`: more that may still be spent without
+    asking (pipeline: selections that started but aren't running right now)."""
+    if not budget_ok():
+        return False
+    left = budget_left_eur()
+    return left is None or reserved_eur(exclude) + float(extra or 0) < left
 
 
 def eur_text(eur):

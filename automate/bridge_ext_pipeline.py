@@ -1,8 +1,10 @@
 """Bridge ops the orchestrator needs (registered into automate.bridge.OPS; run in the clipper subprocess env).
 
   system_tools  {} -> {is_mac, asr, which: {tool: bool}, versions: {tool: str | None}, modules_missing: [import
-                names], model_missing, report}   clipper.setup.missing() + setup.run(dry_run=True) (lists, installs
-                nothing; the lines about installing agent commands are left out)
+                names], model_missing, asr_model, report}   clipper.setup.missing() + setup.run(dry_run=True) (lists,
+                installs nothing; the lines about installing agent commands are left out). asr_model: {name,
+                quantization, cached}: whether onnx-asr finds the Parakeet model in its Hugging Face cache with its
+                own lookup, local files only (no network); cached None when that can't be told
   probe_video   {url} -> {ok, id, title, channel, duration, live_status, availability, error}   one `yt-dlp -J`
                 without download: duration for the daily_max_minutes section, a live stream or a private video
                 before anything is downloaded
@@ -14,6 +16,9 @@
                 most once per RESTART_COOLDOWN_S. `probe_error`: when no stream came back live, one more probe asks
                 why; a network / bot-check / proxy failure is returned here (clipper's probe reads every failure as
                 "offline", which would hide that the PC can't reach the platforms at all), else None.
+                `start: false` (the disk is below min_free_gb) watches and cleans up but starts no new recorder.
+  verify_videos {files} -> {videos: [{file, ok, problems: [German], width, height, duration, audio}]}   ffprobe of
+                rendered Shorts: 1080x1920, an audio stream, a duration of at least MIN_SHORT_S
 """
 import json
 import shutil
@@ -55,6 +60,25 @@ def _pkg_version(name):
         return None
 
 
+def _asr_model(cfg):
+    from clipper import transcribe
+    name = cfg.get("parakeet_model") or transcribe.PARAKEET
+    quant = cfg.get("parakeet_quantization", "int8")
+    out = {"name": name, "quantization": quant, "cached": None}
+    try:
+        from onnx_asr.loader import create_asr_resolver
+    except Exception:  # not installed (a row of its own says so)
+        return out
+    try:
+        create_asr_resolver(name, None, offline=True).resolve_model(quantization=quant)
+        out["cached"] = True
+    except FileNotFoundError:  # huggingface_hub's LocalEntryNotFoundError, onnx-asr's ModelFileNotFoundError
+        out["cached"] = False
+    except Exception:  # another onnx-asr version: unknown
+        pass
+    return out
+
+
 @bridge.op("system_tools")
 def system_tools(payload, cfg):
     from clipper import config, setup
@@ -68,7 +92,7 @@ def system_tools(payload, cfg):
     return {"is_mac": config.IS_MAC, "asr": cfg.get("asr", "parakeet"),
             "which": {t: bool(shutil.which(t)) for t in TOOLS}, "versions": versions,
             "missing_tools": tools, "modules_missing": mods, "demucs_missing": demucs, "model_missing": bool(model),
-            "report": report}
+            "asr_model": _asr_model(cfg) if cfg.get("asr", "parakeet") == "parakeet" else None, "report": report}
 
 
 @bridge.op("probe_video")
@@ -137,7 +161,11 @@ def live_tick(payload, cfg):
 
     live.status = status
     try:
-        started = live.watch(cfg, chunk)
+        if payload.get("start", True):
+            started = live.watch(cfg, chunk)
+        else:  # low disk: no new recorder (and no re-analysis), the rest as usual
+            started = []
+            status(cfg)
         cleaned = cleanup.run(cfg)
         issues = live.health(cfg) if payload.get("health", True) else {}
         now = time.time()
@@ -170,3 +198,44 @@ def live_tick(payload, cfg):
                          "title": s.get("title"), "priority": s.get("priority", 100),
                          "topic_only": live.topic_only(s)} for s in streams],
             "issues": issues, "stalled": stalled, "restarted": restarted, "recorders": live.alive_recorders()}
+
+
+SHORT_SIZE = (1080, 1920)
+MIN_SHORT_S = 1.0
+
+
+@bridge.op("verify_videos")
+def verify_videos(payload, cfg):
+    out = []
+    for f in payload.get("files") or []:
+        row = {"file": str(f), "ok": False, "problems": [], "width": None, "height": None, "duration": None,
+               "audio": False}
+        try:
+            res = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format",
+                                  "--", str(f)], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            row["problems"].append("ffprobe hing")
+            out.append(row)
+            continue
+        info = json.loads(res.stdout or "{}") if res.returncode == 0 else {}
+        streams = info.get("streams") or []
+        video = next((x for x in streams if x.get("codec_type") == "video"), None)
+        row["audio"] = any(x.get("codec_type") == "audio" for x in streams)
+        try:
+            row["duration"] = round(float((info.get("format") or {}).get("duration") or 0), 2)
+        except (TypeError, ValueError):
+            row["duration"] = 0.0
+        if res.returncode != 0 or video is None:
+            row["problems"].append("kein lesbares Video" + (f" ({res.stderr.strip().splitlines()[-1][:120]})"
+                                                             if res.stderr.strip() else ""))
+        else:
+            row["width"], row["height"] = video.get("width"), video.get("height")
+            if (row["width"], row["height"]) != SHORT_SIZE:
+                row["problems"].append(f"{row['width']}x{row['height']} statt 1080x1920")
+            if not row["audio"]:
+                row["problems"].append("kein Ton")
+            if row["duration"] < MIN_SHORT_S:
+                row["problems"].append(f"Länge {row['duration']} s")
+        row["ok"] = not row["problems"]
+        out.append(row)
+    return {"videos": out}

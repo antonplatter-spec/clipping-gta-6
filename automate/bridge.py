@@ -6,8 +6,11 @@ clipper.config.load_env() and config.load() first; the op gets the payload and t
 Anything an op prints (clipper's progress lines, a child process) goes to stderr: stdout carries only the result.
 
 Ops (payload -> result):
-  check             {picks, job?} -> {report, fails}      exactly `clipper check picks.json --job <job>`:
-                    hooks.check_picks + the reused-footage fails; `job` is a job id or path (omit: no transcript notes)
+  check             {picks, job?, reserved?} -> {report, fails}      exactly `clipper check picks.json --job <job>`:
+                    hooks.check_picks + the reused-footage fails; `job` is a job id or path (omit: no transcript notes).
+                    `reserved` [{pick, job, label}]: picks that aren't rendered yet (no upload.json to find them by);
+                    a pick sharing more than render.REUSE_TOLERANCE_S of footage with one of them (clipper's own
+                    footage()/footage_overlap()) gets a `footage` fail "<label> nutzt schon N s dieser Szenen …"
   rank              {picks, keep?} -> {picks, ranking}    keep: int | "auto" (default: library.hooks_per_video()).
                     Per pick, simulate.simulate's ranking and the hooks `clipper simulate` keeps (best first, at most
                     `keep`, one per hook type, check-clean: the same rule as simulate.report's keep line). Hooks are
@@ -63,6 +66,44 @@ def _picks(payload):
     return picks
 
 
+RESERVED_NOTE = "andere Momente wählen: dieselben Szenen bringen beim zweiten Post keine Reichweite"
+
+
+def _footage_of(pick, ref):
+    from clipper import config
+    from clipper import render
+    jd = config.job_dir(ref)
+    return render.footage(pick, jd, render.load_meta(jd))
+
+
+def _reserved_hits(picks, job_ref, reserved):
+    """{video n: [German lines]} for picks sharing footage with a reserved (not yet rendered) pick."""
+    from clipper import render
+    held = []
+    for r in reserved or []:
+        try:
+            held.append((str(r.get("label") or r["job"]), _footage_of(r["pick"], r["job"])))
+        except (KeyError, TypeError, ValueError, OSError, SystemExit):  # its job folder is gone: it holds nothing
+            continue
+    out = {}
+    for n, pick in enumerate(picks, 1):
+        ref = pick.get("job") or job_ref or ((pick.get("segments") or [{}])[0].get("job"))
+        if not held or not ref:
+            continue
+        try:
+            fp = _footage_of(pick, ref)
+        except (KeyError, TypeError, ValueError, OSError, SystemExit):
+            continue
+        hits = []
+        for label, other in held:
+            shared = render.footage_overlap(fp, other)
+            if shared > render.REUSE_TOLERANCE_S:
+                hits.append(f"{label} nutzt schon {shared:.0f} s dieser Szenen (noch nicht gerendert)")
+        if hits:
+            out[n] = hits
+    return out
+
+
 @op("check")
 def check(payload, cfg):
     from clipper import __main__ as cli
@@ -71,6 +112,9 @@ def check(payload, cfg):
     report = hooks.check_picks(picks, cfg, cli.job_words(job) if job else None, cli.job_words)
     for n, reused in cli.reused_footage(picks, job, cfg).items():
         report.setdefault(f"video {n}", {})["footage"] = reused
+    for n, hits in _reserved_hits(picks, job, payload.get("reserved")).items():
+        entry = report.setdefault(f"video {n}", {})
+        entry["footage"] = hits + (entry.get("footage") or [RESERVED_NOTE])
     return {"report": report, "fails": hooks.has_fails(report)}
 
 

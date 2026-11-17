@@ -365,6 +365,34 @@ class UploadTests(YoutubeCase):
         self.assertEqual(e.exception.code, "canceled")
         self.assertEqual(len(self.google.data), 1024)  # stopped after the first chunk
 
+    def test_a_cancel_after_the_last_byte_went_out_is_too_late(self):
+        var = self.variant(2600)
+        cancel = threading.Event()
+        orig = self.google.__call__
+
+        def google(method, url, **kw):
+            res = orig(method, url, **kw)
+            if method == "PUT" and kw["headers"].get("Content-Range", "").startswith("bytes 2048-"):
+                cancel.set()  # the owner clicks "Abbrechen" while the last chunk is on the wire: YouTube gets it,
+                raise ConnectionResetError("connection reset by peer")  # but its answer (the video id) is lost
+            return res
+        with mock.patch.object(youtube, "transport", google):
+            # every byte is out: instead of giving up (and forgetting a video that exists) the call asks the session
+            res = youtube.upload_variant(var, self.aid, "private", cancel=cancel)
+        self.assertEqual((res["video_id"], bytes(self.google.data)), ("VID123", self.payload))
+        self.assertEqual(self.google.sessions, 1)
+        # YouTube says bytes are missing after all: then the cancel still counts
+        cancel.clear()
+
+        def lost(method, url, **kw):
+            if method == "PUT" and kw["headers"].get("Content-Range", "").startswith("bytes 2048-"):
+                cancel.set()
+                raise ConnectionResetError("connection reset by peer")
+            return orig(method, url, **kw)
+        with mock.patch.object(youtube, "transport", lost), self.assertRaises(youtube.YouTubeError) as e:
+            youtube.upload_variant(var, self.aid, "private", cancel=cancel)
+        self.assertEqual(e.exception.code, "canceled")
+
     def test_quota_and_refused_inputs(self):
         var = self.variant(100)
         self.google.init_errors = [FakeGoogle.res(403, {"error": {"code": 403, "message": "quota", "errors": [

@@ -23,10 +23,12 @@ never returned by the API and never logged.
         Resumable upload in CHUNK pieces (Content-Range); a dropped connection or a 5xx asks the session how far
         it got and continues from there (backoff, MAX_RETRIES in a row), a lost session starts a new one, a 401
         refreshes the token. `on_progress(done_bytes, total_bytes)` after every confirmed chunk; `cancel` (a
-        threading.Event) is checked between chunks and while waiting. `on_session(uri)` gets every new session
-        before its first byte is sent; the caller keeps it, and a later attempt passes it as `session`: that
-        attempt asks it first, so an upload YouTube finished before the server died (or before its result was
-        saved) returns the existing video instead of uploading it twice.
+        threading.Event) is checked between chunks and while waiting, until the last chunk has gone out: from then
+        on the call waits for YouTube's answer (the video exists or is being created; canceling then would only
+        forget it). `on_session(uri)` gets every new session before its first byte is sent; the caller keeps it,
+        and a later attempt passes it as `session`: that attempt asks it first, so an upload YouTube finished
+        before the server died (or before its result was saved) returns the existing video instead of uploading
+        it twice.
 """
 import json
 import logging
@@ -444,9 +446,11 @@ def upload_variant(variant_id, account_id, privacy, *, title=None, description=N
 
     sessions = failures = 0
     offset, ask = 0, bool(session)  # an earlier attempt's session: first ask how far it got (maybe all the way)
+    sent_all = False  # once the last byte went out, a cancel is too late: only YouTube's answer is still missing
     with open(path, "rb") as f:
         while True:
-            _check_cancel(cancel)
+            if not sent_all:
+                _check_cancel(cancel)
             r = None
             try:
                 if session is None:
@@ -454,7 +458,9 @@ def upload_variant(variant_id, account_id, privacy, *, title=None, description=N
                     if sessions > MAX_SESSIONS:
                         raise YouTubeError("YouTube hat die Upload-Sitzung mehrfach verloren. Bitte später erneut "
                                            "versuchen.", retryable=True, code="youtube_session_lost")
-                    session, offset, ask = _start_session(account_id, resource, size), 0, False
+                    if sent_all:  # the session that got every byte is gone: never start a second video unasked
+                        _check_cancel(cancel)
+                    session, offset, ask, sent_all = _start_session(account_id, resource, size), 0, False, False
                     if on_session:
                         on_session(session)
                 if ask or offset >= size:  # after a failure, or all sent but unconfirmed: where did it stop?
@@ -462,6 +468,7 @@ def upload_variant(variant_id, account_id, privacy, *, title=None, description=N
                 else:
                     f.seek(offset)
                     data = f.read(min(CHUNK, size - offset))
+                    sent_all = sent_all or offset + len(data) >= size
                     r = _put(session, account_id, data, f"bytes {offset}-{offset + len(data) - 1}/{size}")
             except (OSError, _Transient) as e:
                 log.info("upload of variant %s: %s, resuming", variant_id, e.__class__.__name__)
@@ -477,7 +484,7 @@ def upload_variant(variant_id, account_id, privacy, *, title=None, description=N
                     if failures > MAX_RETRIES:
                         raise YouTubeError("YouTube nimmt die Daten nicht an. Bitte später erneut versuchen.",
                                            retryable=True, code="youtube_stalled")
-                offset, ask = new, False
+                offset, ask, sent_all = new, False, sent_all and new >= size
                 progress(offset)
                 continue
             if r is not None and r.status in (404, 410):  # the session expired (about a week) or is gone

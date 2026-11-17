@@ -3,7 +3,10 @@ versions, with German install hints per platform), the "Bereit zum Start" checkl
 service cached, and the health checks that raise and resolve dashboard alerts.
 
     system_report(refresh=False) -> {version, python, platform, paths, disk: {path, free_gb, total_gb, min_free_gb},
-                                     tools: [{name, ok, version, hint, required, purpose}], setup_report}
+                                     tools: [{name, ok, version, hint, required, purpose}], setup_report, asr,
+                                     asr_model: {name, quantization, cached: bool | None} | None}
+        asr_model (Parakeet only): whether the speech model is already in the Hugging Face cache; if not, the first
+        analysis downloads it (~650 MB)
         tools come from clipper.setup.missing()/run(dry_run) through the bridge op `system_tools` (cached 10 min)
     readiness() -> {anthropic_key, fish_key, youtube_connected, tools_ok, sources (number), automation}
     live_status() -> {streams: [{id, name, url, profile, platform, live, on_topic, recording, title, checked_at}],
@@ -15,8 +18,12 @@ service cached, and the health checks that raise and resolve dashboard alerts.
 
 Alert keys (stable; messages German and say what to do): disk.low, tools.missing, tools.voice, key.anthropic_missing,
 key.fish_missing, budget.reached, live.not_recording, live.stalled, live.analysis_failed, live.service,
-job.failed.<id> (raised by the pipeline, resolved here once the job was retried or canceled), scan.failed.<profile>
-(raised and resolved by the scan itself).
+schedule.old (the `clipper schedule` timers of the Claude Code workflow are still installed and would clip the same
+videos a second time), job.failed.<id> (raised by the pipeline, resolved here once the job was retried or canceled),
+scan.failed.<profile> (raised and resolved by the scan itself), pick.footage.<pick id> (the pipeline sent a pick back
+to approval because its footage is taken; resolved here once the pick is decided), prices.unknown.<model> (store:
+usage of a model without a price row; resolved here once the row exists), service.restarted (the scheduler's
+watchdog restarted a dead thread; resolved here a day later).
 """
 import copy
 import importlib.util
@@ -161,7 +168,8 @@ def system_report(refresh=False):
                "paths": {"root": str(paths.ROOT), "data": str(paths.data_dir()), "database": str(paths.db_path()),
                          "jobs": str(paths.jobs_dir()), "exports": str(paths.exports_dir()),
                          "logs": str(paths.logs_dir())},
-               "disk": _disk(), "tools": _tools(data), "setup_report": report, "asr": data.get("asr")}
+               "disk": _disk(), "tools": _tools(data), "setup_report": report, "asr": data.get("asr"),
+               "asr_model": data.get("asr_model")}
         _sys_cache.update(at=time.monotonic(), data=out)
         return copy.deepcopy(out)
 
@@ -234,6 +242,15 @@ def gb_text(value):
     return f"{float(value):.1f} GB".replace(".", ",").replace(",0 GB", " GB")
 
 
+def _old_schedules():
+    """The `clipper schedule` timers/agents (autostart.old_schedules), [] when they can't be looked up."""
+    try:
+        from . import autostart
+        return autostart.old_schedules()
+    except Exception:
+        return []
+
+
 def _names(items):
     return ", ".join(items[:8]) + (f" und {len(items) - 8} weitere" if len(items) > 8 else "")
 
@@ -303,8 +320,9 @@ def check_all(now=None):
         low = disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]
         put("disk.low", low, "error" if low and disk["free_gb"] < 5 else "warning",
             f"Nur noch {gb_text(disk['free_gb'] or 0)} frei auf der Festplatte (empfohlen mindestens "
-            f"{gb_text(disk['min_free_gb'])}). Alte Quellvideos löscht das Aufräumen automatisch; lösche sonst alte "
-            "Exporte unter exports/ oder senke min_free_gb in den Analyse-Einstellungen.", disk)
+            f"{gb_text(disk['min_free_gb'])}). Bis wieder Platz ist, starten keine neuen Downloads und keine neuen "
+            "Live-Aufnahmen. Alte Quellvideos löscht das Aufräumen automatisch; lösche sonst alte Exporte unter "
+            "exports/ oder senke min_free_gb in den Analyse-Einstellungen.", disk)
 
         rep = system_report(refresh=bool({"tools.missing", "tools.voice"} & before))  # an install shows at once
         missing = [t["name"] for t in rep["tools"] if t.get("required") and not t["ok"]]
@@ -328,14 +346,35 @@ def check_all(now=None):
 
         _live_checks(put, now)
 
+        old = _old_schedules()
+        put("schedule.old", bool(old), "warning",
+            "Die alten Zeitpläne von „clipper schedule“ (Claude-Code-Workflow) sind noch eingerichtet: sie clippen "
+            "dieselben Videos ein zweites Mal und nehmen Live-Streams doppelt auf. Entferne sie mit "
+            "„uv run python -m clipper schedule remove“ (ein geplanter /clip-daily in der Claude-App muss dort "
+            "gelöscht werden).", {"files": [str(f) for f in old]})
+
         for a in store.list_alerts():
-            if a["key"].startswith("job.failed."):
+            key = a["key"]
+            if key.startswith("job.failed."):
                 try:
-                    job = store.get_job(int(a["key"].rsplit(".", 1)[1]))
+                    job = store.get_job(int(key.rsplit(".", 1)[1]))
                 except ValueError:
                     job = None
                 if not job or job["status"] != "failed":
-                    store.resolve_alert(a["key"])
+                    store.resolve_alert(key)
+            elif key.startswith("pick.footage."):
+                try:
+                    pick = store.get_pick(int(key.rsplit(".", 1)[1]))
+                except ValueError:
+                    pick = None
+                if not pick or pick["status"] != "proposed":
+                    store.resolve_alert(key)
+            elif key.startswith("prices.unknown."):
+                from . import costs
+                if costs.price_row(key[len("prices.unknown."):])[1]:
+                    store.resolve_alert(key)
+            elif key == "service.restarted" and now - float((a.get("details") or {}).get("at") or 0) > 86400:
+                store.resolve_alert(key)
     except Exception as e:  # a broken check must not stop the others next time; it shows in the run
         problems.append(repr(e)[:300])
     active = store.list_alerts()

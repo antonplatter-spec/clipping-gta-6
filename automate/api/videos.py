@@ -123,6 +123,7 @@ def upload(variant_id: int, body: dict | None = Body(None)):
     form = Form(body)
     account_id = form.int("account_id", required=True)
     privacy = form.choice("privacy", PRIVACY, required=True, labels=("Privat", "Nicht gelistet", "Öffentlich"))
+    force = form.bool("force", default=False)
     form.check()
     account = store.get_account(account_id)
     if account is None:
@@ -132,7 +133,7 @@ def upload(variant_id: int, body: dict | None = Body(None)):
                                         f"verbinden.")
     pipeline = need("pipeline")
     with mapped():
-        job_id = pipeline.enqueue_upload(variant_id, account_id, privacy)
+        job_id = pipeline.enqueue_upload(variant_id, account_id, privacy, force=bool(force))
     return {"job_id": job_id}
 
 

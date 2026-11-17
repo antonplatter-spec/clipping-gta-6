@@ -18,7 +18,7 @@ from unittest import mock
 import anthropic
 import httpx2
 
-from automate import agent, agent_tools as T, db, prompts, runtime, store
+from automate import agent, agent_tools as T, costs, db, prompts, runtime, store
 
 FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 KEY = "sk-ant-api03-" + "x" * 40
@@ -558,13 +558,117 @@ class LoopTests(FakeTools):
         self.assertIn("Tageslimit", str(ctx.exception))
         self.assertEqual(self.client.calls, [])
 
-    def test_budget_stops_before_a_later_request(self):
-        store.set_settings({"claude.daily_limit_eur": 1.0})
-        expensive = msg([call("grep_transcript", {"around_s": 11}, "g")], usage=usage(inp=1_000_000))
-        with self.assertRaises(agent.BudgetExceeded):
-            self.run_select([expensive, msg([call("submit_picks", {"picks": [pick()]}, "s")])])
-        self.assertEqual(len(self.client.calls), 1)
-        self.assertEqual(store.recent_usage(1)[0]["input_tokens"], 1_000_000)
+    def test_the_daily_limit_gates_the_start_but_never_kills_a_running_selection(self):
+        # (replaces a test of the old behaviour: the limit was checked before every request, so a selection that
+        # crossed it was killed mid-way and its paid turns thrown away)
+        store.set_settings({"claude.daily_limit_eur": 1.0, "claude.selection_limit_eur": 10.0})
+        expensive = msg([call("grep_transcript", {"around_s": 11}, "g")], usage=usage(inp=1_000_000))  # 1,84 €
+        sel, client = self.run_select([expensive, msg([call("submit_picks", {"picks": [pick()]}, "s")])])
+        self.assertEqual((len(sel.picks), len(client.calls)), (1, 2))  # finished past the limit, under its cap
+        self.assertGreater(costs.spent_today_eur(), 1.0)
+        make_job(self.root / "jobs", "agent-fixture-2")
+        self.job_id = store.create_job("source", "gta6", clipper_job="agent-fixture-2")
+        with self.assertRaises(agent.BudgetExceeded):  # a new selection waits for tomorrow
+            self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s")])])
+        self.assertEqual(self.client.calls, [])
+
+    def test_the_selection_cap_warns_claude_then_stops_before_the_request_that_would_cross_it(self):
+        store.set_settings({"claude.selection_limit_eur": 0.5})
+        step = lambda i: msg([call("grep_transcript", {"around_s": 11}, f"g{i}")], usage=usage(inp=100_000))  # noqa
+        with self.assertRaises(agent.AgentError) as ctx:  # 0,184 € a request: two fit under 0,50 €, a third not
+            self.run_select([step(i) for i in range(5)])
+        self.assertIsInstance(ctx.exception, agent.SelectionCapReached)
+        self.assertEqual((ctx.exception.code, ctx.exception.retryable), ("selection_cap", False))
+        self.assertIn("Kostenlimit", str(ctx.exception))
+        self.assertEqual(len(self.client.calls), 2)
+        notes = [b["text"] for b in self.client.calls[1]["messages"][-1]["content"] if b.get("type") == "text"]
+        self.assertTrue(any("spending limit for this selection is almost used up" in n for n in notes), notes)
+        self.assertLessEqual(sum(r["cost_eur"] for r in store.recent_usage(10)), 0.5)
+        checkpoint = self.root / "data" / "tmp" / "agent" / f"job-{self.job_id}" / "select.resume.json"
+        self.assertFalse(checkpoint.exists())  # a manual retry starts a new selection with a new cap
+        self.assertEqual(costs.reserved_eur(), 0)
+
+    def test_the_cap_counts_what_the_selection_paid_before_a_restart(self):
+        store.set_settings({"claude.selection_limit_eur": 0.5})
+        step = lambda i: msg([call("grep_transcript", {"around_s": 11}, f"g{i}")], usage=usage(inp=100_000))  # noqa
+        with self.assertRaises(agent.AgentError) as ctx:  # one paid turn, then a 429: the job retries later
+            self.run_select([step(0), http_error(anthropic.RateLimitError, 429)])
+        self.assertTrue(ctx.exception.retryable)
+        with self.assertRaises(agent.SelectionCapReached):
+            self.run_select([step(1), step(2), step(3)])
+        self.assertEqual(len(self.client.calls), 1)  # 0,184 € carried over + one more; a third would cross 0,50 €
+
+    def test_a_running_selection_reserves_its_cap_against_the_daily_limit(self):
+        store.set_settings({"claude.daily_limit_eur": 2.5, "claude.selection_limit_eur": 2.0})
+        store.add_usage(None, "select", "claude-sonnet-5-5", input_tokens=326_087)  # 0,60 € spent today
+        seen = {}
+
+        def during(params):
+            seen.update(reserved=costs.reserved_eur(), can_start=costs.can_start(),
+                        own=costs.can_start(exclude=f"select-{self.job_id}"), message=agent._budget_message())
+            return msg([call("submit_picks", {"picks": [pick()]}, "s")], usage=usage(inp=10))
+        self.assertTrue(costs.can_start())
+        self.run_select([during])
+        self.assertAlmostEqual(seen["reserved"], 2.0, places=3)
+        self.assertFalse(seen["can_start"])  # 0,60 € + 2,00 € may still be spent: nothing new starts (limit 2,50 €)
+        self.assertTrue(seen["own"])
+        self.assertIn("für laufende Auswahlen verplant", seen["message"])
+        self.assertEqual(costs.reserved_eur(), 0)
+        self.assertTrue(costs.can_start())
+
+    def test_a_check_that_cannot_run_is_not_a_paid_retry_of_the_whole_selection(self):
+        def broken_check(op, payload, profile, **kw):
+            if op == "check":
+                raise runtime.BridgeError("check: Zeitüberschreitung nach 300 s", timed_out=True)
+            return self.fake_bridge(op, payload, profile, **kw)
+        script = [msg([call("submit_picks", {"picks": [pick()]}, "s1")]),
+                  msg([call("submit_picks", {"picks": [pick()]}, "s2")])]
+        with mock.patch.object(runtime, "run_bridge", side_effect=broken_check), \
+                self.assertRaises(agent.AgentError) as ctx:
+            self.run_select(script)
+        # the first failure goes back to Claude (not the picks' fault), the second ends this run as retryable
+        result = self.client.calls[1]["messages"][-1]["content"][0]
+        self.assertTrue(result["is_error"])
+        self.assertIn("couldn't run", result["content"])
+        self.assertEqual((ctx.exception.code, ctx.exception.retryable), ("check_unavailable", True))
+        checkpoint = self.root / "data" / "tmp" / "agent" / f"job-{self.job_id}" / "select.resume.json"
+        self.assertTrue(checkpoint.exists())  # the retry continues the conversation instead of starting over
+        sel, client = self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s3")])])
+        self.assertEqual((len(sel.picks), len(client.calls)), (1, 1))
+
+    def test_anything_unexpected_is_a_final_agent_error_that_keeps_the_paid_turns(self):
+        first = msg([call("grep_transcript", {"around_s": 11}, "g1")])
+        with mock.patch.object(T, "submit", side_effect=KeyError("boom")), \
+                self.assertLogs("automate.agent", "ERROR"), self.assertRaises(agent.AgentError) as ctx:
+            self.run_select([first, msg([call("submit_picks", {"picks": [pick()]}, "s")])])
+        self.assertEqual((ctx.exception.code, ctx.exception.retryable), ("internal", False))
+        self.assertIn("Interner Fehler", str(ctx.exception))
+        sel, client = self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s")])])
+        self.assertEqual(len(client.calls[0]["messages"]), 3)  # resumed after the paid grep turn
+        with mock.patch.object(T.JobContext, "load", side_effect=RuntimeError("disk")), \
+                self.assertLogs("automate.agent", "ERROR"), self.assertRaises(agent.AgentError) as ctx:
+            self.run_select([])
+        self.assertEqual(ctx.exception.code, "internal")
+
+    def test_footage_other_pending_picks_hold_reaches_claudes_own_checks_but_not_the_request(self):
+        held = [{"pick": {"start": 10.0, "end": 31.0}, "job": "other-job", "label": "Clip 1 von Job #3 (freigegeben)"}]
+        self.run_select([msg([call("check", {"picks": [pick()]}, "c")]),
+                         msg([call("submit_picks", {"picks": [pick()]}, "s")])], reserved=held)
+        checks = [p for op, p in self.bridge_calls if op == "check"]
+        self.assertEqual([p["reserved"] for p in checks], [held, held])  # the check tool and submit_picks
+        self.assertNotIn("Clip 1 von Job #3", json.dumps(agent._jsonable(self.client.calls[0]["messages"])))
+
+    def test_no_credit_and_a_changed_prompt(self):
+        first = msg([call("grep_transcript", {"around_s": 11}, "g1")])
+        with self.assertRaises(agent.AgentError) as ctx:  # the account ran dry mid-selection: the job waits
+            self.run_select([first, http_error(anthropic.BadRequestError, 400, "Your credit balance is too low")])
+        self.assertEqual(ctx.exception.code, "billing")
+        checkpoint = self.root / "data" / "tmp" / "agent" / f"job-{self.job_id}" / "select.resume.json"
+        self.assertTrue(checkpoint.exists())
+        # a changed system prompt would make Anthropic reject the replayed thinking blocks: start over instead
+        store.set_settings({"claude.extra_instructions": "Bevorzuge Comedy-Clips."})
+        _, client = self.run_select([msg([call("submit_picks", {"picks": [pick()]}, "s")])])
+        self.assertEqual(len(client.calls[0]["messages"]), 1)
 
     def test_no_clip_reason_is_a_valid_result(self):
         sel, _ = self.run_select([msg([call("submit_picks", {"picks": []}, "s1")]),

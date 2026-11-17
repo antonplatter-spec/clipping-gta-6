@@ -25,6 +25,7 @@ export function SystemPage() {
             <div class="uri-box" style="margin-top:8px"><code>${INSTALL_ALL}</code><${CopyButton} text=${INSTALL_ALL} iconOnly label="Befehl kopieren" /></div>
             Danach den Server neu starten und hier „Erneut prüfen“.<//>`}
           <${ToolList} tools=${d.tools} />
+          <${AsrModel} model=${d.asr_model} />
           ${d.setup_report && html`<details class="details" style="margin-top:8px"><summary><${Icon} name="chevron-right" size=${16} />Ausgabe von „clipper setup“</summary>
             <div class="details-body"><pre class="playbook" style="max-height:300px">${d.setup_report}</pre></div></details>`}
         <//>
@@ -43,6 +44,15 @@ export function SystemPage() {
   </div>`;
 }
 
+function AsrModel({ model }) {
+  if (!model || model.cached == null) return null;
+  return html`<p class=${cx('issue small', model.cached ? '' : 'issue-note')} style="margin-top:8px">
+    <${Icon} name=${model.cached ? 'circle-check' : 'info'} size=${14} />
+    <span>${model.cached
+      ? html`Parakeet-Sprachmodell ist heruntergeladen (<span class="mono">${model.name}</span>).`
+      : html`Das Parakeet-Sprachmodell ist noch nicht heruntergeladen: die erste Analyse lädt es (rund 650 MB) von huggingface.co und dauert deshalb länger.`}</span></p>`;
+}
+
 function toolSummary(tools) {
   const missing = tools.filter((t) => !t.ok && t.required !== false).length;
   return missing ? `${missing} fehlen · ${tools.filter((t) => t.ok).length} installiert` : `Alle ${tools.filter((t) => t.ok).length} nötigen Werkzeuge installiert`;
@@ -56,7 +66,7 @@ function Disk({ disk }) {
     <div class="row-between"><span><b class="num">${fmt.gb(disk.free_gb)}</b> frei</span><span class="muted">von ${fmt.gb(disk.total_gb)}</span></div>
     <div class=${cx('disk-bar', low && 'is-low')} role="meter" aria-valuemin="0" aria-valuemax=${disk.total_gb} aria-valuenow=${used} aria-label="Belegter Speicher">
       <span style=${`width:${disk.total_gb ? (used / disk.total_gb) * 100 : 0}%`}></span></div>
-    ${low ? html`<p class="issue issue-fail"><${Icon} name="alert-circle" size=${14} />Unter ${fmt.gb(disk.min_free_gb)} frei: Alte Quellvideos löschen oder die Aufbewahrung verkürzen (Einstellungen → Analyse).</p>`
+    ${low ? html`<p class="issue issue-fail"><${Icon} name="alert-circle" size=${14} />Unter ${fmt.gb(disk.min_free_gb)} frei: Neue Downloads und Live-Aufnahmen warten. Alte Quellvideos löschen oder die Aufbewahrung verkürzen (Einstellungen → Analyse).</p>`
       : html`<p class="muted small">Alarm unter ${fmt.gb(disk.min_free_gb)} · <code style="overflow-wrap:anywhere">${disk.path}</code></p>`}
   </div>`;
 }

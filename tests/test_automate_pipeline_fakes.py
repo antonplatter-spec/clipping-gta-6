@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from automate import db, health, paths, runtime, store, worker
+from automate import db, health, paths, runtime, scheduler, store, worker
 from automate.runtime import ProcResult
 
 KEY = "sk-ant-test-0123456789abcdef"
@@ -31,11 +31,15 @@ def make_pick(n, start=10.0):
             "description": f"Kai in GTA 6 ({n})", "hashtags": ["#gta6", "#kaicenat"]}
 
 
-def write_live_chunk(cj, profile="gta6", source=True, analyzed=True):
+def write_live_chunk(cj, profile="gta6", source=True, analyzed=True, stream=True, duration=1800):
+    """A recorded, analyzed chunk of the xQc stream; `stream` also adds that stream to the profile (a chunk of a
+    stream the dashboard doesn't have, or has paused, is not clipped)."""
+    if stream and not any(s["url"] == "https://www.twitch.tv/xqc" for s in store.list_streams(profile)):
+        store.add_stream(profile, "xqc-twitch", "https://www.twitch.tv/xqc")
     jd = paths.jobs_dir() / cj
     (jd / "review").mkdir(parents=True, exist_ok=True)
     meta = {"id": cj, "url": "https://www.twitch.tv/xqc", "title": "GTA 6 RP day 1", "channel": "xQc",
-            "duration": 1800, "offset": 0.0, "live": True, "recorded_at": time.time() - 3600, "profile": profile}
+            "duration": duration, "offset": 0.0, "live": True, "recorded_at": time.time() - 3600, "profile": profile}
     (jd / "job.json").write_text(json.dumps(meta))
     (jd / "live_ready").write_text("x")
     if source:
@@ -69,6 +73,7 @@ class FakeClipper:
         self.render_sleep = 0.0
         self.render_active = self.render_max = 0
         self.seen_audio = None
+        self.bad_videos = []      # one list of broken file names (or None) per `verify_videos` call
 
     @staticmethod
     def after_dashes(args):
@@ -137,8 +142,9 @@ class FakeClipper:
         (jd / "candidates.md").write_text("# candidates\n")
         return ProcResult(0, "# Clip candidates\n", "", 0.1)
 
-    def _manifest(self, folder, pick, lang=None):
+    def _manifest(self, folder, pick, lang=None, job=None):
         entries = []
+        footage = [list(x) for x in self.spans(pick, job)] if job and "hooks" in pick and not lang else None
         for i, (h, t) in enumerate(zip(pick["hooks"], pick["titles"])):
             mp4 = folder / f"{h.replace('*', '').replace('?', '')}.mp4"
             mp4.write_bytes(b"mp4")
@@ -147,12 +153,12 @@ class FakeClipper:
                             "hashtags": pick.get("hashtags") or [], "duration": 20.0, "predicted": 1.3 - i / 10,
                             "source": "https://www.youtube.com/watch?v=x&t=10s",
                             "sources": ["https://www.youtube.com/watch?v=x&t=10s"],
-                            **({"lang": lang} if lang else {})})
+                            **({"lang": lang} if lang else {}), **({"footage": footage} if footage else {})})
         (folder / "upload.json").write_text(json.dumps(entries))
         return entries
 
     def _render(self, args, emit, profile):
-        self.after_dashes(args)
+        job = self.after_dashes(args)[0]
         pick = json.loads(Path(args[args.index("--picks") + 1]).read_text())[0]
         out = Path(args[args.index("--out") + 1])
         with self.lock:
@@ -168,7 +174,7 @@ class FakeClipper:
             emit(f"[render] video {n} (1 of 1): separating voices + diarizing ...")
             for h in pick["hooks"]:
                 emit(f"[render]   video {n}/{h}.mp4")
-            self._manifest(folder, pick)
+            self._manifest(folder, pick, job=job)
             return ProcResult(0, f"[render] video {n}\n" + json.dumps([{"video": n, "folder": str(folder)}],
                                                                        indent=2), "", 0.1)
         finally:
@@ -209,6 +215,16 @@ class FakeClipper:
         return ProcResult(0, json.dumps(self.watch, indent=2), "", 0.1)
 
     # ------------------------------------------------------------ bridge
+    @staticmethod
+    def spans(pick, job):
+        if pick.get("segments"):
+            return [(s.get("job") or job, float(s["start"]), float(s["end"])) for s in pick["segments"]]
+        return [(job, float(pick["start"]), float(pick["end"]))]
+
+    @staticmethod
+    def overlap(a, b):
+        return sum(max(0.0, min(e1, e2) - max(s1, s2)) for j1, s1, e1 in a for j2, s2, e2 in b if j1 == j2)
+
     def run_bridge(self, op, payload, profile, *, timeout=600, on_line=None, cancel=None):
         with self.lock:
             self.bridge_calls.append((op, payload))
@@ -216,7 +232,28 @@ class FakeClipper:
             fails = self.check_fails.pop(0) if self.check_fails else False
             report = {"video 1": {"hooks": {"Wait for it...": {"fails": ["vague hook"]}}}} if fails else \
                 {"video 1": {"playbook": ["a note"]}}
+            exported = []  # clipper's footage_reuse: upload.json of rendered clips (dubs don't count)
+            for f in sorted(paths.exports_dir().glob("**/upload.json")):
+                used = next((e.get("footage") for e in json.loads(f.read_text()) if e.get("footage")
+                             and not e.get("lang")), None)
+                if used:
+                    exported.append((f"{f.parent.parent.name}/{f.parent.name}", [tuple(x) for x in used]))
+            for n, pick in enumerate(payload["picks"], 1):  # what the real op adds for footage held by other picks
+                mine = self.spans(pick, payload.get("job"))
+                hits = [f"{where} already uses {shared:.0f}s of this footage" for where, used in exported
+                        if (shared := self.overlap(mine, used)) > 3]
+                hits += [f"{r['label']} nutzt schon {shared:.0f} s dieser Szenen (noch nicht gerendert)"
+                         for r in payload.get("reserved") or []
+                         if (shared := self.overlap(mine, self.spans(r["pick"], r["job"]))) > 3]
+                if hits:
+                    report.setdefault(f"video {n}", {})["footage"] = hits
+                    fails = True
             return {"report": report, "fails": fails}
+        if op == "verify_videos":
+            bad = (self.bad_videos.pop(0) if self.bad_videos else None) or []
+            return {"videos": [{"file": f, "ok": Path(f).name not in bad, "width": 1080, "height": 1920,
+                                "duration": 20.0, "audio": True, "problems": ["kein Ton"] if Path(f).name in bad
+                                else []} for f in payload["files"]]}
         if op == "rank":
             keep = payload.get("keep")
             out, ranking = [], []
@@ -286,10 +323,10 @@ def make_agent():
     mod.InvalidApiKey, mod.AgentCanceled = InvalidApiKey, AgentCanceled
     mod.calls, mod.script, mod.dub_calls = [], [], []
 
-    def select_picks(job_id, *, max_picks, avoid_openers=(), log=None, cancel=None):
+    def select_picks(job_id, *, max_picks, avoid_openers=(), reserved=(), log=None, cancel=None):
         job = store.get_job(job_id)
         mod.calls.append({"job_id": job_id, "max_picks": max_picks, "avoid_openers": list(avoid_openers),
-                          "params": dict(job.get("params") or {})})
+                          "params": dict(job.get("params") or {}), "reserved": list(reserved)})
         if log:
             for line in ("Claude liest das Transkript (um 11 s)", "Claude sieht sich ein Bild bei 12 s an",
                          "Claude prüft einen Entwurf", "Auswahl angenommen: 2 Pick(s) nach 4 Anfragen (0.05 €)"):
@@ -364,7 +401,10 @@ class PipelineCase(unittest.TestCase):
                         mock.patch.object(worker, "reap_orphans", lambda module, args: []),
                         mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt}),
                         mock.patch.object(health, "_live", None),
-                        mock.patch.dict(health._sys_cache, {"at": 0.0, "data": None})):
+                        mock.patch.dict(health._sys_cache, {"at": 0.0, "data": None}),
+                        mock.patch.dict(scheduler._hold, {"until": 0.0}),
+                        mock.patch.object(scheduler, "recorders", lambda: []),  # never this machine's processes
+                        mock.patch.object(health, "_old_schedules", lambda: [])):
             patcher.start()
             self.addCleanup(patcher.stop)
         from automate import pipeline

@@ -35,6 +35,9 @@ class SystemReportTests(PipelineCase):
         self.assertEqual(set(rep["disk"]), {"path", "free_gb", "total_gb", "min_free_gb"})
         self.assertEqual(rep["disk"]["min_free_gb"], 30.0)
         self.assertEqual(rep["setup_report"], "ok       ffmpeg")
+        self.assertIsNone(rep["asr_model"])
+        self.clip.system["asr_model"] = {"name": "nemo-parakeet-tdt-0.6b-v3", "quantization": "int8", "cached": False}
+        self.assertFalse(health.system_report(refresh=True)["asr_model"]["cached"])
         n = len(self.clip.bridge_calls)
         health.system_report()
         self.assertEqual(len(self.clip.bridge_calls), n)  # cached
@@ -118,6 +121,31 @@ class CheckAllTests(PipelineCase):
         store.set_secret("fish_api_key", "fishkey1234567")
         health.check_all()
         self.assertEqual(self.active(), {})
+
+    def test_the_old_clipper_schedule_timers_are_reported(self):
+        timer = Path("/home/x/.config/systemd/user/clipper-gta6-daily.timer")
+        with mock.patch.object(health, "_old_schedules", return_value=[timer]):
+            health.check_all()
+        alert = self.active()["schedule.old"]
+        self.assertIn("clipper schedule remove", alert["message"])
+        self.assertEqual(alert["details"]["files"], [str(timer)])
+        health.check_all()  # removed (PipelineCase: none installed)
+        self.assertNotIn("schedule.old", self.active())
+
+    def test_usage_of_a_model_without_a_price_is_reported_until_it_has_one(self):
+        store.add_usage(None, "select", "claude-future-9", input_tokens=1000)
+        alert = self.active()["prices.unknown.claude-future-9"]
+        self.assertIn("kein Preis hinterlegt", alert["message"])
+        self.assertIn("Einstellungen → Claude → Preise", alert["message"])
+        health.check_all()
+        self.assertIn("prices.unknown.claude-future-9", self.active())
+        prices = store.get_setting("claude.prices")
+        store.set_settings({"claude.prices": {**prices, "claude-future-9": {"input": 1, "output": 5,
+                                                                            "cache_read": 0.1, "cache_write": 1.25}}})
+        health.check_all()
+        self.assertNotIn("prices.unknown.claude-future-9", self.active())
+        store.add_usage(None, "select", "claude-sonnet-5-5", input_tokens=1000)  # a known model: no alert
+        self.assertEqual([k for k in self.active() if k.startswith("prices.")], [])
 
     def test_failed_job_alerts_are_resolved_once_the_job_moved_on(self):
         jid = store.create_job("source", "gta6", clipper_job="AAAAAAAAAAA", status="failed", error="x")

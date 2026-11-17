@@ -3,6 +3,7 @@
 import functools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,89 @@ class OpTests(unittest.TestCase):
         clean = [{**PICKS[1], "hooks": PICKS[1]["hooks"][:1], "titles": PICKS[1]["titles"][:1]}]
         self.assertIn("footage", bridge.check({"picks": clean, "job": str(self.job)}, self.cfg)["report"]["video 1"])
         self.assertNotIn("footage", bridge.check({"picks": clean}, self.cfg)["report"].get("video 1", {}))
+
+    def test_check_fails_footage_a_pick_holds_that_is_not_rendered_yet(self):
+        t0 = 1_800_000_000.0
+        jobs = self.root / "jobs"
+        for name in ("live-xqc-twitch-20261117-100000", "live-kai-twitch-20261117-100000"):
+            d = jobs / name
+            d.mkdir(parents=True)
+            streamer = name.split("-")[1]
+            (d / "job.json").write_text(json.dumps({"id": name, "url": f"https://www.twitch.tv/{streamer}",
+                                                    "title": "GTA 6", "channel": streamer, "duration": 1800,
+                                                    "offset": 0.0, "live": True, "recorded_at": t0}))
+            (d / "transcript.json").write_text(json.dumps({"words": [W("run", 100.0, 100.4)]}))
+        xqc, kai = jobs / "live-xqc-twitch-20261117-100000", jobs / "live-kai-twitch-20261117-100000"
+        base = {"clip_type": "reaction", "hashtags": ["#gta6"], "hooks": ["Why did xQc *crash*?"],
+                "titles": ["Why Did xQc Crash In GTA 6?"]}
+        own = {**base, "start": 100.0, "end": 118.0}  # chunk A's own pick, still waiting for approval
+        multi = {**base, "segments": [{"start": 100.0, "end": 110.0},  # chunk B's multi-streamer edit uses it
+                                      {"start": 100.0, "end": 112.0, "job": str(xqc)}]}
+        held = [{"pick": own, "job": str(xqc), "label": "Clip 1 von Job #7 (wartet auf Freigabe)"}]
+        out = bridge.check({"picks": [multi], "job": str(kai), "reserved": held}, self.cfg)
+        footage = out["report"]["video 1"]["footage"]
+        self.assertTrue(out["fails"])
+        self.assertEqual(footage[0], "Clip 1 von Job #7 (wartet auf Freigabe) nutzt schon 12 s dieser Szenen "
+                                     "(noch nicht gerendert)")
+        self.assertEqual(footage[-1], bridge.RESERVED_NOTE)
+        # what the gate saw before: nothing exported, so nothing
+        plain = bridge.check({"picks": [multi], "job": str(kai)}, self.cfg)["report"].get("video 1", {})
+        self.assertNotIn("footage", plain)
+        # another moment, and a held pick whose job folder is gone: free
+        later = {**base, "start": 200.0, "end": 215.0}
+        gone = [*held, {"pick": own, "job": str(jobs / "deleted-job"), "label": "x"}]
+        self.assertNotIn("footage", bridge.check({"picks": [later], "job": str(xqc), "reserved": gone},
+                                                 self.cfg)["report"].get("video 1", {}))
+        # rendered meanwhile: clipper's own exported-footage line comes first, the held one after it
+        done = render.EXPORTS / "gta6" / "2026-11-17" / "video 1"
+        done.mkdir(parents=True)
+        (done / "upload.json").write_text(json.dumps([{"footage": [{"source": "twitch:xqc", "from": t0 + 100,
+                                                                    "to": t0 + 118}]}]))
+        footage = bridge.check({"picks": [multi], "job": str(kai), "reserved": held},
+                               self.cfg)["report"]["video 1"]["footage"]
+        self.assertTrue(footage[0].startswith("Clip 1 von Job #7"))
+        self.assertIn("2026-11-17/video 1 already uses 12s of this footage", footage[1])
+
+    def test_the_system_report_says_whether_the_parakeet_model_is_downloaded(self):
+        cache = self.root / "hf"
+        repo = cache / "models--istupakov--parakeet-tdt-0.6b-v3-onnx"
+        code = "import json; from automate import bridge_ext_pipeline as e; print(json.dumps(e._asr_model({})))"
+
+        def cached():
+            env = {**os.environ, "HF_HUB_CACHE": str(cache), "HF_HUB_OFFLINE": "1"}
+            out = subprocess.run([sys.executable, "-c", code], cwd=paths.ROOT, env=env, capture_output=True,
+                                 text=True, timeout=120)
+            return json.loads(out.stdout)["cached"]
+        self.assertIs(cached(), False)  # the first analysis downloads it (~650 MB)
+        (repo / "refs").mkdir(parents=True)
+        (repo / "refs" / "main").write_text("abc123")
+        snap = repo / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        for f in ("config.json", "encoder-model.int8.onnx", "decoder_joint-model.int8.onnx"):
+            (snap / f).write_text("x")
+        self.assertIs(cached(), False)  # half a download is no model
+        (snap / "vocab.txt").write_text("x")
+        self.assertIs(cached(), True)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs ffmpeg")
+    def test_verify_videos_reads_size_sound_and_length(self):
+        from automate import bridge_ext_pipeline as ext
+        good, mute, wide = (self.root / n for n in ("good.mp4", "mute.mp4", "wide.mp4"))
+        src = ["-f", "lavfi", "-i", "testsrc=size={}:rate=5", "-t", "2"]
+        snd = ["-f", "lavfi", "-i", "sine=frequency=440", "-shortest"]
+        for f, size, audio in ((good, "1080x1920", True), (mute, "1080x1920", False), (wide, "640x360", True)):
+            args = [a.format(size) for a in src] + (snd if audio else [])
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args, "-c:v", "libx264", "-preset", "ultrafast",
+                            "-pix_fmt", "yuv420p", str(f)], check=True)
+        broken = self.root / "broken.mp4"
+        broken.write_bytes(b"mp4")
+        rows = {Path(r["file"]).name: r for r in ext.verify_videos({"files": [str(good), str(mute), str(wide),
+                                                                             str(broken)]}, self.cfg)["videos"]}
+        self.assertEqual(rows["good.mp4"]["ok"], True)
+        self.assertEqual(rows["mute.mp4"]["problems"], ["kein Ton"])
+        self.assertEqual(rows["wide.mp4"]["problems"], ["640x360 statt 1080x1920"])
+        self.assertFalse(rows["broken.mp4"]["ok"])
+        self.assertIn("kein lesbares Video", rows["broken.mp4"]["problems"][0])
 
     def test_rank_keeps_what_clipper_simulate_keeps_and_titles_follow_their_hooks(self):
         single = {"start": 0, "end": 10, "hook": "Why did Kai *run*?", "title": "Why Did Kai Run In GTA 6?"}

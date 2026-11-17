@@ -3,6 +3,7 @@ changes; no double runs), scans the way `clipper daily` does them (creators firs
 quota, a failing watch), the live service (chunks queued once, status cached, live done for ended chunks), the daily
 cleanup and the threads' start/stop."""
 import os
+import signal
 import sys
 import threading
 import time
@@ -14,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_automate_pipeline_fakes import PipelineCase, write_live_chunk  # noqa: E402
 
 from automate import db, health, paths, pipeline, runtime, scheduler, store, worker  # noqa: E402
+
+REAL_RECORDERS = scheduler.recorders  # PipelineCase replaces it: a test must never see this machine's processes
 
 
 def at(hhmm, days=0):
@@ -89,6 +92,60 @@ class SlotTests(PipelineCase):
         with clock(at("09:30")):
             self.assertEqual(len(scheduler.tick(now=at("09:30"))), 1)
             join_scans()
+
+
+class RetryTests(PipelineCase):
+    """A scan that reaches nothing (the PC woke before the network) is not the day's scan (finding #7)."""
+
+    def setUp(self):
+        super().setUp()
+        store.set_settings({"schedule.scan_times": ["09:00", "18:00"], "automation.enabled": True})
+        store.add_creator("gta6", "Kai", "https://www.youtube.com/@KaiCenat/videos")
+        self.clip.watch = {"videos": [], "skipped_off_topic": 0, "errors": [
+            {"source": "Kai", "error": "ERROR: [youtube] Unable to download API page: <urlopen error [Errno -3] "
+                                       "Temporary failure in name resolution>"}]}
+
+    def tick(self, ts):
+        with clock(ts):
+            started = scheduler.tick(now=ts)
+            join_scans()
+        return started
+
+    def test_a_failed_scan_is_retried_every_15_minutes_until_the_retries_run_out(self):
+        t = at("09:40")
+        self.assertEqual(len(self.tick(t)), 1)
+        self.assertFalse(store.last_run("scan", "gta6")["ok"])
+        self.assertIsNone(scheduler.due_scan("gta6", t + 600))  # not lost, but not at once either
+        self.assertEqual(scheduler.next_scan_time(t + 600), t + scheduler.SCAN_RETRY_S)
+        self.assertIn("alle 15 Minuten erneut", store.get_alert("scan.failed.gta6")["message"])
+        for i in range(1, scheduler.SCAN_RETRIES + 1):
+            self.assertEqual(len(self.tick(t + i * scheduler.SCAN_RETRY_S)), 1, f"retry {i}")
+        done = t + (scheduler.SCAN_RETRIES + 1) * scheduler.SCAN_RETRY_S
+        self.assertIsNone(scheduler.due_scan("gta6", done))  # given up for this slot ...
+        self.assertEqual(scheduler.next_scan_time(done), at("18:00"))  # ... the next one is due as usual
+        self.clip.watch = {"videos": [], "skipped_off_topic": 0, "errors": []}
+        self.assertEqual(len(self.tick(at("18:01"))), 1)
+        self.assertTrue(store.last_run("scan", "gta6")["ok"])
+        self.assertIsNotNone(store.get_alert("scan.failed.gta6")["resolved_at"])
+        self.assertEqual(self.tick(at("18:30")), [])  # a successful scan ends the slot
+
+    def test_no_scan_starts_right_after_a_start_or_a_wake(self):
+        scheduler.hold_scans(now=at("09:30"))  # what the scheduler does when it starts or the PC wakes up
+        self.assertEqual(self.tick(at("09:31")), [])  # the network may not be up yet
+        self.assertEqual(scheduler.next_scan_time(at("09:31")), at("09:30") + scheduler.NETWORK_GRACE_S)
+        self.clip.watch = {"videos": [], "skipped_off_topic": 0, "errors": []}
+        self.assertEqual(len(self.tick(at("09:33"))), 1)
+
+    def test_a_wake_from_sleep_is_noticed(self):
+        wall, mono = [1000.0], [50.0]
+        with mock.patch.object(scheduler.time, "time", lambda: wall[0]), \
+                mock.patch.object(scheduler.time, "monotonic", lambda: mono[0]):
+            sleep = scheduler.WakeDetector()
+            wall[0], mono[0] = 1020.0, 70.0  # a normal tick: both clocks ran
+            self.assertFalse(sleep.woke())
+            wall[0], mono[0] = 1020.0 + 3 * 3600, 90.0  # three hours of wall clock, 20 s of monotonic: it slept
+            self.assertTrue(sleep.woke())
+            self.assertFalse(sleep.woke())
 
 
 class ScanTests(PipelineCase):
@@ -254,6 +311,56 @@ class LiveServiceTests(PipelineCase):
         health.check_all()
         self.assertIsNotNone(store.get_alert("live.service")["resolved_at"])
 
+    def test_recorders_of_streams_that_are_no_longer_active_are_stopped(self):
+        kai = store.list_streams("gta6")[1]["id"]
+        procs, killed = [], []
+
+        def recorder(pid, name, url, ours=True):
+            if ours:  # `live watch` wrote its pid file in this checkout's jobs/_live
+                d = paths.jobs_dir() / "_live" / name
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "pid").write_text(str(pid))
+            procs.append((pid, pid, [sys.executable, "-m", "clipper", "live", "record", name, url, "--chunk", "30"]))
+        recorder(900001, "xqc-twitch", "https://www.twitch.tv/xqc")
+        recorder(900002, "kai-youtube", "https://www.youtube.com/@KaiCenat/live")
+        recorder(900003, "other-kick", "https://kick.com/other", ours=False)  # another checkout's: never touched
+        procs.append((900004, 900004, [sys.executable, "-m", "clipper", "live", "analyze", "live-xqc-x"]))
+
+        def stopped():
+            out = [pid for pid, sig in killed]
+            self.assertTrue(all(sig == signal.SIGTERM for _, sig in killed))  # the clean stop: it saves its chunk
+            killed.clear()
+            return out
+        with mock.patch.object(scheduler, "recorders", REAL_RECORDERS), \
+                mock.patch.object(worker, "_processes", lambda: procs), \
+                mock.patch.object(scheduler.os, "kill", lambda pid, sig: killed.append((pid, sig))):
+            self.assertEqual(scheduler.stop_inactive_recorders(), [])
+            store.update_stream(self.sid, paused=True)  # pause: the API then calls on_settings_changed
+            pipeline.on_settings_changed(["streams"])
+            self.assertEqual(stopped(), [900001])
+            store.update_stream(self.sid, paused=False)
+            store.delete_stream(kai)  # delete
+            pipeline.on_settings_changed(["streams"])
+            self.assertEqual(stopped(), [900002])
+            store.add_stream("gta6", "kai-youtube", "https://www.youtube.com/@KaiCenat/live")
+            store.update_profile("gta6", enabled=False)  # profile off
+            pipeline.on_settings_changed(["profiles"])
+            self.assertEqual(stopped(), [900001, 900002])
+            store.update_profile("gta6", enabled=True)
+            store.set_settings({"automation.live_enabled": False})  # "Live aus"
+            pipeline.on_settings_changed(["automation.live_enabled"])
+            self.assertEqual(stopped(), [900001, 900002])
+            store.set_settings({"automation.live_enabled": True})
+            self.assertEqual(scheduler.stop_inactive_recorders(), [])
+            self.assertEqual(stopped(), [])
+
+    def test_no_new_recorder_while_the_disk_is_full(self):
+        self.clip.live_ticks = [self.tick_data([])]
+        with mock.patch.object(pipeline, "disk_low", return_value=(8.0, 30.0)):
+            scheduler.live_tick()
+        self.assertFalse(self.clip.bridge_calls[0][1]["start"])
+        self.assertIn("keine neue Aufnahme: nur 8 GB frei", store.list_runs("live_watch")[0]["summary"]["message"])
+
     def test_profiles_without_active_streams_are_not_watched(self):
         for s in store.list_streams("gta6"):
             store.update_stream(s["id"], paused=True)
@@ -303,6 +410,33 @@ class HousekeepingTests(PipelineCase):
         self.assertEqual((summary["db_rows"]["runs.health"], summary["db_rows"]["job_events"]), (2, 1))
         self.assertEqual([e["message"] for e in store.job_events(job)], ["Video geladen"])
         self.assertEqual(len(store.list_runs("health")), 1)
+
+    def test_a_service_thread_that_dies_is_restarted_with_an_alert(self):
+        stop, runs = threading.Event(), []
+
+        def health_loop(stop_event):
+            runs.append(1)
+            if len(runs) == 1:
+                raise RuntimeError("boom")  # dies at once (what a bug outside the loop's own try would do)
+            stop_event.wait()
+        with mock.patch.object(scheduler, "_health_loop", health_loop), \
+                mock.patch.object(scheduler, "_scheduler_loop", lambda s: s.wait()), \
+                mock.patch.object(scheduler, "_live_loop", lambda s: s.wait()), \
+                mock.patch.object(scheduler, "WATCHDOG_S", 0.05), \
+                mock.patch("threading.excepthook", lambda args: None), \
+                self.assertLogs("automate.scheduler", "ERROR"):
+            threads = scheduler.start_scheduler(stop)
+            for _ in range(200):
+                if len(runs) >= 2:
+                    break
+                time.sleep(0.01)
+            stop.set()
+            for t in threads:
+                t.join(5)
+        self.assertEqual(len(runs), 2)
+        alert = store.get_alert("service.restarted")
+        self.assertIn("Systemprüfung", alert["message"])
+        self.assertEqual(alert["details"]["service"], "health-monitor")
 
     def test_threads_start_and_stop_promptly(self):
         stop = threading.Event()

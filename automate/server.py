@@ -23,8 +23,9 @@ Security, enforced in one pure ASGI middleware so it covers the API, the static 
 Errors are always `{"error": {"code", "message"}}` with a German message; tracebacks go to the log only.
 
 Startup order (lifespan, background=True): DB connect + migrate -> importer.run() -> runtime.materialize() ->
-store.release_stale_jobs(0) -> worker.start_workers(stop) + scheduler.start_scheduler(stop) (+ a one-off system
-report so the overview knows the tools). Shutdown sets `stop` and joins those threads (SHUTDOWN_JOIN_S).
+pipeline.release_stale(0) -> worker.start_workers(stop) (it also runs pipeline.reconcile()) +
+scheduler.start_scheduler(stop) (+ a one-off system report so the overview knows the tools). Shutdown sets `stop`
+and joins those threads (SHUTDOWN_JOIN_S).
 """
 import ipaddress
 import json
@@ -315,7 +316,8 @@ def _startup():
     if any(summary.get(k) for k in ("profiles", "creators", "streams", "settings", "secrets")):
         log.info("imported from the repo files: %s", {k: v for k, v in summary.items() if v})
     runtime.materialize()
-    released = store.release_stale_jobs(0)
+    from . import pipeline
+    released = pipeline.release_stale(0)
     if released:
         log.info("jobs interrupted by the last shutdown are queued again: %s", released)
 

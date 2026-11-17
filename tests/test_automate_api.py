@@ -57,7 +57,8 @@ def fake_modules():
     pipeline.update_pick_data = mock.Mock(side_effect=lambda pid, changes: (
         store.update_pick(pid, data={**store.get_pick(pid)["data"], **changes}), {}))
     pipeline.enqueue_dub = mock.Mock(side_effect=lambda vid, lang: store.create_job("dub", "gta6"))
-    pipeline.enqueue_upload = mock.Mock(side_effect=lambda vid, aid, privacy: store.create_job("upload", "gta6"))
+    pipeline.enqueue_upload = mock.Mock(side_effect=lambda vid, aid, privacy, force=False:
+                                        store.create_job("upload", "gta6"))
     pipeline.retry_job = mock.Mock(side_effect=lambda jid: store.update_job(jid, status="queued"))
     pipeline.cancel_job = mock.Mock(side_effect=lambda jid: store.update_job(jid, status="canceled"))
     pipeline.on_settings_changed = mock.Mock()
@@ -944,7 +945,14 @@ class VideoTests(ApiCase):
         store.update_account(yt, connected=True, credentials={"access_token": "a", "refresh_token": "r"})
         r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "unlisted"})
         self.assertIsInstance(r.json()["job_id"], int)
-        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, "unlisted")
+        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, "unlisted", force=False)
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "unlisted",
+                                                                  "force": True})
+        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, "unlisted", force=True)  # the owner confirmed
+        self.pipeline.enqueue_upload.side_effect = lambda *a, **k: (_ for _ in ()).throw(
+            PipelineError("Diese Variante ist schon auf „YT“ hochgeladen.", "already_posted", 409))
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "unlisted"})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "already_posted"))
         self.assertEqual(self.c.post(f"/api/variants/{self.var}/upload",
                                      json={"account_id": yt, "privacy": "secret"}).status_code, 422)
         r = self.c.post(f"/api/videos/{self.vid}/dub", json={"lang": "es"})

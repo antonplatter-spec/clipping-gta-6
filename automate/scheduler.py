@@ -5,26 +5,38 @@ timers of clipper/schedule.py (nothing is installed in the OS).
     scheduler       every TICK_S: resume jobs waiting for a key/budget; per enabled profile, when
                     automation.enabled, run the scan of the latest passed slot of schedule.scan_times if no scan
                     started since (a slot missed while the PC slept or was off runs once on wake, never once per
-                    missed slot; clock changes only move which slot is "latest"); once a day `clipper cleanup`,
-                    pruning of data/tmp (agent conversation copies, one-off picks/translation files older
-                    than TMP_KEEP_DAYS) and of old DB rows (prune_db: job output lines, health/live/scan runs)
+                    missed slot; clock changes only move which slot is "latest"). A scan that failed (no network,
+                    no source reachable) is retried every SCAN_RETRY_S, up to SCAN_RETRIES times per slot, instead of
+                    losing the day's slot. No scan starts within NETWORK_GRACE_S after the server started or the PC
+                    woke up (the network may not be back yet). Once a day `clipper cleanup`, pruning of data/tmp
+                    (agent conversation copies, one-off picks/translation files older than TMP_KEEP_DAYS) and of old
+                    DB rows (prune_db: job output lines, health/live/scan runs)
     live-service    every schedule.live_watch_minutes when automation.live_enabled: per enabled profile with active
                     streams the bridge op `live_tick` (= `clipper live watch --chunk N` + cleanup + `live health`
-                    with one status probe of the streams), then a live_chunk job per newly analyzed chunk; the
-                    stream status is cached for health.live_status()
+                    with one status probe of the streams; no new recorder while the disk is below min_free_gb),
+                    then a live_chunk job per newly analyzed chunk; the stream status is cached for
+                    health.live_status(). Recorders of streams that are no longer active (paused, deleted, profile
+                    off, live switched off) are stopped: stop_inactive_recorders(), also called by
+                    pipeline.on_settings_changed right after such a change.
     health-monitor  every schedule.health_minutes: health.check_all()
-All runs are recorded in `runs` (kind scan | live_watch | cleanup | health) with a German summary.
+A watchdog restarts any of these threads that dies (alert service.restarted). All runs are recorded in `runs`
+(kind scan | live_watch | cleanup | health) with a German summary.
 
     start_scheduler(stop) -> [threads] ; next_scan_time(now=None) -> float | None ; run_scan_now(profile=None)
     scan_running(profile=None) -> bool   a scan (scheduled or "Jetzt suchen") is in progress
     due_scan(profile, now=None) -> slot timestamp | None ; tick(now=None) ; live_tick(trigger="schedule")
     run_cleanup(trigger="schedule", dry_run=False) -> summary ; prune_tmp(days=TMP_KEEP_DAYS) -> files
-    prune_db(now=None) -> {what: rows} ; wake()
+    prune_db(now=None) -> {what: rows} ; wake() ; hold_scans(seconds=NETWORK_GRACE_S)
+    recorders() -> [{pid, name, url, profile}] ; stop_inactive_recorders() -> [stopped names]
 """
 import logging
+import os
+import re
+import signal
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import db, health, paths, pipeline, runtime, store
 
@@ -33,6 +45,11 @@ log = logging.getLogger("automate.scheduler")
 TICK_S = 20.0
 SLOT_GRACE_S = 15 * 60       # a scan started up to this long before a slot counts for it
 CATCH_UP_AFTER_S = 10 * 60   # a slot run later than this is labelled "catch_up" (e.g. after sleep)
+SCAN_RETRY_S = 15 * 60       # a failed scan (no network, no source reachable) runs again after this long ...
+SCAN_RETRIES = 8             # ... at most this many times per slot (two hours), then the next slot
+NETWORK_GRACE_S = 120        # no scan this soon after the server started or the PC woke up
+WAKE_JUMP_S = 60             # the wall clock ran this much further than the monotonic one: the PC slept
+WATCHDOG_S = 30.0
 CLEANUP_EVERY_S = 24 * 3600
 T_LIVE_TICK = 20 * 60
 TMP_KEEP_DAYS = 5
@@ -46,10 +63,16 @@ _wake_event = threading.Event()
 _cleanup_lock = threading.Lock()
 _cleanup_runner = None
 _live_lock = threading.Lock()
+_hold = {"until": 0.0}
 
 
 def wake():
     _wake_event.set()
+
+
+def hold_scans(seconds=NETWORK_GRACE_S, now=None):
+    """No scheduled scan starts for `seconds` (after a start or a wake the network may not be up yet)."""
+    _hold["until"] = (time.time() if now is None else now) + seconds
 
 
 # ---------------------------------------------------------------- scan slots
@@ -71,32 +94,54 @@ def _last_scan(profile):
     return None
 
 
-def due_scan(profile, now=None):
-    """The latest of today's slots that has passed, if no scan of `profile` started since (minus SLOT_GRACE_S)."""
-    now = time.time() if now is None else now
+def _scan_plan(profile, now):
+    """(slot, retry_at) for the latest of today's passed slots: retry_at is None when no scan of `profile` started
+    since the slot (minus SLOT_GRACE_S): it is due now; the time the failed scan of that slot runs again; or
+    float("inf") when the slot is done (a scan succeeded, is running, or failed SCAN_RETRIES + 1 times). (None, None)
+    before the first slot of the day."""
     passed = [ts for ts in _slots(datetime.fromtimestamp(now).date()) if ts <= now]
     if not passed:
-        return None
+        return None, None
     slot = passed[-1]
-    last = _last_scan(profile)
-    if last and last["started_at"] >= slot - SLOT_GRACE_S:
+    runs = [r for r in store.list_runs("scan", limit=200) if r["profile"] == profile
+            and not (r.get("summary") or {}).get("interrupted") and r["started_at"] >= slot - SLOT_GRACE_S]
+    if not runs:
+        return slot, None
+    last = runs[0]
+    failed = [r for r in runs if r.get("finished_at") and not r.get("ok") and (r.get("summary") or {}).get("retry")]
+    if last.get("finished_at") and not last.get("ok") and (last.get("summary") or {}).get("retry") \
+            and len(failed) <= SCAN_RETRIES:
+        return slot, last["started_at"] + SCAN_RETRY_S
+    return slot, float("inf")
+
+
+def due_scan(profile, now=None):
+    """The latest of today's slots that has passed, if no scan of `profile` started since (minus SLOT_GRACE_S), or
+    if the last one failed and its retry time has come."""
+    now = time.time() if now is None else now
+    slot, retry_at = _scan_plan(profile, now)
+    if slot is None or (retry_at is not None and retry_at > now):
         return None
     return slot
 
 
 def next_scan_time(now=None):
-    """When the next scheduled scan runs (now, if one is due), None when automation is off or no profile is on."""
+    """When the next scheduled scan runs (now, if one is due; a failed scan's retry), None when automation is off or
+    no profile is on."""
     if not store.get_setting("automation.enabled"):
         return None
     profiles = store.enabled_profiles()
     if not profiles:
         return None
     now = time.time() if now is None else now
-    if any(due_scan(p, now) is not None for p in profiles):
-        return now
+    plans = [_scan_plan(p, now) for p in profiles]
+    if any(slot is not None and (retry is None or retry <= now) for slot, retry in plans):
+        return max(now, _hold["until"])
     today = datetime.fromtimestamp(now).date()
     upcoming = [ts for ts in _slots(today) if ts > now] or _slots(today + timedelta(days=1))
-    return upcoming[0] if upcoming else None
+    retries = [retry for _, retry in plans if retry is not None and retry != float("inf")]
+    times = [t for t in [upcoming[0] if upcoming else None, *retries] if t is not None]
+    return min(times) if times else None
 
 
 def scan_running(profile=None):
@@ -197,7 +242,7 @@ def tick(now=None, stop=None):
         pipeline.resume_waiting()
     except Exception:
         log.exception("resume_waiting failed")
-    if store.get_setting("automation.enabled"):
+    if store.get_setting("automation.enabled") and now >= _hold["until"]:
         for p in store.enabled_profiles():
             slot = due_scan(p, now)
             if slot is None or pipeline.scan_running(p):
@@ -222,10 +267,32 @@ def _mark_interrupted_runs():
                                               "message": "Unterbrochen (Server wurde beendet)"})
 
 
+class WakeDetector:
+    """True from woke() when the wall clock ran WAKE_JUMP_S further than the monotonic clock since the last call: the
+    monotonic clock stops while the PC sleeps (Linux, macOS), the wall clock doesn't."""
+
+    def __init__(self):
+        self.wall, self.mono = time.time(), time.monotonic()
+
+    def woke(self):
+        wall, mono = time.time(), time.monotonic()
+        jumped = (wall - self.wall) - (mono - self.mono) > WAKE_JUMP_S
+        self.wall, self.mono = wall, mono
+        return jumped
+
+
 def _scheduler_loop(stop):
     try:
-        _mark_interrupted_runs()
+        try:
+            _mark_interrupted_runs()
+        except Exception:
+            log.exception("closing interrupted runs failed")
+        hold_scans()  # just started: the network may not be up yet (a PC that booted, a laptop that woke)
+        sleep = WakeDetector()
         while not stop.is_set():
+            if sleep.woke():
+                log.info("woke up from sleep: scans wait %s s for the network", NETWORK_GRACE_S)
+                hold_scans()
             try:
                 tick(stop=stop)
             except Exception:
@@ -238,11 +305,88 @@ def _scheduler_loop(stop):
 
 # ---------------------------------------------------------------- live service
 
+def _slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")[:40]
+
+
+def _proc_profile(pid):
+    """CLIPPER_PROFILE of a process (Linux: /proc/<pid>/environ), else None."""
+    try:
+        env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    for item in env:
+        if item.startswith(b"CLIPPER_PROFILE="):
+            return item.split(b"=", 1)[1].decode("utf-8", "replace") or None
+    return None
+
+
+def _ours(pid, name):
+    """A recorder of this checkout: its stream's pid file in our jobs/_live names it, or (Linux) it runs here."""
+    try:
+        if int((paths.jobs_dir() / "_live" / _slug(name) / "pid").read_text().strip()) == pid:
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        return Path(f"/proc/{pid}/cwd").resolve() == paths.ROOT.resolve()
+    except OSError:
+        return False
+
+
+def recorders():
+    """[{pid, name, url, profile}] of the running `python -m clipper live record <name> <url> …` processes of this
+    checkout (by command line, and by pid file or working directory; profile None where it can't be read)."""
+    from . import worker
+    out = []
+    for pid, _pgid, argv in worker._processes():
+        try:
+            i = argv.index("-m")
+        except ValueError:
+            continue
+        tail = argv[i + 1:]
+        if tail[:3] != ["clipper", "live", "record"] or len(tail) < 5 or pid == os.getpid():
+            continue
+        if _ours(pid, tail[3]):
+            out.append({"pid": pid, "name": tail[3], "url": tail[4], "profile": _proc_profile(pid)})
+    return out
+
+
+def stop_inactive_recorders():
+    """SIGTERM every recorder whose stream is no longer active: paused, deleted, its profile switched off, or live
+    recording switched off. `clipper live record` then stops ffmpeg, saves its partial chunk and exits (that chunk
+    is not clipped: pipeline.enqueue_live_chunks drops chunks of inactive streams). Only processes verified as a
+    recorder of this checkout (recorders()) are signalled. Returns the stopped stream names."""
+    active = set()
+    if store.get_setting("automation.live_enabled"):
+        for p in store.enabled_profiles():
+            for s in store.list_streams(p, include_paused=False):
+                active |= {(p, pipeline._norm_url(s["url"])), (p, "name:" + _slug(s["name"]))}
+    profiles = {p for p, _ in active}
+    stopped = []
+    for r in recorders():
+        keys = {pipeline._norm_url(r["url"]), "name:" + _slug(r["name"])}
+        wanted = any((p, k) in active for p in ([r["profile"]] if r["profile"] else profiles) for k in keys)
+        if wanted:
+            continue
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+        except OSError:
+            continue
+        log.info("stopped the recorder of %s (pid %s): its stream is no longer active", r["name"], r["pid"])
+        stopped.append(r["name"])
+    return stopped
+
+
 def live_tick(trigger="schedule", stop=None):
     """Watch every enabled profile's active streams once (see the module doc). Returns {profile: summary}."""
     if not _live_lock.acquire(blocking=False):
         return {}
     try:
+        try:
+            stop_inactive_recorders()
+        except Exception:
+            log.exception("stopping inactive recorders failed")
         chunk = int(store.get_setting("schedule.live_chunk_minutes"))
         out = {}
         for p in store.enabled_profiles():
@@ -259,9 +403,10 @@ def live_tick(trigger="schedule", stop=None):
 
 def _live_profile(profile, chunk, trigger, stop):
     rid = store.start_run("live_watch", profile, trigger)
+    low = pipeline.disk_low(profile)
     try:
-        data = runtime.run_bridge("live_tick", {"chunk": chunk, "health": True, "restart_stalled": True}, profile,
-                                  timeout=T_LIVE_TICK, cancel=stop)
+        data = runtime.run_bridge("live_tick", {"chunk": chunk, "health": True, "restart_stalled": True,
+                                                "start": low is None}, profile, timeout=T_LIVE_TICK, cancel=stop)
     except runtime.BridgeError as e:
         if e.canceled:
             msg = "Live-Check unterbrochen"
@@ -272,7 +417,8 @@ def _live_profile(profile, chunk, trigger, stop):
         health.store_live(profile, None, error=msg)
         store.finish_run(rid, False, {"message": msg, "interrupted": bool(e.canceled)})
         return {"message": msg}
-    new = pipeline.enqueue_live_chunks(profile, data.get("ready"))
+    dropped = []
+    new = pipeline.enqueue_live_chunks(profile, data.get("ready"), dropped=dropped)
     closed = pipeline.close_live_chunks(profile, data.get("ready"))
     unreachable = data.get("probe_error")
     if unreachable:
@@ -289,25 +435,34 @@ def _live_profile(profile, chunk, trigger, stop):
         parts.append(f"hängende Aufnahme neu gestartet: {', '.join(data['restarted'])}")
     if new:
         parts.append(f"{len(new)} neue(s) Stück(e) zum Clippen")
+    if dropped:
+        parts.append(f"{len(dropped)} Stück(e) nicht geclippt (Stream pausiert/entfernt oder unter "
+                     f"{pipeline.MIN_LIVE_CHUNK_S // 60} Min.)")
+    if low:
+        parts.append(f"keine neue Aufnahme: nur {health.gb_text(low[0])} frei (mindestens {health.gb_text(low[1])})")
     if data.get("transcribing"):
         parts.append(f"{len(data['transcribing'])} Stück(e) in Analyse")
     cleaned = data.get("cleaned") or {}
     if cleaned.get("files"):
         parts.append(f"{cleaned['files']} alte Datei(en) gelöscht ({health.gb_text(cleaned.get('gb') or 0)})")
     summary = {"message": ", ".join(parts), "started": data.get("started") or [], "new_jobs": new,
-               "closed": closed, "recorders": data.get("recorders"), "issues": data.get("issues") or {},
-               "restarted": data.get("restarted") or []}
+               "closed": closed, "dropped": dropped, "recorders": data.get("recorders"),
+               "issues": data.get("issues") or {}, "restarted": data.get("restarted") or [],
+               "disk_low": bool(low)}
     store.finish_run(rid, not unreachable, summary)
     return summary
 
 
 def _live_loop(stop):
-    last = None
+    last = swept = None
     try:
         while not stop.wait(5):
             try:
                 if not store.get_setting("automation.live_enabled"):
                     last = None
+                    if swept is None or time.monotonic() - swept >= 60:  # live off: no recorder keeps running
+                        swept = time.monotonic()
+                        stop_inactive_recorders()
                     continue
                 interval = 60 * int(store.get_setting("schedule.live_watch_minutes"))
                 if last is None or time.monotonic() - last >= interval:
@@ -339,16 +494,45 @@ def _health_loop(stop):
         db.close()
 
 
+SERVICES = (("scheduler", "_scheduler_loop", "Zeitplan"), ("live-service", "_live_loop", "Live-Dienst"),
+            ("health-monitor", "_health_loop", "Systemprüfung"))
+
+
+def _start(name, fn_name, stop):
+    t = threading.Thread(target=globals()[fn_name], args=(stop,), name=name, daemon=True)
+    t.start()
+    return t
+
+
+def _watchdog(stop, threads):
+    """Restart a service thread that died (its loop catches errors, so this is for what slips through) and say so."""
+    try:
+        while not stop.wait(WATCHDOG_S):
+            for name, fn_name, label in SERVICES:
+                if threads[name].is_alive() or stop.is_set():
+                    continue
+                log.error("the %s thread died: restarting it", name)
+                threads[name] = _start(name, fn_name, stop)
+                try:
+                    store.raise_alert("service.restarted", "warning",
+                                      f"Ein Hintergrunddienst des Servers ({label}) war abgestürzt und wurde neu "
+                                      "gestartet. Passiert das öfter, stehen die Details im Server-Log "
+                                      "(logs/automate/).", {"service": name, "at": time.time()})
+                except Exception:
+                    log.exception("raising the service alert failed")
+    finally:
+        db.close()
+
+
 def start_scheduler(stop):
-    """Start the scheduler, live-service and health-monitor threads (daemons; they end soon after `stop`)."""
-    threads = [threading.Thread(target=fn, args=(stop,), name=name, daemon=True)
-               for name, fn in (("scheduler", _scheduler_loop), ("live-service", _live_loop),
-                                ("health-monitor", _health_loop))]
-    for t in threads:
-        t.start()
+    """Start the scheduler, live-service and health-monitor threads and their watchdog (daemons; they end soon after
+    `stop`)."""
+    threads = {name: _start(name, fn_name, stop) for name, fn_name, _ in SERVICES}
+    dog = threading.Thread(target=_watchdog, args=(stop, threads), name="scheduler-watchdog", daemon=True)
+    dog.start()
 
     def unblock():
         stop.wait()
         wake()
     threading.Thread(target=unblock, name="scheduler-stop", daemon=True).start()
-    return threads
+    return [*threads.values(), dog]

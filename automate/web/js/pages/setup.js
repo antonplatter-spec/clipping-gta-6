@@ -283,7 +283,7 @@ function AutomationStep() {
   return html`${!d.ready.anthropic_key && html`<${Callout} tone="warning" title="Noch kein Anthropic-Schlüssel">
       Die Automatik findet und analysiert Videos trotzdem, wartet aber vor Schritt ③ auf den Schlüssel. <a href="#/einrichtung/schluessel">Jetzt eintragen</a><//>`}
     <${Toggle} size="lg" checked=${d.automation.enabled} busy=${busy === 'enabled'} onChange=${(v) => set({ enabled: v }, 'enabled')}
-      label="Automatik (tägliche Suche)" description=${`Sucht ${d.times.length ? `täglich um ${d.times.join(', ')} Uhr` : 'nach Zeitplan'} nach neuen GTA-6-Videos deiner Creator und schlägt Clips vor. Zeiten änderst du unter Einstellungen.`} />
+      label="Automatik (tägliche Suche)" description=${`Sucht ${d.times.length ? `täglich um ${d.times.join(', ')} Uhr` : 'nach Zeitplan'} nach neuen GTA-6-Videos deiner Creator und schlägt Clips vor. Ist die heutige Suchzeit schon vorbei, startet die erste Suche beim Einschalten sofort. Zeiten änderst du unter Einstellungen.`} />
     <${Toggle} size="lg" checked=${d.automation.live_enabled} busy=${busy === 'live'} onChange=${(v) => set({ live_enabled: v }, 'live')}
       label="Live-Aufnahme" description="Prüft alle paar Minuten, ob deine Streams live GTA 6 spielen, nimmt sie auf und clippt jeden fertigen 30-Minuten-Chunk." />
     <${Callout} tone="info">Neue Picks landen in der <b>Freigabe</b>: Du prüfst Hooks und Titel und gibst sie zum Rendern frei (oder stellst unter Einstellungen → Freigabe auf automatisch).<//>
