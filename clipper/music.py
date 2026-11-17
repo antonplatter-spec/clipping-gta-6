@@ -10,14 +10,33 @@ MOODS = ("suspense", "sneaky", "epic", "sad", "funny")
 UNDER_SPEECH_DB, FADE_S, SPEECH_PAD_S = -18.0, 0.3, 0.15
 
 
-def load_library(folder=None):
-    """Tracks from library.yaml, each with its `path` resolved inside the music folder."""
-    folder = folder or MUSIC
-    f = folder / "library.yaml"
+def _entries(f):
     if not f.exists():
         return []
-    tracks = (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).get("tracks") or []
-    return [{**t, "path": folder / str(t["file"])} for t in tracks if isinstance(t, dict) and t.get("file")]
+    return [t for t in (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).get("tracks") or [] if isinstance(t, dict)]
+
+
+def load_library(folder=None):
+    """Tracks from library.yaml, each with its `path` resolved inside the music folder. The shipped library also takes
+    local/library.yaml (gitignored: your approvals and your own tracks, which the dashboard writes): an entry with a
+    known `id` changes that track (e.g. `approved`), any other entry adds a track; a `file` given there is relative
+    to local/ and marks the track `local`."""
+    shipped = folder is None
+    folder = folder or MUSIC
+    tracks = [{**t, "path": folder / str(t["file"])} for t in _entries(folder / "library.yaml") if t.get("file")]
+    if shipped:
+        local = folder / "local"
+        by_id = {t["id"]: i for i, t in enumerate(tracks) if t.get("id")}
+        for t in _entries(local / "library.yaml"):
+            own = {"path": local / str(t["file"]), "local": True} if t.get("file") else {}
+            if t.get("id") and t["id"] in by_id:
+                i = by_id[t["id"]]
+                tracks[i] = {**tracks[i], **t, **own}
+            elif own:
+                if t.get("id"):
+                    by_id[t["id"]] = len(tracks)
+                tracks.append({**t, **own})
+    return tracks
 
 
 def usable(track, cfg):

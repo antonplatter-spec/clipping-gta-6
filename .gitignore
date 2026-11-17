@@ -3,6 +3,8 @@ __pycache__/
 .env
 exports/
 logs/
+# automate server: database (with the API keys), generated config overlay, scratch files
+/data/
 # Your own posts' performance data (written by your posting setup; read by `clipper simulate`)
 research/own-uploads*.json
 profiles/*/learned-weights.yaml
