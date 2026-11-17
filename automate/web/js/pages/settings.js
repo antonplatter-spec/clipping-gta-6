@@ -3,8 +3,8 @@
 import * as api from '../api.js';
 import { html, useState, useEffect, useMemo, useData, useTitle, fmt, cx, toast, confirmDialog, useId } from '../lib.js';
 import {
-  PageHeader, Card, Button, IconButton, Badge, Icon, Loading, ErrorState, Empty, TextField, TextareaField, SelectField,
-  Toggle, Segmented, TagInput, Callout, FormError, describedBy, CopyButton,
+  PageHeader, Card, Button, IconButton, Badge, Icon, Loading, ErrorState, Empty, TextareaField,
+  Toggle, Segmented, TagInput, Callout, describedBy, CopyButton,
 } from '../ui.js';
 import { overview, loadProfiles } from '../store.js';
 
@@ -162,7 +162,7 @@ function SettingControl({ id, s, value, onChange, error, radioCards, onJsonValid
   const labelled = `${id}-l`;
   switch (s.type) {
     case 'boolean':
-      return html`<${Toggle} id=${id} checked=${!!value} onChange=${onChange} label=${value ? 'an' : 'aus'} />`;
+      return html`<${Toggle} id=${id} checked=${!!value} onChange=${onChange} label=${s.label} hideLabel stateText=${value ? 'an' : 'aus'} />`;
     case 'integer':
     case 'number': {
       const isAuto = s.auto && value === 'auto';
@@ -350,7 +350,7 @@ function ConfigField({ f, value, onChange, error, overridden, baseValue, onReset
   const numInput = (v, set, extraAttrs = {}) => html`<input id=${id} class="input input-num" type="number" min=${f.min} max=${f.max} step=${f.step || 'any'}
     value=${v ?? ''} disabled=${disabled} onInput=${(e) => set(e.currentTarget.value === '' ? null : Number(e.currentTarget.value))} ...${extraAttrs} />`;
   switch (f.kind) {
-    case 'bool': control = html`<${Toggle} id=${id} checked=${!!value} onChange=${onChange} label=${value ? 'an' : 'aus'} disabled=${disabled} />`; break;
+    case 'bool': control = html`<${Toggle} id=${id} checked=${!!value} onChange=${onChange} label=${f.label} hideLabel stateText=${value ? 'an' : 'aus'} disabled=${disabled} />`; break;
     case 'choice': control = html`<${Segmented} label=${f.label} value=${value} onChange=${onChange} options=${f.choices} />`; break;
     case 'tags': control = html`<${TagInput} id=${id} value=${value || []} onChange=${onChange} mono=${f.mono} transform=${f.transform} placeholder=${f.placeholder} />`; break;
     case 'autonum': {
@@ -597,7 +597,7 @@ function AssetsEditor() {
             </div>
             <span class="list-sub">${t.file}</span>
           </div>
-          <${Toggle} checked=${!!t.approved} label=${t.approved ? 'freigegeben' : 'gesperrt'} busy=${busyId === t.id} onChange=${(v) => toggle(t, v)} />
+          <${Toggle} checked=${!!t.approved} label=${`${t.id} freigeben`} hideLabel stateText=${t.approved ? 'freigegeben' : 'gesperrt'} busy=${busyId === t.id} onChange=${(v) => toggle(t, v)} />
         </div>`)}</div>` : html`<p class="muted">Keine Einträge in assets/music/library.yaml.</p>`}
       <//>`;
     })}

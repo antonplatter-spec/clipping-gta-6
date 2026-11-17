@@ -113,7 +113,8 @@ function Shell({ route, state }) {
     <a class="skip-link" href="#main" onClick=${(e) => { e.preventDefault(); document.getElementById('main').focus(); }}>Zum Inhalt springen</a>
     <header class="topbar">
       <${IconButton} icon="menu" label="Menü öffnen" aria-expanded=${menuOpen ? 'true' : 'false'} aria-controls="sidebar" onClick=${() => setMenuOpen(true)} />
-      <span class="topbar-title">${entry ? entry.label : 'GTA Clipper'}</span>
+      <a class="topbar-title brand" href="#/uebersicht" style="padding:0;gap:8px"><span class="brand-mark" aria-hidden="true" style="width:26px;height:26px;font-size:11px">GC</span>
+        <span class="brand-name">GTA Clipper</span></a>
       <${TopbarBadge} />
     </header>
     ${menuOpen && html`<div class="sidebar-backdrop" onClick=${() => setMenuOpen(false)}></div>`}
@@ -183,7 +184,6 @@ function Root() {
   return html`<${App} /><${Toasts} /><${DialogHost} />`;
 }
 
-// YouTube OAuth callback lands on #/konten?youtube=…; everything else just renders.
 refreshSession();
 render(html`<${Root} />`, document.getElementById('app'));
 

@@ -3,7 +3,7 @@
 import * as api from '../api.js';
 import { html, useState, useEffect, navigate, useData, useTitle, cx, fmt, toast } from '../lib.js';
 import {
-  Button, TextField, FormError, Callout, Loading, ErrorState, Toggle, Badge, Icon, CopyButton, Card,
+  Button, TextField, FormError, Callout, Loading, ErrorState, Toggle, Icon, CopyButton,
 } from '../ui.js';
 import { KeyEditor, ToolList, TotpEnroll, RecoveryCodes, INSTALL_ALL, PlatformIcon } from '../parts.js';
 import { refreshSession, sessionStore, loadProfiles } from '../store.js';
@@ -24,13 +24,13 @@ const pending = { setup: null, username: '', codes: null };
 
 function Stepper({ current }) {
   const idx = STEPS.findIndex((s) => s.id === current);
-  return html`<ol class="stepper" aria-label="Fortschritt der Einrichtung">
+  return html`<div><ol class="stepper" aria-label="Fortschritt der Einrichtung">
     ${STEPS.map((s, i) => html`<li class=${cx('step', i < idx && 'is-done', i === idx && 'is-current')}
       aria-current=${i === idx ? 'step' : undefined}>
       <span class="step-bar"></span><span class="step-name">${i + 1}. ${s.label}</span>
       <span class="sr-only">${i < idx ? '(erledigt)' : ''}</span>
     </li>`)}
-  </ol>`;
+  </ol><p class="step-caption" aria-hidden="true">Schritt ${idx + 1} von ${STEPS.length}: ${STEPS[idx] && STEPS[idx].label}</p></div>`;
 }
 
 function go(step) { navigate(`/einrichtung/${step}`); }
@@ -167,9 +167,9 @@ function KeysStep() {
   const update = (k) => keys.setData((list) => (list || []).map((x) => (x.name === k.name ? { ...x, ...k } : x)));
   if (keys.loading && !keys.data) return html`<${Loading} lines=${5} />`;
   if (keys.error && !keys.data) return html`<${ErrorState} error=${keys.error} onRetry=${keys.reload} />`;
-  return html`<${KeyEditor} name="anthropic" info=${byName.anthropic} onChange=${update} />
+  return html`<${KeyEditor} name="anthropic" info=${byName.anthropic} onChange=${update} headingLevel=${2} />
     <hr style="margin:0" />
-    <${KeyEditor} name="fish" info=${byName.fish} onChange=${update} />
+    <${KeyEditor} name="fish" info=${byName.fish} onChange=${update} headingLevel=${2} />
     <${WizardNav} step="schluessel" />`;
 }
 
@@ -214,19 +214,19 @@ function SourcesStep() {
   return html`<p class="text-2">Profil <b>${d.name}</b>. Pausierte Quellen werden nicht durchsucht bzw. aufgenommen. Hinzufügen und Prioritäten setzt du später unter <a href="#/quellen">Quellen</a>.</p>
     <div class="grid grid-2">
       <div class="stack-sm">
-        <h3>YouTube-Creator <span class="muted">(${d.creators.length})</span></h3>
+        <h2>YouTube-Creator <span class="muted">(${d.creators.length})</span></h2>
         ${d.creators.length ? html`<div class="list">${d.creators.map((c) => html`<div class=${cx('list-row', c.paused && 'is-paused')} key=${c.id}>
           <${PlatformIcon} platform="youtube" />
           <div class="list-main"><span class="list-title">${c.name}</span><span class="list-sub">${c.url}</span></div>
-          <${Toggle} checked=${!c.paused} hideLabel label=${`${c.name} ${c.paused ? 'pausiert' : 'aktiv'}`} busy=${busyId === `c${c.id}`} onChange=${() => togglePause('c', c)} />
+          <${Toggle} checked=${!c.paused} hideLabel label=${`${c.name} aktiv`} busy=${busyId === `c${c.id}`} onChange=${() => togglePause('c', c)} />
         </div>`)}</div>` : html`<p class="muted">Noch keine Creator.</p>`}
       </div>
       <div class="stack-sm">
-        <h3>Live-Streams <span class="muted">(${d.streams.length})</span></h3>
+        <h2>Live-Streams <span class="muted">(${d.streams.length})</span></h2>
         ${d.streams.length ? html`<div class="list">${d.streams.map((s) => html`<div class=${cx('list-row', s.paused && 'is-paused')} key=${s.id}>
           <${PlatformIcon} platform=${s.platform || 'other'} />
           <div class="list-main"><span class="list-title">${s.name}</span><span class="list-sub">${s.url}</span></div>
-          <${Toggle} checked=${!s.paused} hideLabel label=${`${s.name} ${s.paused ? 'pausiert' : 'aktiv'}`} busy=${busyId === `s${s.id}`} onChange=${() => togglePause('s', s)} />
+          <${Toggle} checked=${!s.paused} hideLabel label=${`${s.name} aktiv`} busy=${busyId === `s${s.id}`} onChange=${() => togglePause('s', s)} />
         </div>`)}</div>` : html`<p class="muted">Noch keine Live-Streams.</p>`}
       </div>
     </div>

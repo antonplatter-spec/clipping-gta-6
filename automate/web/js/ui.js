@@ -3,7 +3,7 @@ import {
   html, useState, useEffect, useRef, useId, useStore, cx, fmt, copyText, toast, toastStore, dismissToast,
   dialogStore, errorText, useNow,
 } from './lib.js';
-import ICONS from '../vendor/lucide-icons.mjs';
+import ICONS from '../vendor/lucide-icons.js';
 import { JOB_STATUS, PICK_STATUS } from './labels.js';
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -229,6 +229,25 @@ export function TextareaField({ label, help, error, optional, value, onInput, id
   <//>`;
 }
 
+/** Single-line-looking text field that grows with its content (hooks and titles must stay fully visible on a phone). */
+export function AutoText({ label, value, onInput, id: givenId, class: klass, inputClass, hideLabel, help, error, ...rest }) {
+  const auto = useId();
+  const id = givenId || `a${auto}`;
+  const ref = useRef(null);
+  const fit = () => { const el = ref.current; if (el) { el.style.height = 'auto'; el.style.height = `${el.scrollHeight + 2}px`; } };
+  useEffect(fit, [value]);
+  useEffect(() => {
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+  return html`<${Field} id=${id} label=${label} help=${help} error=${error} class=${klass} hideLabel=${hideLabel}>
+    <textarea id=${id} ref=${ref} rows="1" class=${cx('input autotext', inputClass)} value=${value ?? ''}
+      onInput=${(e) => { onInput && onInput(e.currentTarget.value.replace(/\n/g, ' ')); }}
+      onKeyDown=${(e) => { if (e.key === 'Enter') e.preventDefault(); }}
+      aria-invalid=${error ? 'true' : undefined} aria-describedby=${describedBy(id, help, error)} ...${rest}></textarea>
+  <//>`;
+}
+
 /** options: [{value, label}] or {value: label} */
 export function SelectField({ label, help, error, value, onChange, options, id: givenId, class: klass, hideLabel, placeholder, ...rest }) {
   const auto = useId();
@@ -248,7 +267,7 @@ export function SelectField({ label, help, error, value, onChange, options, id: 
 }
 
 /** A switch (role=switch). `label` is visible; `description` sits under it. */
-export function Toggle({ checked, onChange, label, description, disabled, busy, id: givenId, size, class: klass, hideLabel }) {
+export function Toggle({ checked, onChange, label, description, disabled, busy, id: givenId, size, class: klass, hideLabel, stateText }) {
   const auto = useId();
   const id = givenId || `t${auto}`;
   return html`<div class=${cx('toggle-row', klass)}>
@@ -262,6 +281,7 @@ export function Toggle({ checked, onChange, label, description, disabled, busy, 
       <span id=${`${id}-l`} class=${cx('toggle-label', hideLabel && 'sr-only')} onClick=${() => !disabled && !busy && onChange(!checked)}>${label}</span>
       ${description && html`<span id=${`${id}-d`} class="toggle-desc">${description}</span>`}
     </div>
+    ${stateText && html`<span class="toggle-state" aria-hidden="true">${stateText}</span>`}
   </div>`;
 }
 

@@ -5,11 +5,11 @@ import {
   confirmDialog, setQuery, hostOf,
 } from '../lib.js';
 import {
-  PageHeader, Card, Button, IconButton, Badge, Icon, Tabs, Loading, ErrorState, Empty, TextField, TextareaField,
-  SelectField, TagInput, Callout, Modal, PickStatusBadge, Rel, Pager, Skeleton, Segmented,
+  PageHeader, Button, IconButton, Badge, Icon, Tabs, Loading, ErrorState, Empty, TextField, TextareaField, AutoText,
+  SelectField, TagInput, Callout, Modal, PickStatusBadge, Pager,
 } from '../ui.js';
 import {
-  CLIP_TYPES, HOOK_STYLES, CAPTION_STYLES, readCheck, rankingFor, rowType, hookTypeLabel, factorTone, JOB_KIND,
+  CLIP_TYPES, HOOK_STYLES, CAPTION_STYLES, readCheck, rankingFor, rowType, hookTypeLabel, factorTone,
 } from '../labels.js';
 import { overview, loadProfiles } from '../store.js';
 
@@ -267,7 +267,7 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
       </aside>
       <div class="pick-main">
         <section class="stack">
-          <div class="row-between"><h3 class="section-label">Hooks & Titel <span class="muted" style="text-transform:none;letter-spacing:0">(je Hook ein MP4, Titel gehört zum Hook)</span></h3></div>
+          <div><h3 class="section-label">Hooks & Titel</h3><p class="muted small" style="margin-top:2px">Je Hook ein MP4, bester zuerst. Der Titel darunter gehört zu diesem Hook.</p></div>
           <ol class="hook-list" aria-label="Hooks und Titel, bester zuerst">
             ${draft.pairs.map((p, i) => html`<${HookRow} key=${i} i=${i} n=${draft.pairs.length} pair=${p} pick=${pick} check=${reportCurrent ? check : null}
               onChange=${(patch) => setPair(i, patch)} onMove=${(dir) => move(i, dir)}
@@ -403,7 +403,7 @@ function HookRow({ i, n, pair, pick, check, onChange, onMove, onRemove }) {
   return html`<li class=${cx('hook-item', fails.length && 'has-fail')}>
     <span class="hook-rank" aria-label=${`Rang ${i + 1}`}>${i + 1}</span>
     <div class="hook-fields">
-      <${TextField} label=${`Hook ${i + 1}`} hideLabel value=${pair.hook} onInput=${(v) => onChange({ hook: v })} inputClass="hook-input"
+      <${AutoText} label=${`Hook ${i + 1}`} hideLabel value=${pair.hook} onInput=${(v) => onChange({ hook: v })} inputClass="hook-input"
         placeholder="Hook-Text, z. B. Nobody expected the hostages to *SING*" />
       <div class="hook-meta">
         ${type ? html`<${Badge} tone="neutral">${hookTypeLabel(type)}<//>` : changed && pick.simulate_report ? html`<${Badge} tone="muted">neu – Faktor nach dem Speichern<//>` : ''}
@@ -413,7 +413,7 @@ function HookRow({ i, n, pair, pick, check, onChange, onMove, onRemove }) {
         ${row && (row.why || []).includes('names a streamer') && html`<${Badge} tone="muted">+ Streamer-Name<//>`}
       </div>
       <div class="title-row">
-        <${TextField} label=${`Titel zu Hook ${i + 1}`} hideLabel value=${pair.title} onInput=${(v) => onChange({ title: v })}
+        <${AutoText} label=${`Titel zu Hook ${i + 1}`} hideLabel value=${pair.title} onInput=${(v) => onChange({ title: v })}
           placeholder="Passender Titel (max. 100 Zeichen, mit „GTA 6“)" class="grow" />
         <span class=${cx('field-count', pair.title.length > 100 && 'is-over')} aria-label="Zeichen">${pair.title.length}/100</span>
       </div>

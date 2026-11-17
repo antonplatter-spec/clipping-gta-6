@@ -1,6 +1,6 @@
 // Quellen: per profile the YouTube creators and the live streams (add, pause, priority, delete, live status).
 import * as api from '../api.js';
-import { html, useState, useEffect, useData, useTitle, fmt, cx, toast, setQuery, confirmDialog, hostOf } from '../lib.js';
+import { html, useState, useEffect, useData, useTitle, cx, toast, setQuery, confirmDialog, hostOf } from '../lib.js';
 import {
   PageHeader, Card, Button, IconButton, Badge, Loading, ErrorState, Empty, TextField, SelectField, Toggle, Rel,
   Segmented, FormError,
@@ -124,7 +124,7 @@ function Creators({ profile }) {
             <a class="list-sub" href=${c.url} target="_blank" rel="noopener noreferrer">${c.url.replace(/^https?:\/\/(www\.)?/, '')}</a>
           </div>
           <div class="src-side">
-            <${Toggle} class="compact" checked=${!c.paused} label=${c.paused ? 'pausiert' : 'aktiv'} busy=${busyId === c.id}
+            <${Toggle} class="compact" checked=${!c.paused} label=${`${c.name} aktiv`} hideLabel stateText=${c.paused ? 'pausiert' : 'aktiv'} busy=${busyId === c.id}
               onChange=${(on) => patch(c, { paused: !on })} />
             <${IconButton} icon="trash" size="sm" label=${`${c.name} entfernen`} onClick=${() => del(c)} />
           </div>
@@ -190,7 +190,7 @@ function Streams({ profile }) {
             <span class="list-sub" title=${s.title || ''}>${s.title ? `„${s.title}“` : hostOf(s.url)}${s.checked_at ? html` · geprüft <${Rel} ts=${s.checked_at} />` : ' · noch nicht geprüft'}</span>
           </div>
           <div class="src-side">
-            <${Toggle} class="compact" checked=${!s.paused} label=${s.paused ? 'pausiert' : 'aktiv'} busy=${busyId === s.id}
+            <${Toggle} class="compact" checked=${!s.paused} label=${`${s.name} aktiv`} hideLabel stateText=${s.paused ? 'pausiert' : 'aktiv'} busy=${busyId === s.id}
               onChange=${(on) => patch(s, { paused: !on })} />
             <${IconButton} icon="trash" size="sm" label=${`${s.name} entfernen`} onClick=${() => del(s)} />
           </div>

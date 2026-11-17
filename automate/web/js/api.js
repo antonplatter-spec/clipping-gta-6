@@ -39,6 +39,23 @@
 //     The OAuth callback finishes by sending the browser to `/#/konten?youtube=connected` or
 //     `/#/konten?youtube=error&message=<urlencoded German text>`.
 // 11. Tool rows in GET /api/system may carry `required` (bool) and `purpose` (German, what the tool is for).
+// 12. GET /api/keys and GET /api/social/accounts use the general list shape `{items, total}` (§7 wrote `[...]`).
+//
+// Decided here where §7 is silent (the backend implements exactly these; details at each function):
+//  - POST /api/login → State. Wrong credentials → 401 `invalid_credentials` (the client does not redirect on it).
+//  - Every mutation returns the changed object: retry/cancel/createJob → Job, approve → {pick, job_id},
+//    reject → {pick}, bulk → {results}, PATCH video → Video, markPosted → Post, profile/creator/stream/account
+//    create+update → the row, PUT key → KeyInfo, disconnect → Account, ack → Alert, PATCH settings → {values}.
+//  - Pick.check_report is the per-pick clipper check entry (not the whole {"video N": …} report);
+//    Pick.simulate_report is {ranking, keep} (see typedefs). Post.status: posted | uploading | failed.
+//  - Image/video GETs (/api/jobs/{id}/sheets/{name}, /api/variants/{id}/file) are loaded by <img>/<video>, which
+//    cannot send headers: they need the session cookie only (the client sends X-Requested-With on every fetch;
+//    require it on mutating methods only). `?download=1` → Content-Disposition: attachment.
+//
+// Serving: the backend mounts automate/web/ at / and serves index.html for /. Send *.js as text/javascript (module
+// scripts with another MIME type are refused by browsers). The dashboard needs no inline script or style and works
+// under `default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; script-src 'self'`
+// (the QR code is shown as a data: image).
 
 const BASE = '/api';
 

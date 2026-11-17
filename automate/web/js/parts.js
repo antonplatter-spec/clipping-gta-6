@@ -14,23 +14,21 @@ export const KEY_HELP = {
     title: 'Anthropic (Claude API)',
     required: true,
     why: 'Pflicht für die Automatik: Claude wählt damit die Momente, schreibt Hooks und Titel und übersetzt Dubs.',
-    how: html`So bekommst du ihn: <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer" class="ext">platform.claude.com</a>
-      (Claude Console) öffnen → anmelden → <b>API Keys</b> → <b>Create Key</b>. Der Schlüssel beginnt mit <code>sk-ant-</code>.
-      Jede Anfrage kostet Geld; das Tageslimit stellst du unter „Kosten & Schlüssel“ ein.`,
+    how: html`So bekommst du ihn: <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer" class="ext">platform.claude.com</a> (Claude Console) öffnen → anmelden → <b>API Keys</b> → <b>Create Key</b>. Der Schlüssel beginnt mit <code>sk-ant-</code>. Jede Anfrage kostet Geld; das Tageslimit stellst du unter „Kosten & Schlüssel“ ein.`,
     placeholder: 'sk-ant-…',
   },
   fish: {
     title: 'Fish Audio',
     required: false,
     why: 'Optional: KI-Voiceover und Dubs in der geklonten Stimme des Streamers. Ohne Schlüssel nutzt das Voiceover die System-Stimme; Dubs gehen nur mit Schlüssel.',
-    how: html`So bekommst du ihn: <a href="https://fish.audio/app/api-keys/" target="_blank" rel="noopener noreferrer" class="ext">fish.audio</a>
-      öffnen → anmelden → <b>API Keys</b> → neuen Schlüssel erstellen (die kostenlose Entwickler-Stufe reicht).`,
+    how: html`So bekommst du ihn: <a href="https://fish.audio/app/api-keys/" target="_blank" rel="noopener noreferrer" class="ext">fish.audio</a> öffnen → anmelden → <b>API Keys</b> → neuen Schlüssel erstellen (die kostenlose Entwickler-Stufe reicht).`,
     placeholder: 'Fish-Audio-API-Schlüssel',
   },
 };
 
 /** One key: status (masked), set/replace, test, delete. `onChange(info|null)` after every change. */
-export function KeyEditor({ info, name, onChange, compact }) {
+export function KeyEditor({ info, name, onChange, compact, headingLevel = 3 }) {
+  const H = `h${headingLevel}`;
   const help = KEY_HELP[name] || { title: name, why: '', how: '' };
   const [editing, setEditing] = useState(!info || !info.set);
   const [value, setValue] = useState('');
@@ -47,8 +45,7 @@ export function KeyEditor({ info, name, onChange, compact }) {
       setValue('');
       setEditing(false);
       onChange && onChange(next);
-      toast.success(`${help.title}: Schlüssel gespeichert.`);
-      if (andTest) await runTest(next);
+      if (andTest) await runTest(next); else toast.success(`${help.title}: Schlüssel gespeichert.`);
     } catch (err) {
       setError(err);
     } finally {
@@ -93,7 +90,7 @@ export function KeyEditor({ info, name, onChange, compact }) {
   return html`<div class="key-card">
     <div class="row-between">
       <div class="row">
-        <h3>${help.title}</h3>
+        <${H} style="font-size:14px">${help.title}<//>
         ${help.required ? html`<${Badge} tone="orange">Pflicht für die Automatik<//>` : html`<${Badge} tone="muted">optional<//>`}
       </div>
       <div class="key-status">

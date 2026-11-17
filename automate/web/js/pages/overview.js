@@ -98,7 +98,7 @@ function Tiles({ d }) {
   const j = d.jobs || {};
   const c = d.costs || {};
   const limit = c.limit_eur || 0;
-  return html`<div class="tiles" role="list">
+  return html`<div class="tiles">
     <${Tile} label="Wartet" value=${j.waiting || 0} href="#/jobs?group=waiting" tone="neutral" icon="clock"
       sub=${j.waiting_approval ? `${j.waiting_approval} auf Freigabe` : 'in der Queue'} />
     <${Tile} label="Läuft" value=${j.running || 0} href="#/jobs?group=running" tone="running" icon="activity" sub="gerade in Arbeit" />
@@ -167,7 +167,7 @@ function UrlCard() {
   });
   const fields = (error && error.fields) || {};
   return html`<${Card} title="Video-URL direkt clippen" icon="link" subtitle="Ein YouTube-Video oder eine Twitch-VOD sofort analysieren lassen (①–④).">
-    <form class="stack" onSubmit=${submit}>
+    <form class="stack" onSubmit=${submit} novalidate>
       <${TextField} label="Video-URL" hideLabel value=${url} onInput=${setUrl} type="url" inputmode="url"
         placeholder="https://www.youtube.com/watch?v=…" error=${fields.url} autocapitalize="off" spellcheck="false" />
       <div class="form-grid">
@@ -256,7 +256,12 @@ function RecentJobs({ jobs }) {
   return html`<${Card} title="Letzte Jobs" icon="list-todo" class="card-flush"
     actions=${html`<${Button} size="sm" variant="ghost" href="#/jobs" iconRight="chevron-right">Alle Jobs<//>`}>
     ${!jobs.length ? html`<${Empty} icon="list-todo" title="Noch keine Jobs">Starte oben eine Suche oder clippe eine Video-URL direkt.<//>`
-      : html`<div class="table-wrap"><table class="table">
+      : html`<div class="job-cards" style="padding:0 18px">${jobs.map((j) => html`<button type="button" class="job-card" key=${j.id} onClick=${() => navigate(`/jobs?job=${j.id}`)}>
+          <div class="row-between" style="flex-wrap:nowrap"><span class="job-title clamp-2">${j.title || `Job #${j.id}`}</span><${JobStatusBadge} status=${j.status} /></div>
+          <span class="muted small">#${j.id} · ${JOB_KIND[j.kind] || j.kind} · ${JOB_STAGE[j.stage] || '–'} · <${Rel} ts=${j.updated_at} /></span>
+          ${(j.status === 'failed' && j.error) ? html`<span class="small clamp-2" style="color:var(--red)">${j.error}</span>` : j.progress && html`<span class="job-progress">${j.progress}</span>`}
+        </button>`)}</div>
+        <div class="table-wrap jobs-table"><table class="table">
           <thead><tr><th>Job</th><th>Status</th><th>Phase · Fortschritt</th></tr></thead>
           <tbody>${jobs.map((j) => html`<tr class="is-clickable" key=${j.id} onClick=${() => navigate(`/jobs?job=${j.id}`)}>
             <td class="td-title"><a href=${`#/jobs?job=${j.id}`} onClick=${(e) => e.stopPropagation()} class="job-title">${j.title || `Job #${j.id}`}</a>

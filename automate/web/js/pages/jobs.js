@@ -2,7 +2,7 @@
 import * as api from '../api.js';
 import { html, useState, useEffect, useRef, useData, useTitle, fmt, cx, toast, setQuery, hookText, confirmDialog, hostOf } from '../lib.js';
 import {
-  PageHeader, Button, Badge, Icon, Tabs, Loading, ErrorState, Empty, SelectField, Modal, JobStatusBadge,
+  PageHeader, Button, Badge, Tabs, Loading, ErrorState, Empty, SelectField, Modal, JobStatusBadge,
   PickStatusBadge, Rel, Pager, KV, Callout, Spinner, CopyButton,
 } from '../ui.js';
 import { JOB_GROUPS, JOB_KIND, JOB_STAGE } from '../labels.js';

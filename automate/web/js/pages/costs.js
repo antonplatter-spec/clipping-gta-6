@@ -134,7 +134,7 @@ function DayChart({ days, limit }) {
           const x = pad.left + i * band + (band - barW) / 2;
           const h = Math.max(v > 0 ? 2 : 0, (v / top) * plotH);
           return html`<g key=${d.day}>
-            <rect class="bar-hit" x=${pad.left + i * band} y=${pad.top} width=${band} height=${plotH} tabindex="0"
+            <rect class="bar-hit" x=${pad.left + i * band} y=${pad.top} width=${band} height=${plotH} tabindex="0" role="img"
               aria-label=${`${fmt.day(d.day)}: ${fmt.eur(v)}, ${fmt.plural(d.requests || 0, 'Anfrage', 'Anfragen')}`}
               onPointerEnter=${() => setHover(i)} onPointerLeave=${() => setHover(null)} onFocus=${() => setHover(i)} onBlur=${() => setHover(null)} />
             ${h > 0 ? html`<path class=${cx('bar', i === lastIdx && 'is-today', hover === i && 'is-hover')} d=${topRounded(x, pad.top + plotH - h, barW, h, 4)} />`

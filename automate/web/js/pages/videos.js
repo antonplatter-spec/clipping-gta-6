@@ -55,7 +55,7 @@ export function VideosPage({ route }) {
       <div class="field"><span class="field-label" id="posted-l">Status</span>
         <${Segmented} label="Status" value=${filters.posted} onChange=${(v) => setQuery({ posted: v })}
           options=${[{ value: '', label: 'Alle' }, { value: '0', label: 'Offen' }, { value: '1', label: 'Gepostet' }]} /></div>
-      <div class="field" style="justify-content:flex-end;padding-bottom:7px"><${Toggle} checked=${!!filters.archived} label="Archiv"
+      <div class="field" style="justify-content:flex-end;padding-bottom:7px"><${Toggle} checked=${!!filters.archived} label="Archiv zeigen"
         onChange=${(v) => setQuery({ archived: v ? '1' : '' })} /></div>
     </div>
     ${list.error && !list.data ? html`<${ErrorState} error=${list.error} onRetry=${list.reload} />`

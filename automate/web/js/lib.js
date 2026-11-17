@@ -1,9 +1,9 @@
 // Small runtime shared by every page: view library, router, German formatting, polling, toasts, clipboard.
-import { h, render, Fragment, createContext, createPortal } from '../vendor/preact.mjs';
+import { h, render, Fragment, createContext, createPortal } from '../vendor/preact.js';
 import {
   useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, useContext, useReducer, useId,
-} from '../vendor/preact-hooks.mjs';
-import htm from '../vendor/htm.mjs';
+} from '../vendor/preact-hooks.js';
+import htm from '../vendor/htm.js';
 
 export const html = htm.bind(h);
 export {
@@ -145,7 +145,7 @@ export const fmt = {
     const diff = ts - now;
     const a = Math.abs(diff);
     let v;
-    if (a < 45) return diff < 0 ? 'gerade eben' : 'gleich';
+    if (a < 45) return 'gerade eben';
     if (a < 3600) v = `${Math.max(1, Math.round(a / 60))} Min.`;
     else if (a < 86400) v = `${Math.round(a / 3600)} Std.`;
     else v = `${Math.round(a / 86400)} ${Math.round(a / 86400) === 1 ? 'Tag' : 'Tagen'}`;
