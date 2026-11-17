@@ -168,7 +168,7 @@ def serve(argv):
         return 1
     if not _port_free(args.host, args.port):
         print(f"Port {args.port} ist schon belegt (ein anderes Programm?). Starte mit einem anderen Port, z. B. "
-              f"„uv run python -m automate --port {args.port + 1}“.", file=sys.stderr)
+              f"„./start.sh --port {args.port + 1}“.", file=sys.stderr)
         return 1
     log_file = _setup_logging()
     from .api import auth

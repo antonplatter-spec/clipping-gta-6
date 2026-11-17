@@ -134,7 +134,7 @@ function AccountStep({ state }) {
     <${TextField} label="Einrichtungs-Code" value=${token} onInput=${setToken} autocomplete="off" autocapitalize="characters"
       spellcheck="false" required inputClass="mono" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" error=${fields.token}
       help=${pending.token && token === pending.token ? 'Aus dem Link übernommen, den der Server beim Start geöffnet hat.'
-        : 'Steht im Terminal, in dem „uv run python -m automate“ läuft (Zeile „Einrichtungs-Code“). Nur wer diesen Code hat, kann das Konto anlegen.'} />
+        : 'Steht im Terminal, in dem der Server läuft (./start.sh), Zeile „Einrichtungs-Code“. Einen neuen zeigt „uv run python -m automate reset-login“.'} />
     <${TextField} label="Benutzername" value=${username} onInput=${setUsername} autocomplete="username" autocapitalize="off"
       spellcheck="false" required error=${fields.username} autofocus />
     <div class="form-grid">

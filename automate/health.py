@@ -66,20 +66,19 @@ def _hint(name):
     return {
         "ffmpeg": "brew install ffmpeg" if mac else "sudo apt install ffmpeg",
         "ffprobe": "kommt mit ffmpeg: " + ("brew install ffmpeg" if mac else "sudo apt install ffmpeg"),
-        "yt-dlp": ("brew install yt-dlp" if mac else "uv tool install yt-dlp")
-        + " – regelmäßig aktualisieren (" + ("brew upgrade yt-dlp" if mac else "uv tool upgrade yt-dlp")
-        + "), YouTube ändert sich oft",
-        "parakeet": "uv sync (onnx-asr gehört zum Projekt); das Modell (~650 MB) lädt die erste Analyse von "
+        "yt-dlp": "./start.sh (yt-dlp gehört zu den Python-Paketen); scheitern Downloads: uv lock --upgrade-package "
+                  "yt-dlp, dann den Server neu starten",
+        "parakeet": "./start.sh (onnx-asr gehört zum Projekt); das Modell (~650 MB) lädt die erste Analyse von "
                     "huggingface.co",
         "whisper.cpp": "brew install whisper-cpp" if mac else f"{setup} (baut whisper.cpp)",
         "whisper-modell": f"{setup} (lädt das Modell, ~550 MB)",
-        "demucs": f"{setup} oder uv tool install demucs (lädt PyTorch, mehrere GB)",
+        "demucs": "Server beenden, dann ./start.sh --stimmen (lädt PyTorch: Linux rund 3 GB, Mac rund 250 MB)",
         "whisperkit": "brew install whisperkit-cli" if mac else "nur auf macOS – unter Linux/WSL haben die Untertitel "
                                                                 "keine Sprechererkennung",
         "espeak-ng": "sudo apt install espeak-ng",
         "say": "in macOS eingebaut",
-        "python-pakete": "uv sync",
-        "python": "Python 3.10 oder neuer installieren, dann uv sync",
+        "python-pakete": "Server beenden, dann ./start.sh (installiert die Python-Pakete)",
+        "python": "./start.sh (uv installiert ein passendes Python, wenn keins da ist)",
     }.get(name)
 
 
