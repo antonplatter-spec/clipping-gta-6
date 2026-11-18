@@ -249,11 +249,27 @@ function SecondsInput({ value, onChange, max, label }) {
     <span class="muted small">s</span></span>`;
 }
 
+const soundName = (t) => `${t.title || t.id} · ${(SOUND_ROLES[t.role] || {}).label || t.role}${t.source === 'own' ? ' · eigener' : ''}`;
+
+/** Why a library sound can't play for the pick's profile, in short (the render then takes another of its role). */
+function soundOffShort(t) {
+  return t.exists === false ? 'Datei fehlt' : !t.approved ? 'ausgeschaltet' : 'Content-ID-gefährdet, im Profil gesperrt';
+}
+
+/** Only playable sounds are offered; `sounds` undefined = library not loaded (yet): nothing is marked. */
 function soundOptions(sounds) {
   const roles = Object.entries(SOUND_ROLES).map(([v, r]) => ({ value: v, label: `${r.label} (passend gewählt)` }));
-  const own = (sounds || []).filter((t) => t.kind === 'hit' && t.usable && !SOUND_ROLES[t.id])
-    .map((t) => ({ value: t.id, label: `${t.title || t.id} · ${(SOUND_ROLES[t.role] || {}).label || t.role}${t.source === 'own' ? ' · eigener' : ''}` }));
-  return { roles, own };
+  const hits = (sounds || []).filter((t) => t.kind === 'hit' && !SOUND_ROLES[t.id]);
+  const own = hits.filter((t) => t.usable).map((t) => ({ value: t.id, label: soundName(t) }));
+  const byId = Object.fromEntries(hits.map((t) => [t.id, t]));
+  /** The option for a sound the pick names that isn't offered: switched off (marked) or gone from the library. */
+  const extra = (id) => {
+    if (!id || SOUND_ROLES[id] || own.some((o) => o.value === id) || !sounds) return null;
+    const t = byId[id];
+    return t ? { value: id, label: `${soundName(t)} (${soundOffShort(t)})`, off: `${soundOffShort(t)} – der Render nimmt einen anderen Sound dieser Rolle` }
+      : { value: id, label: `${id} (gelöscht)`, off: 'nicht mehr in der Bibliothek – der Render nimmt einen anderen Sound' };
+  };
+  return { roles, own, extra };
 }
 
 export function FxEditor({ mode, items, onMode, onItems, offset, duration, cursor, sounds, error }) {
@@ -279,6 +295,7 @@ export function FxEditor({ mode, items, onMode, onItems, offset, duration, curso
         const t = at(f.t);
         const out = t < 0 || t >= duration;
         const tight = f.type === 'hit' && f.sound === 'riser' && t < 0.5;
+        const gone = f.type === 'hit' ? opts.extra(f.sound) : null;
         return html`<li class=${cx('beat', out && 'has-fail')} key=${i}>
           <span class="beat-label">bei</span>
           <${SecondsInput} value=${t} max=${duration} label=${`Effekt ${i + 1}: Sekunde im Clip`} onChange=${(v) => upd(i, { t: r2(offset + v) })} />
@@ -288,7 +305,7 @@ export function FxEditor({ mode, items, onMode, onItems, offset, duration, curso
               onChange=${(e) => upd(i, { sound: e.currentTarget.value })}>
             <optgroup label="Nach Rolle">${opts.roles.map((o) => html`<option value=${o.value}>${o.label}</option>`)}</optgroup>
             ${opts.own.length > 0 && html`<optgroup label="Bestimmter Sound">${opts.own.map((o) => html`<option value=${o.value}>${o.label}</option>`)}</optgroup>`}
-            ${f.sound && !SOUND_ROLES[f.sound] && !opts.own.some((o) => o.value === f.sound) && html`<option value=${f.sound}>${f.sound} (nicht mehr da)</option>`}
+            ${gone && html`<option value=${gone.value}>${gone.label}</option>`}
           </select><${Icon} name="chevron-down" size=${14} class="select-caret" /></div>`}
           ${f.type === 'flash' && html`<div class="select-wrap grow"><select class="input input-sm select" value=${f.color || 'lime'} aria-label=${`Effekt ${i + 1}: Farbe`}
               onChange=${(e) => upd(i, { color: e.currentTarget.value })}>
@@ -299,6 +316,8 @@ export function FxEditor({ mode, items, onMode, onItems, offset, duration, curso
           <${IconButton} icon="trash" size="sm" label=${`Effekt ${i + 1} entfernen`} onClick=${() => onItems(items.filter((_, j) => j !== i))} />
           ${(out || tight) && html`<p class="issue issue-fail beat-note"><${Icon} name="alert-circle" size=${13} />
             <span>${out ? `Liegt außerhalb des Clips (0–${clockD(duration)}).` : 'Ein Riser braucht davor Platz: mindestens 0,5 s nach Clipbeginn.'}</span></p>`}
+          ${gone && html`<p class="issue issue-note beat-note"><${Icon} name="alert" size=${13} />
+            <span>„${gone.value}“: ${gone.off}. Wähle oben einen anderen Sound oder eine Rolle.</span></p>`}
         </li>`;
       })}
       ${!items.length && html`<li class="muted small">Noch keine Effekte – unten hinzufügen. Leer gespeichert heißt: keine Effekte.</li>`}

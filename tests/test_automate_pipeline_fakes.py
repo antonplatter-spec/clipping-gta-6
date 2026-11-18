@@ -86,6 +86,11 @@ class FakeClipper:
         self.render_active = self.render_max = 0
         self.seen_audio = None
         self.bad_videos = []      # one list of broken file names (or None) per `verify_videos` call
+        self.library = [          # bridge `music_library` (`usable` as clipper.music.usable says for the profile)
+            {"id": "boom", "kind": "hit", "role": "impact", "approved": True, "usable": True, "exists": True},
+            {"id": "my-riser", "kind": "hit", "role": "riser", "approved": True, "usable": True, "exists": True},
+            {"id": "quirky", "kind": "music", "mood": "funny", "approved": True, "usable": True, "exists": True}]
+        self.library_profiles = []  # the profile of each `music_library` call
 
     @staticmethod
     def after_dashes(args):
@@ -264,9 +269,8 @@ class FakeClipper:
                     fails = True
             return {"report": report, "fails": fails}
         if op == "music_library":
-            return {"tracks": [{"id": "boom", "kind": "hit", "role": "impact", "usable": True},
-                               {"id": "my-riser", "kind": "hit", "role": "riser", "usable": True},
-                               {"id": "quirky", "kind": "music", "mood": "funny", "usable": True}]}
+            self.library_profiles.append(profile)
+            return {"tracks": [dict(t) for t in self.library]}
         if op == "verify_videos":
             bad = (self.bad_videos.pop(0) if self.bad_videos else None) or []
             return {"videos": [{"file": f, "ok": Path(f).name not in bad, "width": 1080, "height": 1920,

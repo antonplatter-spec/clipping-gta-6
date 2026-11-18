@@ -901,7 +901,8 @@ export const putResearch = (body) => request('PUT', '/research', { body });
  * @property {number|null} beat_at  seconds into the file where its beat is (when the library says)
  * @property {boolean} claimable can get a Content-ID claim
  * @property {boolean} approved
- * @property {boolean} usable    approved and file present (and not blocked as claimable)
+ * @property {boolean} usable    the render can play it for that profile: approved, file present, and not Content-ID
+ *                               claimable unless the profile's music.allow_claimable is on (clipper.music.usable)
  * @property {boolean} local     defined in assets/music/local/library.yaml
  * @property {"own"|"built-in"} source  own = uploaded (or added by hand) in assets/music/local/
  * @property {string|null} title  the original file name of an own sound
@@ -909,10 +910,11 @@ export const putResearch = (body) => request('PUT', '/research', { body });
  */
 
 /**
- * GET /api/assets
+ * GET /api/assets[?profile=] — `usable` of each track holds for that profile (default: the default profile).
+ * @param {string} [profile]
  * @returns {Promise<{fonts: Array<{name: string, file: string, license?: string|null}>, music: MusicTrack[]}>}
  */
-export const getAssets = () => request('GET', '/assets');
+export const getAssets = (profile) => request('GET', '/assets', { params: profile ? { profile } : undefined });
 
 /** PATCH /api/assets/music/{id} @param {string} id @param {{approved: boolean}} body @returns {Promise<MusicTrack>} */
 export const updateMusic = (id, body) => request('PATCH', `/assets/music/${encodeURIComponent(id)}`, { body });

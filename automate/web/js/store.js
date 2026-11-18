@@ -35,15 +35,20 @@ export function loadProfiles(force = false) {
 }
 export function invalidateProfiles() { profilesCache = { at: 0, promise: null }; }
 
-/** The music library (sounds by role for the effects editor); cached for a minute, dropped after an upload/delete. */
-let soundsCache = { at: 0, promise: null };
-export function loadSounds(force = false) {
-  if (force || !soundsCache.promise || Date.now() - soundsCache.at > 60000) {
-    soundsCache = { at: Date.now(), promise: api.getAssets().then((d) => d.music || []).catch((e) => { soundsCache.at = 0; throw e; }) };
+/** The music library (sounds by role for the effects editor) with `usable` for that profile (approved, and not
+ * Content-ID claimable unless the profile allows it); per profile, cached for a minute, dropped after an
+ * upload/delete/switch. */
+let soundsCache = {};
+export function loadSounds(profile = '', force = false) {
+  const c = soundsCache[profile];
+  if (force || !c || Date.now() - c.at > 60000) {
+    const entry = { at: Date.now(), promise: null };
+    entry.promise = api.getAssets(profile || undefined).then((d) => d.music || []).catch((e) => { entry.at = 0; throw e; });
+    soundsCache[profile] = entry;
   }
-  return soundsCache.promise;
+  return soundsCache[profile].promise;
 }
-export function invalidateSounds() { soundsCache = { at: 0, promise: null }; }
+export function invalidateSounds() { soundsCache = {}; }
 
 /** The caption, hook and sound defaults from Einstellungen (watchlist.yaml + overrides), for "Standard (…)" labels. */
 let styleCache = { at: 0, promise: null };

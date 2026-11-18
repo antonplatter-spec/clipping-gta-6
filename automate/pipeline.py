@@ -1900,7 +1900,18 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def _fx_error(items, lo, hi, sound_ids):
+def _sound_off(track):
+    """Why a known hit sound can't play (German), or None when it can (clipper.music.usable, for the pick's profile)."""
+    if track.get("usable"):
+        return None
+    if not track.get("exists", True):
+        return "seine Datei fehlt"
+    if not track.get("approved"):
+        return "er ist ausgeschaltet (Einstellungen → Assets)"
+    return "er kann einen Content-ID-Claim auslösen und ist für dieses Profil gesperrt"
+
+
+def _fx_error(items, lo, hi, sounds, keep=()):
     if not isinstance(items, list) or len(items) > MAX_FX:
         return f"Liste mit höchstens {MAX_FX} Effekten (leer = keine Effekte, null = automatisch)"
     for i, f in enumerate(items, 1):
@@ -1917,9 +1928,13 @@ def _fx_error(items, lo, hi, sound_ids):
             return f"Effekt {i}: unbekannte Farbe (white, red, orange, lime oder #RRGGBB)"
         if "sound" in f and f["type"] != "hit":
             return f"Effekt {i}: einen Sound gibt es nur bei der Art Sound"
-        if "sound" in f and not (isinstance(f["sound"], str) and (f["sound"] in style.SOUND_ROLES
-                                                                  or sound_ids is None or f["sound"] in sound_ids)):
+        if "sound" in f and not (isinstance(f["sound"], str) and (f["sound"] in style.SOUND_ROLES or sounds is None
+                                                                  or f["sound"] in sounds or f["sound"] in keep)):
             return f"Effekt {i}: den Sound „{f['sound']}“ gibt es nicht (mehr) in der Bibliothek"
+        why = sounds and f.get("sound") in sounds and f["sound"] not in keep and _sound_off(sounds[f["sound"]])
+        if why:
+            return (f"Effekt {i}: den Sound „{f['sound']}“ kannst du nicht wählen – {why}. Nimm einen anderen "
+                    "oder eine Rolle")
     return None
 
 
@@ -1938,9 +1953,12 @@ def _music_error(items, lo, hi):
     return None
 
 
-def _edit_errors(data, changes, sound_ids=None):
-    """{field: German message} for a PATCH body of /api/picks/{id}. `sound_ids`: the hit sounds of the music
-    library (None: not checked here; `clipper check` checks them anyway)."""
+def _edit_errors(data, changes, sounds=None):
+    """{field: German message} for a PATCH body of /api/picks/{id}. `sounds`: {id: track} of the music library's hit
+    sounds as bridge `music_library` lists them for the pick's profile (None: not checked here; `clipper check` checks
+    the ids anyway). A named sound must be usable; one the saved pick already names stays allowed after it was
+    switched off or deleted (the render takes another of its role, the Freigabe marks it), so other edits to the
+    effects still save."""
     errs = {k: "Dieses Feld lässt sich nicht bearbeiten" for k in changes if k not in EDITABLE}
 
     def strings(key, lo, hi):
@@ -1989,7 +2007,8 @@ def _edit_errors(data, changes, sound_ids=None):
         lo, hi = _clip_window(data, changes)
     except (KeyError, TypeError, ValueError):
         lo, hi = 0.0, float("inf")
-    checks = (("fx", lambda v: _fx_error(v, lo, hi, sound_ids)), ("music", lambda v: _music_error(v, lo, hi)))
+    keep = {f["sound"] for f in data.get("fx") or [] if isinstance(f, dict) and isinstance(f.get("sound"), str)}
+    checks = (("fx", lambda v: _fx_error(v, lo, hi, sounds, keep)), ("music", lambda v: _music_error(v, lo, hi)))
     for key, check in checks:
         if changes.get(key) is not None and not {"start", "end"} & set(errs):
             msg = check(changes[key])
@@ -1998,8 +2017,9 @@ def _edit_errors(data, changes, sound_ids=None):
     return errs
 
 
-def _hit_sound_ids(changes, profile):
-    """The library's hit sound ids when the edit names a sound that isn't a role, else None (no lookup)."""
+def _hit_sounds(changes, profile):
+    """{id: track} of the library's hit sounds (with `usable` for this profile) when the edit names a sound that isn't
+    a role, else None (no lookup)."""
     named = [f.get("sound") for f in changes.get("fx") or [] if isinstance(f, dict) and f.get("sound")]
     if not any(isinstance(x, str) and x not in style.SOUND_ROLES for x in named):
         return None
@@ -2008,7 +2028,7 @@ def _hit_sound_ids(changes, profile):
     except runtime.BridgeError as e:
         log.warning("music library for a pick edit: %s", e.message)
         return None
-    return {t.get("id") for t in tracks if t.get("kind") == "hit"}
+    return {t["id"]: t for t in tracks if isinstance(t, dict) and t.get("kind") == "hit" and t.get("id")}
 
 
 def update_pick_data(pick_id, changes):
@@ -2021,7 +2041,7 @@ def update_pick_data(pick_id, changes):
         raise PipelineError(f"Nur offene Clips lassen sich bearbeiten (Status: {pick['status']}).", "not_proposed",
                             409)
     base = pick["data"] or {}
-    errs = _edit_errors(base, changes, _hit_sound_ids(changes, pick["profile"]))
+    errs = _edit_errors(base, changes, _hit_sounds(changes, pick["profile"]))
     if errs:
         raise PipelineError("Bitte prüfe die Eingaben.", "invalid", 422, errs)
     new = dict(base)

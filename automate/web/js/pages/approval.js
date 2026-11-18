@@ -39,14 +39,18 @@ export function ApprovalPage({ route }) {
   // The queue itself is never re-rendered under the owner's hands; a light poll only announces new picks.
   const probe = useData(() => api.listPicks({ status: 'proposed', profile, limit: 1 }), [profile], { interval: 15000 });
   const profiles = useData(() => loadProfiles(), []);
-  const sounds = useData(() => (isQueue ? loadSounds() : Promise.resolve([])), [isQueue]);
+  const items = list.data ? list.data.items || [] : [];
+  // the sounds each pick's profile can play (a Content-ID sound may be allowed in one profile only)
+  const pickProfiles = [...new Set(items.map((p) => p.profile))].sort().join('\n');
+  const sounds = useData(() => (isQueue && pickProfiles
+    ? Promise.all(pickProfiles.split('\n').map((p) => loadSounds(p).then((t) => [p, t]))).then(Object.fromEntries)
+    : Promise.resolve({})), [isQueue, pickProfiles]);
   const styleDefaults = useData(() => (isQueue ? loadStyleDefaults() : Promise.resolve({})), [isQueue]);
   const [selected, setSelected] = useState(new Set());
   const [dirty, setDirty] = useState(new Set());
   const [bulkBusy, setBulkBusy] = useState(null);
   useEffect(() => { setSelected(new Set()); }, [tab.id, profile, offset]);
 
-  const items = list.data ? list.data.items || [] : [];
   const counts = (probe.data && probe.data.counts) || (list.data && list.data.counts) || {};
   const tabCount = (t) => t.status.split(',').reduce((n, s) => n + (counts[s] || 0), 0);
   const newCount = isQueue && probe.data && list.data ? Math.max(0, probe.data.total - list.data.total) : 0;
@@ -122,7 +126,7 @@ export function ApprovalPage({ route }) {
       : html`<div class="stack-lg">
           ${items.map((p) => (isQueue
             ? html`<${PickEditor} key=${p.id} pick=${p} focus=${focusId === p.id} selected=${selected.has(p.id)}
-                sounds=${sounds.data} defaults=${styleDefaults.data}
+                sounds=${sounds.data && sounds.data[p.profile]} defaults=${styleDefaults.data}
                 onSelect=${(on) => setSelected((s) => { const n = new Set(s); if (on) n.add(p.id); else n.delete(p.id); return n; })}
                 onDone=${(id) => removeLocal([id])} onSaved=${replaceLocal} onDirty=${(d) => markDirty(p.id, d)} />`
             : html`<${PickHistory} key=${p.id} pick=${p} />`))}

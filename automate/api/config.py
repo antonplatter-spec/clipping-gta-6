@@ -7,7 +7,8 @@ the overlay is rewritten and the pipeline told (common.changed).
 
 Own sounds: POST /assets/music?name=&kind=hit|music&role=|mood=&claimable=0|1&approved=0|1 with the raw file as the
 body (no multipart: no extra dependency; at most MAX_SOUND_BYTES, server.py lets this one route past MAX_BODY). The
-body is streamed to data/tmp/uploads/<random>.upload, then bridge `add_sound` checks it with ffprobe and files it
+body is streamed to data/tmp/uploads/<random>.upload (every file operation in the threadpool, so a big upload never
+stalls the event loop and the dashboard's polling), then bridge `add_sound` checks it with ffprobe and files it
 under a server-chosen name in assets/music/local/; the upload is always deleted. DELETE /assets/music/{id} removes an
 own sound (bridge `remove_sound`). GET /assets/music/{id}/file streams any library sound (Range support) found by id
 in library.yaml or local/library.yaml, only from inside the music folder.
@@ -124,15 +125,22 @@ def _fonts():
     return out
 
 
-def _music():
+def _music(profile=None):
+    """The library; `usable` (clipper.music.usable: approved, and not Content-ID claimable unless that profile's
+    music.allow_claimable is on, and on disk) is for `profile`, the default profile when None."""
     with mapped():
-        data = runtime.run_bridge("music_library", {}, store.get_setting("ui.default_profile"), timeout=120)
+        data = runtime.run_bridge("music_library", {}, profile or store.get_setting("ui.default_profile"),
+                                  timeout=120)
     return [t for t in data.get("tracks") or [] if isinstance(t, dict)]
 
 
 @router.get("/assets")
-def get_assets():
-    return {"fonts": _fonts(), "music": _music()}
+def get_assets(profile: str | None = Query(None)):
+    """Fonts and the music library; ?profile= says for which profile `usable` holds (the Freigabe asks for each
+    pick's profile)."""
+    if profile and not store.get_profile(profile):
+        raise invalid({"profile": "Unbekanntes Profil."})
+    return {"fonts": _fonts(), "music": _music(profile)}
 
 
 @router.patch("/assets/music/{track_id}")
@@ -151,6 +159,33 @@ def update_music(track_id: str, body: dict | None = Body(None)):
 
 def _profile():
     return store.get_setting("ui.default_profile")
+
+
+def _create(path):
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    return open(path, "xb")
+
+
+def _append(f, chunk):
+    f.write(chunk)
+
+
+async def _receive(request, path):
+    """Streams the body into `path` (a new file) and returns its size; 413 past MAX_SOUND_BYTES. Opening, writing and
+    closing run in the threadpool: they block on the disk, and the event loop serves every other request."""
+    size = 0
+    f = await anyio.to_thread.run_sync(_create, path)
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_SOUND_BYTES:
+                raise ApiError(413, "too_large", f"Die Datei ist zu groß (höchstens "
+                                                 f"{MAX_SOUND_BYTES // (1024 * 1024)} MB).")
+            if chunk:
+                await anyio.to_thread.run_sync(_append, f, chunk)
+    finally:
+        await anyio.to_thread.run_sync(f.close)
+    return size
 
 
 @router.post("/assets/music")
@@ -175,19 +210,10 @@ async def upload_sound(request: Request, name: str = Query(""), kind: str = Quer
             errors[key] = "0 oder 1."
     if errors:
         raise invalid(errors)
-    inbox = paths.ensure_data_dir() / "tmp" / "uploads"
-    inbox.mkdir(mode=0o700, exist_ok=True)
-    tmp = inbox / f"{secrets.token_hex(12)}.upload"
+    data = await anyio.to_thread.run_sync(paths.ensure_data_dir)
+    tmp = data / "tmp" / "uploads" / f"{secrets.token_hex(12)}.upload"
     try:
-        size = 0
-        with open(tmp, "xb") as f:
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > MAX_SOUND_BYTES:
-                    raise ApiError(413, "too_large", f"Die Datei ist zu groß (höchstens "
-                                                     f"{MAX_SOUND_BYTES // (1024 * 1024)} MB).")
-                f.write(chunk)
-        if not size:
+        if not await _receive(request, tmp):
             raise invalid({"file": "Die Datei ist leer."}, "Die Datei ist leer.")
         payload = {"path": str(tmp), "name": base, "kind": kind, "role": role or None, "mood": mood or None,
                    "claimable": bool(claimable), "approved": bool(approved)}
@@ -195,7 +221,7 @@ async def upload_sound(request: Request, name: str = Query(""), kind: str = Quer
             res = await anyio.to_thread.run_sync(
                 lambda: runtime.run_bridge("add_sound", payload, _profile(), timeout=300))
     finally:
-        tmp.unlink(missing_ok=True)
+        await anyio.to_thread.run_sync(lambda: tmp.unlink(missing_ok=True))
     if res.get("problem"):
         raise invalid({"file": res["problem"]}, res["problem"])
     changed(["assets.music"], overlay=False)

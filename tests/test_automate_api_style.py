@@ -3,6 +3,7 @@ hook and sound keys, the layout preview stills (safe, cached, bounded), the rend
 and sound defaults in the watchlist overlay, and the owner's own sounds (listen, upload with abuse cases, delete).
 Same harness as tests/test_automate_api.py: a temp data dir, the app without background services, the other
 modules faked; nothing here needs ffmpeg (the bridge and `clipper preview` are faked)."""
+import asyncio
 import json
 import os
 import sys
@@ -312,6 +313,39 @@ class SoundTests(ApiCase):
         r = self.c.delete("/api/assets/music/boom")
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "not_removable"))
         self.assertIn("nur sperren", r.json()["error"]["message"])
+
+    def test_the_upload_is_written_in_the_threadpool_not_on_the_event_loop(self):
+        from automate.api import config
+        on_loop, real = [], config._append
+
+        def spy(f, chunk):
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:  # no event loop in this thread: a worker of the threadpool
+                on_loop.append(False)
+            real(f, chunk)
+
+        def chunks():
+            for i in range(3):
+                yield bytes([i]) * (256 * 1024)
+        with mock.patch.object(config, "_append", side_effect=spy):
+            r = self.c.post("/api/assets/music", params={"name": "a.wav", "kind": "hit", "role": "impact"},
+                            content=chunks())
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(on_loop)
+        self.assertNotIn(True, on_loop)
+        self.assertEqual(self.added[-1]["bytes"], b"".join(bytes([i]) * (256 * 1024) for i in range(3)))
+        self.assertEqual(list((paths.tmp_dir() / "uploads").iterdir()), [])
+
+    def test_assets_say_which_sounds_the_given_profile_can_play(self):
+        self.bridge_mock.reset_mock()
+        self.assertEqual(self.c.get("/api/assets", params={"profile": "gta6"}).status_code, 200)
+        lib = [c for c in self.bridge_mock.call_args_list if c.args[0] == "music_library"]
+        self.assertEqual(lib[-1].args[2], "gta6")
+        r = self.c.get("/api/assets", params={"profile": "nope"})
+        self.assertEqual((r.status_code, set(r.json()["error"]["fields"])), (422, {"profile"}))
+        self.assertEqual(self.c.get("/api/assets").status_code, 200)  # without: the default profile
 
     def test_upload_abuse_is_refused_in_german(self):
         r = self.upload(b"this is just text, not audio", name="fake.wav")

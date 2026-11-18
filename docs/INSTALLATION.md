@@ -438,6 +438,11 @@ prüft, dass die Datei wirklich Ton in diesem Format ist und eine passende Läng
 Rolle wählen, und in der Freigabe steht er unter *Bestimmter Sound*. Eigene Sounds lassen sich mit dem Papierkorb
 wieder löschen; mitgelieferte nur sperren.
 
+Gesperrte Sounds (und Content-ID-gefährdete, solange das Profil `music.allow_claimable` nicht erlaubt) bekommt Claude
+nicht angeboten, und die Freigabe lässt sie nicht neu auswählen. Nennt ein offener Clip schon einen Sound, der
+inzwischen gesperrt oder gelöscht ist, steht er dort mit *(ausgeschaltet)* bzw. *(gelöscht)* und dem Hinweis „der Render
+nimmt einen anderen Sound dieser Rolle“ – wähle einen anderen Sound oder eine Rolle, oder lass ihn so.
+
 ---
 
 ## 6. YouTube verbinden (optional)

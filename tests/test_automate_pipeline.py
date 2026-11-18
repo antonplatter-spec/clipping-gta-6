@@ -264,6 +264,45 @@ class LifecycleTests(Helpers):
         row, _ = pipeline.update_pick_data(pick["id"], {"caption_style": "comic", "caption_look": None})
         self.assertNotIn("caption_look", row["data"])
 
+    def test_edit_takes_only_sounds_the_profile_can_play_but_keeps_one_switched_off_since(self):
+        jid = self.gated()
+        pick, other = self.picks(jid)[:2]
+        beat = pick["data"]["start"] + 12.0
+        self.clip.library += [
+            {"id": "old-boom", "kind": "hit", "role": "impact", "approved": True, "usable": True, "exists": True},
+            {"id": "film-hit", "kind": "hit", "role": "impact", "approved": True, "claimable": True,
+             "usable": False, "exists": True},  # Content ID: this profile doesn't allow claimable sounds
+            {"id": "lost", "kind": "hit", "role": "whoosh", "approved": True, "usable": False, "exists": False}]
+        saved = [{"t": beat, "type": "hit", "sound": "old-boom"}]
+        pipeline.update_pick_data(pick["id"], {"fx": saved})
+        self.clip.library[3].update(approved=False, usable=False)  # switched off under Assets afterwards
+        self.assertEqual(set(self.clip.library_profiles), {pick["profile"]})  # usable for the pick's profile
+        for sound, want in (("film-hit", "Content-ID-Claim auslösen und ist für dieses Profil gesperrt"),
+                            ("lost", "seine Datei fehlt"), ("nope", "„nope“ gibt es nicht")):
+            with self.subTest(sound=sound), self.assertRaises(pipeline.PipelineError) as e:
+                pipeline.update_pick_data(pick["id"], {"fx": [{"t": beat, "type": "hit", "sound": sound}]})
+            self.assertIn(want, e.exception.fields["fx"])
+        # the pick that already names it still saves other effect edits (the render takes another impact) ...
+        row, _ = pipeline.update_pick_data(pick["id"], {"fx": [*saved, {"t": beat, "type": "flash"}]})
+        self.assertEqual([f.get("sound") for f in row["data"]["fx"]], ["old-boom", None])
+        del self.clip.library[3]  # deleted under Assets: the same
+        row, _ = pipeline.update_pick_data(pick["id"], {"fx": [*saved, {"t": beat + 1, "type": "zoom"}]})
+        self.assertEqual(row["data"]["fx"][0]["sound"], "old-boom")
+        self.clip.library.insert(3, {"id": "old-boom", "kind": "hit", "role": "impact", "approved": False,
+                                     "usable": False, "exists": True})
+        # ... but no other pick can choose it anew
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.update_pick_data(other["id"], {"fx": [{"t": other["data"]["start"] + 3, "type": "hit",
+                                                            "sound": "old-boom"}]})
+        self.assertIn("„old-boom“ kannst du nicht wählen – er ist ausgeschaltet (Einstellungen → Assets)",
+                      e.exception.fields["fx"])
+        row, _ = pipeline.update_pick_data(pick["id"], {"fx": [{"t": beat, "type": "hit", "sound": "boom"}]})
+        self.assertEqual(row["data"]["fx"][0]["sound"], "boom")
+        # a role never needs the library
+        n = len(self.clip.bridge_calls)
+        pipeline.update_pick_data(pick["id"], {"fx": [{"t": beat, "type": "hit", "sound": "impact"}]})
+        self.assertFalse([op for op, _ in self.clip.bridge_calls[n:] if op == "music_library"])
+
     def test_the_render_log_says_where_captions_went_and_what_sound_was_added(self):
         jid, pick, video = self.rendered_video()
         render = store.list_jobs(kind="render")[0][0]
