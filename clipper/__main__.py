@@ -11,6 +11,7 @@ from . import bench as bench_mod
 from . import cleanup as cleanup_mod
 from . import dub as dub_mod
 from . import live as live_mod
+from . import preview as preview_mod
 from . import setup as setup_mod
 
 
@@ -168,6 +169,15 @@ def main(argv=None):
     fr = sub.add_parser("frame", help="grab a gridded frame to locate the facecam for split layout")
     fr.add_argument("job")
     fr.add_argument("seconds", type=float)
+    pv = sub.add_parser("preview", help="one still of a pick as it will render (frame + hook + caption, the same "
+                                        "placement decision as the render), without rendering; prints JSON")
+    pv.add_argument("job")
+    pv.add_argument("--picks", help="picks JSON (default jobs/<id>/picks.json)")
+    pv.add_argument("--pick", type=int, required=True, help="which pick (1 = first)")
+    pv.add_argument("--at", type=float, help="seconds into the finished clip (default: the first caption while "
+                                             "the hook shows)")
+    pv.add_argument("--hook", type=int, default=1, help="which of the pick's hooks to draw (1 = first)")
+    pv.add_argument("--out", help="PNG to write (default jobs/<id>/review/preview_<N>.png)")
     args = p.parse_args(argv)
     config.load_env()
     cfg = config.load(args.config, args.profile)
@@ -319,6 +329,11 @@ def main(argv=None):
             print(f"no line matching '{args.pattern}' in the last {args.hours:g} h")
     elif args.cmd == "frame":
         print(analyze_mod.grid_frame(config.job_dir(args.job), args.seconds))
+    elif args.cmd == "preview":
+        job = config.job_dir(args.job)
+        picks = json.loads(Path(args.picks or job / "picks.json").read_text(encoding="utf-8"))
+        print(json.dumps(preview_mod.preview(job, picks, args.pick, args.at, args.hook, args.out, cfg), indent=2,
+                         ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -3,10 +3,24 @@
 # `music: {allow_claimable: true}`. `file` is relative to this folder; meme tracks the user approved go in
 # local/ (gitignored, copied to each machine by hand).
 #   kind: music | hit      mood (music): suspense | sneaky | epic | sad | funny
+#   role (hit): impact (starts on the beat) | riser (a build-up that ENDS on the beat) | whoosh (a cut) |
+#               tension (a bed that runs up to the beat; loops). A pick's hit can ask for a role by name
+#               ("sound": "riser") or for one sound by id; so an id must never be a role name.
+#   tags (hit): what the automatic sound asks for: big (the main beat), boom (other beats), sub, braam, swell, short
+#   beat_at (optional): seconds into the file where the beat is (a riser defaults to its end, the rest to 0), so
+#               your own riser-into-hit file lands right
+#   peak_lufs / length: the loudest 400 ms (momentary LUFS) and seconds; measured when left out
 tracks:
-  - {id: hit, file: hit.wav, kind: hit, mood: any, claimable: false, approved: true}
-  - {id: boom, file: boom.wav, kind: hit, mood: any, claimable: false, approved: true}
-  - {id: whoosh, file: whoosh.wav, kind: hit, mood: any, claimable: false, approved: true}
+  - {id: hit, file: hit.wav, kind: hit, role: impact, tags: [short], mood: any, claimable: false, approved: true, peak_lufs: -13.1, length: 0.6}
+  - {id: boom, file: boom.wav, kind: hit, role: impact, tags: [boom], mood: any, claimable: false, approved: true, peak_lufs: -9.7, length: 1.6}
+  - {id: whoosh, file: whoosh.wav, kind: hit, role: whoosh, mood: any, claimable: false, approved: true, peak_lufs: -10.2, length: 0.8}
+  # synthesized for this project by clipper/sfx.py (recipes in LICENSE.txt), CC0
+  - {id: cinematic-impact, file: cinematic-impact.wav, kind: hit, role: impact, tags: [big], mood: any, claimable: false, approved: true, peak_lufs: -10.6, length: 2.2}
+  - {id: braam, file: braam.wav, kind: hit, role: impact, tags: [big, braam], mood: any, claimable: false, approved: true, peak_lufs: -10.0, length: 2.6}
+  - {id: sub-drop, file: sub-drop.wav, kind: hit, role: impact, tags: [sub, boom], mood: any, claimable: false, approved: true, peak_lufs: -12.0, length: 2.0}
+  - {id: noise-riser, file: noise-riser.wav, kind: hit, role: riser, mood: any, claimable: false, approved: true, peak_lufs: -12.0, length: 3.0}
+  - {id: reverse-swell, file: reverse-swell.wav, kind: hit, role: riser, tags: [swell], mood: any, claimable: false, approved: true, peak_lufs: -12.2, length: 1.6}
+  - {id: heartbeat, file: heartbeat.wav, kind: hit, role: tension, mood: any, claimable: false, approved: true, peak_lufs: -18.0, length: 3.2}
   # CC0 music from OpenGameArt (see CREDITS.md); levelled to -18 LUFS, trimmed to 75s unless it's a short loop
   - {id: sad-emotional-piano-loop, file: sad-emotional-piano-loop.m4a, kind: music, mood: sad, claimable: false, approved: true}
   - {id: funny-quirky-jazz, file: funny-quirky-jazz.m4a, kind: music, mood: funny, claimable: false, approved: true}

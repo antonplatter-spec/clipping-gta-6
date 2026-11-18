@@ -7,7 +7,9 @@ import time
 from datetime import date
 from pathlib import Path
 
-from . import captions, music, signals, speakers, transcribe, tts
+import numpy as np
+
+from . import captions, music, placement, signals, sound, speakers, transcribe, tts
 from .analyze import fmt
 from . import config
 from .config import ROOT
@@ -145,8 +147,101 @@ def fx_filter(fx, dur):
     return ",".join(parts)
 
 
-def prepare_clip(job, pick, fallback_words, cfg, tmp):
-    """Per-clip work shared by every hook variant: voice separation, diarized captions, audio bed, voiceover."""
+ANALYSIS_FRAMES = 8
+
+
+def frame_specs(pick, job, meta, n=ANALYSIS_FRAMES):
+    """(source file, source seconds, layout) for n frames spread evenly over the finished clip (a story cut maps
+    each onto its segment's own source and layout)."""
+    srcs = pick_sources(pick, job, meta)
+    lays = [seg.get("layout") or pick.get("layout") or {"type": "fit"} for seg in pick["segments"]] \
+        if pick.get("segments") else [pick.get("layout") or {"type": "fit"}]
+    total = sum(s["end"] - s["start"] for s in srcs)
+    out = []
+    for k in range(n):
+        t = (k + 0.5) * total / n
+        for i, (src, lay) in enumerate(zip(srcs, lays)):
+            d = src["end"] - src["start"]
+            if t < d or i == len(srcs) - 1:
+                out.append((Path(src["job"]) / "source.mp4", src["start"] + max(0.0, min(t, d - 0.05)), lay))
+                break
+            t -= d
+    return out
+
+
+def clip_frames(specs, sizes=None):
+    """The composited canvas (the same video_filter the render uses, no captions) near each spec's time, at the
+    analysis scale: (n, 480, 270, 3) uint8, grabbed in parallel. None when fewer than 2 frames could be read."""
+    w, h = placement.FRAME_SIZE
+    sizes = {} if sizes is None else sizes
+    procs = []
+    for src, t, lay in specs:
+        try:
+            if str(src) not in sizes:
+                sizes[str(src)] = source_size(src)
+            vf = video_filter(lay, sizes[str(src)]) + f";[v1]scale={w}:{h},format=rgb24[o]"
+            # the keyframe at or before t: a frame near t is enough to judge a region, and it decodes one frame
+            # instead of a GOP (keyframes are fixed per file, so the same clip always gets the same frames)
+            procs.append(subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-threads", "2", "-noaccurate_seek",
+                                           "-ss", f"{t:.3f}", "-i", str(src), "-filter_complex", vf, "-map", "[o]",
+                                           "-frames:v", "1", "-f", "rawvideo", "-"], stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            continue
+    frames = []
+    for p in procs:
+        try:
+            out, _ = p.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            continue
+        if p.returncode == 0 and len(out) == w * h * 3:
+            frames.append(np.frombuffer(out, np.uint8).reshape(h, w, 3))
+    return np.stack(frames) if len(frames) >= 2 else None
+
+
+def clip_plan(pick, job, meta, cfg, hooks, dur=None):
+    """Caption and hook placement for a pick (placement.plan), from frames of its own footage: decided once, shared
+    by every hook variant and by `clipper preview`. `hooks` = the banners that will be drawn ([] for none)."""
+    from .hooks import pick_duration
+    specs, sizes = (frame_specs(pick, job, meta) if job is not None else []), {}
+    frames = clip_frames(specs, sizes) if specs else None
+    fit = next((sizes.get(str(src)) for src, _, lay in specs if lay.get("type", "fit") == "fit"
+                and sizes.get(str(src))), None)
+    fp = footage(pick, job, meta)[0] if job is not None else {"source": meta.get("id"), "from": pick.get("start", 0)}
+    try:
+        dur = pick_duration(pick) if dur is None else dur
+    except (KeyError, TypeError, ValueError):
+        dur = None
+    return placement.plan(pick, cfg, frames, fit or (1920, 1080), hooks, dur, f"{fp['source']}:{fp['from']:.2f}")
+
+
+def bed_loudness(bed):
+    try:
+        return signals.integrated_loudness(bed)
+    except Exception:  # an unreadable bed only loses the levelling of the sounds
+        return None
+
+
+def sound_summary(pick, level, level_src, beats, layers):
+    """What the render result and upload.json say about the clip's added sound."""
+    placed = [{"id": str(t.get("id") or t.get("file")), "role": music.role(t) or k, "start": s,
+               "end": round(s + l, 3), "gain_db": t.get("gain_db", 0.0)} for t, s, l, k in layers]
+    if pick.get("music") == []:
+        text = "Sound: kein zusätzlicher Ton (im Clip so festgelegt)"
+    elif pick.get("fx") == []:
+        text = "Sound: keine Effekte (im Clip so festgelegt)"
+    elif pick.get("fx") is not None:
+        text = f"Sound: wie im Clip festgelegt ({sum(1 for f in pick['fx'] if f.get('type') == 'hit')} Effekte)"
+    else:
+        text = sound.describe(level, beats)
+    return {"level": level, "level_source": level_src, "auto": pick.get("fx") is None and pick.get("music") != [],
+            "beats": beats, "layers": placed, "text_de": text}
+
+
+def prepare_clip(job, pick, fallback_words, cfg, tmp, plan=None):
+    """Per-clip work shared by every hook variant: voice separation, diarized captions, audio bed, voiceover.
+    `plan` (clip_plan) places the captions; None keeps the classic place and look."""
     s, e = float(pick["start"]), float(pick["end"])
     dur = e - s
     clip_wav = tmp / "clip.wav"
@@ -175,19 +270,65 @@ def prepare_clip(job, pick, fallback_words, cfg, tmp):
     layout = pick.get("layout") or {"type": "fit"}
     caps = captions.write_overlay(words, 0.0, dur, tmp / "caps", caption_layout(layout),
                                   pick.get("caption_style") or cfg.get("caption_style", "bold"),
-                                  cfg.get("censor_captions", True))
+                                  cfg.get("censor_captions", True), plan=(plan or {}).get("captions"))
     vo = None
     if pick.get("voiceover"):
         vo_path = tmp / "vo.wav"
         vo_dur, provider = tts.synth(pick["voiceover"], cfg, vo_path)
         vo = {"path": vo_path, "duration": vo_dur, "provider": provider}
     fx = clip_fx(pick, words, dur)
+    level, level_src = sound.level_of(pick, cfg)
+    beats = {"fx": [], "windows": [], "beats": []}
+    if pick.get("fx") is None:  # no fx of its own: the scored beats replace the plain payoff hit
+        fx = [f for f in fx if f["type"] != "hit"]
+        if pick.get("music") != [] and level != "off":
+            levels, hop = sound.envelope(clip_wav)
+            beats = sound.plan_beats(words, dur, pick.get("payoff_at"), level, levels, hop,
+                                     music_ok="music" not in pick)
+            fx = sorted(fx + beats["fx"], key=lambda f: f["t"])
     # music and hits go into the bed once per clip, so every hook variant gets the same mix before loudnorm
-    layers = music.plan(pick, words, fx, dur, cfg, seed=f"{job.name}:{s:.2f}")
+    layers = music.plan(pick, words, fx, dur, cfg, seed=f"{job.name}:{s:.2f}", extra=beats["windows"],
+                        bed_lufs=bed_loudness(bed) if any(f["type"] == "hit" for f in fx) or beats["windows"]
+                        else None, level_db=sound.LIMITS.get(level, {}).get("db", 0.0))
     bed, used = music.mix(bed, words, layers, dur, tmp / "bed_music.wav")
     speakers_found = len({w.get("spk", 0) for w in words if not w.get("label")})
     return {"captions": caps, "bed": bed, "vo": vo, "layout": layout, "speakers": speakers_found,
-            "transcript": source, "voices_separated": bool(stems), "words": words, "fx": fx, "music": used}
+            "transcript": source, "voices_separated": bool(stems), "words": words, "fx": fx, "music": used,
+            "plan": plan, "sound": sound_summary(pick, level, level_src, beats["beats"], layers)}
+
+
+LOUD = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+
+def audio_graph(prep, bed="3:a", vo="4:a", loud=LOUD):
+    """The final audio: the bed (ducked under the voiceover, if any), normalised by `loud`."""
+    if prep.get("vo"):
+        return (f"[{bed}]volume=0.25:enable='lt(t,{prep['vo']['duration'] + 0.2:.2f})'[g];[{vo}]volume=1.8[vo];"
+                f"[g][vo]amix=inputs=2:duration=first:normalize=0,{loud}[aout]")
+    return f"[{bed}]{loud}[aout]"
+
+
+def loudnorm_pass(prep, dur):
+    """The final loudness filter, measured once per clip (every variant has the same audio): a second, linear
+    loudnorm pass lands -14 LUFS and keeps the dynamics of the beats; the single pass if measuring fails."""
+    if "loudnorm" in prep:
+        return prep["loudnorm"]
+    cmd = ["ffmpeg", "-nostats", "-hide_banner", "-i", str(prep["bed"])]
+    if prep.get("vo"):
+        cmd += ["-i", str(prep["vo"]["path"])]
+    cmd += ["-filter_complex", audio_graph(prep, "0:a", "1:a", LOUD + ":print_format=json"), "-map", "[aout]",
+            "-t", f"{dur:.3f}", "-f", "null", "-"]
+    loud = LOUD
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        m = json.loads(re.findall(r"\{[^{}]*\}", res.stderr)[-1])
+        if float(m["input_i"]) > -70:
+            loud = (f"{LOUD}:measured_I={m['input_i']}:measured_LRA={m['input_lra']}:measured_TP={m['input_tp']}"
+                    f":measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true")
+    except Exception:  # no measurement: the single dynamic pass, as before
+        pass
+    prep["loudnorm"] = loud
+    return loud
 
 
 def encode_variant(job, pick, prep, hook, cfg, out_path, tmp):
@@ -195,7 +336,8 @@ def encode_variant(job, pick, prep, hook, cfg, out_path, tmp):
     dur = e - s
     layout = prep["layout"]
     hook_png = tmp / f"hook_{out_path.stem}.png"
-    captions.render_hook(hook, hook_png, pick.get("hook_style", "box"), caption_layout(layout))
+    hp = (prep.get("plan") or {}).get("hook")
+    banner = captions.render_hook(hook, hook_png, pick.get("hook_style", "box"), caption_layout(layout), hp)
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{s:.3f}", "-t", f"{dur:.3f}",
            "-i", str(job / "source.mp4"), "-f", "concat", "-safe", "0", "-i", str(prep["captions"]),
            "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(hook_png), "-i", str(prep["bed"])]
@@ -203,15 +345,14 @@ def encode_variant(job, pick, prep, hook, cfg, out_path, tmp):
     fxs = fx_filter(prep.get("fx"), dur)
     if fxs:  # zooms and flashes hit the video only; captions and hook stay put
         vf += f";[v1]{fxs}[v1x]"
+    fade = ""
+    if banner and hp and hp.get("seconds"):  # shown for the first N seconds, then fades out
+        fade = f",fade=t=out:st={max(0.0, hp['seconds'] - placement.HOOK_FADE_S):.2f}:d={placement.HOOK_FADE_S}:alpha=1"
     vf += (f";[1:v]fps=30,format=rgba[cap];[{'v1x' if fxs else 'v1'}][cap]overlay=0:0:eof_action=pass[v2];"
-           "[2:v]format=rgba[hk];[v2][hk]overlay=0:0[v]")
-    loud = "loudnorm=I=-14:TP=-1.5:LRA=11"
+           f"[2:v]format=rgba{fade}[hk];[v2][hk]overlay=0:0[v]")
     if prep["vo"]:
         cmd += ["-i", str(prep["vo"]["path"])]
-        af = (f"[3:a]volume=0.25:enable='lt(t,{prep['vo']['duration'] + 0.2:.2f})'[g];[4:a]volume=1.8[vo];"
-              f"[g][vo]amix=inputs=2:duration=first:normalize=0,{loud}[aout]")
-    else:
-        af = f"[3:a]{loud}[aout]"
+    af = audio_graph(prep, loud=loudnorm_pass(prep, dur) if prep.get("bed") else LOUD)
     cmd += ["-filter_complex", f"{vf};{af}", "-map", "[v]", "-map", "[aout]", "-r", "30",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-t", f"{dur:.3f}", "-movflags", "+faststart",
@@ -443,9 +584,11 @@ def no_hook_arm(pick, job, meta, share):
     return int(digest[:8], 16) / 0xFFFFFFFF < float(share)
 
 
-def upload_manifest(pick, meta, cfg, variants, titles, creds=None, job=None, music_used=None):
+def upload_manifest(pick, meta, cfg, variants, titles, creds=None, job=None, music_used=None, style=None,
+                    sound_used=None):
     """What a poster needs per MP4: its hook, hook type, paired title and the caption, plus the footage it uses
-    (so it's never posted twice), its predicted multiplier and when the moment happened (best-first queue)."""
+    (so it's never posted twice), its predicted multiplier and when the moment happened (best-first queue), and
+    how it was made: caption/hook placement (`placement`) and the added sound (`sound`)."""
     from .hooks import structures
     from .simulate import MODIFIERS, effect_table
     table = effect_table()
@@ -468,6 +611,11 @@ def upload_manifest(pick, meta, cfg, variants, titles, creds=None, job=None, mus
                     "source": creds[0][1], "sources": [link for _, link in creds],
                     "duration": v["check"].get("duration"), "footage": fp, "moment_at": when,
                     "predicted": pred.get(v["hook"]), "moment": moment, "music": list(music_used or [])})
+        if style:
+            out[-1]["placement"] = style
+        if sound_used:
+            out[-1]["sound"] = {k: sound_used[k] for k in ("level", "auto", "beats", "layers", "text_de")
+                                if k in sound_used}
     return out
 
 
@@ -499,6 +647,7 @@ def render(job, picks, cfg, first_hook_only=False, out_dir=None, top=0):
     first = next_video_number(out_dir)
     results = []
     for n, pick in enumerate(picks, first):
+        every_hook = pick.get("hooks") or [pick.get("hook", "")]  # the caption place keeps clear of all of them
         if top:  # only the best hook(s) get an MP4; the rest would never be posted
             pick = top_hooks(pick, cfg, top)
         hooks = pick.get("hooks") or [pick.get("hook", "")]
@@ -507,7 +656,7 @@ def render(job, picks, cfg, first_hook_only=False, out_dir=None, top=0):
         titles = pick.get("titles") or [pick.get("title") or hooks[0]]
         if no_hook_arm(pick, job, meta, cfg.get("no_hook_share", 0.33)):
             print(f"[render] video {n}: no-hook arm (one MP4, no banner, best title)", flush=True)
-            hooks, titles = [""], titles[:1]
+            hooks, titles, every_hook = [""], titles[:1], []
         folder = out_dir / f"video {n}"
         folder.mkdir()
         taken = set()
@@ -519,16 +668,19 @@ def render(job, picks, cfg, first_hook_only=False, out_dir=None, top=0):
                 print(f"[render] video {n}: joining {len(pick['segments'])} segments ...", flush=True)
                 src_job = tmp / "segments"
                 flat, words = build_segment_job(pick, job, cfg, src_job)
+            plan = clip_plan(pick, job, meta, cfg, every_hook)
+            print(f"[render] video {n}: {plan['text_de']}", flush=True)
             print(f"[render] video {n} ({n - first + 1} of {len(picks)}): separating voices + diarizing ...", flush=True)
-            prep = prepare_clip(src_job, flat, words, cfg, tmp)
+            prep = prepare_clip(src_job, flat, words, cfg, tmp, plan=plan)
             variants = []
             for i, hook in enumerate(hooks):
                 mp4 = folder / hook_filename(hook, taken)
                 print(f"[render]   {mp4.relative_to(out_dir)}", flush=True)
                 encode_variant(src_job, flat, prep, hook, cfg, mp4, tmp)
                 variants.append({"file": str(mp4), "hook": hook, "check": probe(mp4)})
+        style = placement.summary(plan)
         (folder / "upload.json").write_text(json.dumps(upload_manifest(pick, meta, cfg, variants, titles, creds, job,
-                                                                       prep.get("music")),
+                                                                       prep.get("music"), style, prep.get("sound")),
                                                        indent=2, ensure_ascii=False), encoding="utf-8")
         md = folder / "titles and description.md"
         md.write_text(clip_markdown(n, pick, meta, cfg, variants, prep, creds, float(flat["end"]) - float(flat["start"])),
@@ -543,5 +695,5 @@ def render(job, picks, cfg, first_hook_only=False, out_dir=None, top=0):
         index.write_text("".join(lines), encoding="utf-8")
         results.append({"video": n, "folder": str(folder), "titles": titles, "metadata": str(md), "speakers": prep["speakers"],
                         "transcript": prep["transcript"], "voiceover": prep["vo"]["provider"] if prep["vo"] else None,
-                        "variants": variants})
+                        "variants": variants, "placement": style, "sound": prep.get("sound")})
     return results

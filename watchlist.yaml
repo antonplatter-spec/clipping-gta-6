@@ -31,6 +31,24 @@ hype_words: [no way, oh my god, omg, what the, wtf, let's go, lets go, holy, ins
 # Default caption look (picks can override): bold = Montserrat Black outline,
 # boxed = Bebas Neue on black (Kai Cenat Live style), comic = Luckiest Guy (Typical Gamer style).
 caption_style: bold
+# Where captions and the hook sit, how big and in which look; each is also a pick key (the pick wins). `auto`
+# decides once per clip from a few frames of its footage: clear of the platforms' buttons and bars, of the
+# streamer's face, and on the calmest of a few slots (fit: high = on the blur above the game, low = on the blur
+# under it; split: seam = between facecam and game, high = on the game just under the seam, low = on the game
+# just above the bottom bar).
+caption_position: auto     # auto | high | seam | low | classic (the old fixed line: fit y 1420, split y 1380)
+caption_size: auto         # auto (small on the game, medium on the blur or the seam) | small | medium | large (old size)
+caption_look: auto         # auto (one look of the caption_style's family per clip, the same on every re-render)
+                           # | classic (the family's own look, as before) | a look id from caption_looks
+caption_looks: [bold, bold-word, bold-lime, bold-clean, boxed, boxed-word, boxed-lime, comic, comic-word, comic-orange]
+hook_size: auto            # auto (large on the blur in fit, small on the seam in split) | small | medium | large (old)
+hook_seconds: auto         # auto (fit: whole clip; split: reaction 3, gameplay 4, comedy and scenario 5, news and
+                           # showcase whole) | whole | 1-30 seconds, then a short fade
+# Sound on the epic beats of a clip whose pick has no `fx` (also a pick key): off | subtle (one impact) | normal (up
+# to 2 beats, a riser into the main one, a suspense bed on a quiet run-up) | strong (up to 3, longer risers).
+sound_level: normal
+# The look from before these keys: caption_position: classic, caption_size: large, caption_look: classic,
+# hook_size: large, hook_seconds: whole, sound_level: off.
 censor_captions: true      # mask swears in captions (F*CK, SH*T), drop slurs; the audio is untouched
 no_hook_share: 0.33        # this share of clips posts with no on-screen hook (upload.json arm: no-hook), to compare
 

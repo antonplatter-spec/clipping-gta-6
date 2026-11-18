@@ -285,17 +285,48 @@ def check_dead_air(pick, words):
     return out
 
 
-def check_fx(pick):
-    """Errors for flashes whose `color` the render would reject."""
-    from .render import flash_colour
+def check_fx(pick, lib=None):
+    """Errors for fx the render would reject or ignore: a flash `color` it can't read, a `type` it doesn't know, a
+    hit `sound` that is neither a sound id in the music library nor a role (impact, riser, whoosh, tension)."""
+    from . import music
+    from .render import FX_TYPES, flash_colour
     out = []
+    ids = None
     for f in pick.get("fx") or []:
-        if isinstance(f, dict) and f.get("type") == "flash" and f.get("color") is not None:
+        if not isinstance(f, dict):
+            continue
+        if f.get("type") not in FX_TYPES:
+            out.append(f"fx type {f.get('type')!r} isn't one of: {', '.join(FX_TYPES)}")
+        if f.get("type") == "flash" and f.get("color") is not None:
             try:
                 flash_colour(f["color"])
             except ValueError as e:
                 out.append(str(e))
+        if f.get("type") == "hit" and f.get("sound") is not None:
+            if ids is None:
+                ids = [t["id"] for t in (music.load_library() if lib is None else lib)
+                       if t.get("kind") == "hit" and t.get("id")]
+            if f["sound"] not in ids and f["sound"] not in music.ROLES:
+                out.append(f"hit sound {f['sound']!r} isn't a sound id ({', '.join(ids)}) or a role "
+                           f"({', '.join(music.ROLES)})")
     return out
+
+
+def check_style(pick):
+    """Errors for the caption/hook placement keys (clipper.placement) and sound_level."""
+    from . import placement, sound
+    out = placement.validate(pick)
+    if "sound_level" in pick and pick["sound_level"] not in sound.LEVELS:
+        out.append(f"sound_level {pick['sound_level']!r} isn't one of: {', '.join(sound.LEVELS)}")
+    for i, m in enumerate(pick.get("music") or [], 1):
+        if isinstance(m, dict) and m.get("mood") not in music_moods():
+            out.append(f"music window {i}: mood {m.get('mood')!r} isn't one of: {', '.join(music_moods())}")
+    return out
+
+
+def music_moods():
+    from .music import MOODS
+    return MOODS
 
 
 QUIET_FOR_MUSIC_S = 3.0
@@ -365,6 +396,8 @@ def check_picks(picks, cfg=None, words=None, load=None):
             entry["labels"] = check_labels(pick)
         if check_fx(pick):
             entry["fx"] = check_fx(pick)
+        if check_style(pick):
+            entry["style"] = check_style(pick)
         edit = check_spoiler(pick, None)
         cw = clip_words(pick, words, load) if words is not None and not check_segments(pick) else None
         if cw is not None:
@@ -381,4 +414,5 @@ def check_picks(picks, cfg=None, words=None, load=None):
 
 def has_fails(report):
     return any(v.get("fails") for e in report.values() for k in ("hooks", "titles") for v in e.get(k, {}).values()) \
-        or any("variety" in e or "length" in e or "labels" in e or "footage" in e or "fx" in e for e in report.values())
+        or any("variety" in e or "length" in e or "labels" in e or "footage" in e or "fx" in e or "style" in e
+               for e in report.values())
