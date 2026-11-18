@@ -27,22 +27,37 @@ Ops (payload -> result):
                     truncated, sentences: [{s, e, text}], words?: [{w, s, e}]} (source seconds; words only for a
                     time window without pattern; pattern = case-insensitive regex)
   upload_manifests  {folders} -> {manifests: [{folder, entries | null, error | null}]}  (folders relative to ROOT)
-  music_library     {} -> {tracks: [{id, file, kind, mood, claimable, approved, usable, local, exists}]}
+  music_library     {} -> {tracks: [track]}   track: {id, file, kind, mood, role (hits: impact | riser | whoosh |
+                    tension, clipper.music.role), tags, beat_at, length (seconds, None when unreadable), claimable,
+                    approved, usable, local, source ("own" | "built-in"), title, exists}
   set_music         {id, approved} -> {track}   writes assets/music/local/library.yaml (gitignored), which
                     clipper.music.load_library merges over the shipped library
+  add_sound         {path, name, kind, role?, mood?, claimable, approved} -> {track} | {problem: German}
+                    an uploaded file (`path` must lie in data/tmp/uploads, where the API streamed it) becomes an own
+                    sound: ffprobe must find audio of a format matching its extension (SOUND_FORMATS) and a sane
+                    duration (SOUND_SECONDS by kind); it is copied to assets/music/local/<id><ext> under a new id made
+                    from `name` (never an existing id or a role name), its length and loudness are measured, and the
+                    entry is added to local/library.yaml as the renderer expects (a hit with its role, music with its
+                    mood). The upload itself is left for the caller to delete.
+  remove_sound      {id} -> {removed: id} | {problem: German}   only own sounds (an entry of local/library.yaml with
+                    its own file): the entry and its file go; built-in sounds and their approvals stay
   resolve_creator   {ref, lookup=true} -> {url, name, found}   "@handle" / channel URL -> /videos URL (+ yt-dlp name)
   resolve_stream    {ref} -> {url, name}   "twitch:x" | "kick:x" | "youtube:@x" | URL -> live URL + recorder name
 
 Other modules add ops by defining `automate/bridge_ext_<area>.py` that registers functions in `automate.bridge.OPS`
 (`OPS[name] = fn(payload, cfg) -> dict`); they are imported when an op isn't found here.
 """
+import fcntl
 import importlib
 import json
 import os
 import pkgutil
 import re
+import shutil
+import subprocess
 import sys
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
@@ -239,15 +254,42 @@ def upload_manifests(payload, cfg):
 
 def _track_info(t, cfg):
     from clipper import music
+    exists = t["path"].exists()
+    length = music.duration(t) if exists else None
     return {"id": t.get("id"), "file": str(t.get("file")), "kind": t.get("kind"), "mood": t.get("mood"),
+            "role": music.role(t), "tags": sorted(music.tags(t)) if t.get("kind") == "hit" else [],
+            "beat_at": t.get("beat_at"), "length": round(float(length), 2) if length else None,
             "claimable": bool(t.get("claimable", True)), "approved": t.get("approved") is True,
-            "usable": music.usable(t, cfg), "local": bool(t.get("local")), "exists": t["path"].exists()}
+            "usable": music.usable(t, cfg), "local": bool(t.get("local")),
+            "source": "own" if t.get("local") else "built-in", "title": t.get("title"), "exists": exists}
 
 
 @op("music_library")
 def music_library(payload, cfg):
     from clipper import music
     return {"tracks": [_track_info(t, cfg) for t in music.load_library()]}
+
+
+def _local_file():
+    from clipper import music
+    return music.MUSIC / "local" / "library.yaml"
+
+
+@contextmanager
+def _local_library():
+    """local/library.yaml read under an exclusive lock (uploads, deletes and approvals can run at once) -> a dict the
+    block changes in place; written back atomically when the block ends without an error."""
+    f = _local_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f.parent / ".library.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = (yaml.safe_load(f.read_text(encoding="utf-8")) or {}) if f.exists() else {}
+        data = data if isinstance(data, dict) else {}
+        data["tracks"] = [t for t in data.get("tracks") or [] if isinstance(t, dict)]
+        yield data
+        tmp = f.with_name(f".library.yaml.{os.getpid()}.tmp")
+        tmp.write_text(LOCAL_HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        os.replace(tmp, f)
 
 
 @op("set_music")
@@ -258,20 +300,125 @@ def set_music(payload, cfg):
         raise ValueError("approved must be true or false")
     if not any(t.get("id") == tid for t in music.load_library()):
         raise ValueError(f"no music track with id {tid!r}")
-    f = music.MUSIC / "local" / "library.yaml"
-    data = (yaml.safe_load(f.read_text(encoding="utf-8")) or {}) if f.exists() else {}
-    tracks = [t for t in data.get("tracks") or [] if isinstance(t, dict)]
-    entry = next((t for t in tracks if t.get("id") == tid), None)
-    if entry is None:
-        tracks.append({"id": tid, "approved": approved})
-    else:
-        entry["approved"] = approved
-    f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_name(f".library.yaml.{os.getpid()}.tmp")
-    tmp.write_text(LOCAL_HEADER + yaml.safe_dump({**data, "tracks": tracks}, sort_keys=False, allow_unicode=True),
-                   encoding="utf-8")
-    os.replace(tmp, f)
+    with _local_library() as data:
+        entry = next((t for t in data["tracks"] if t.get("id") == tid), None)
+        if entry is None:
+            data["tracks"].append({"id": tid, "approved": approved})
+        else:
+            entry["approved"] = approved
     return {"track": next(_track_info(t, cfg) for t in music.load_library() if t.get("id") == tid)}
+
+
+# what ffprobe's format_name must contain for each extension an own sound may have
+SOUND_FORMATS = {".wav": "wav", ".mp3": "mp3", ".m4a": "mp4", ".ogg": "ogg"}
+SOUND_SECONDS = {"hit": (0.1, 30.0), "music": (3.0, 600.0)}
+FORMAT_DE = {".wav": "WAV", ".mp3": "MP3", ".m4a": "M4A", ".ogg": "OGG"}
+
+
+def _probe_audio(path):
+    """(format names, duration, audio streams, other streams) of a file, or None when ffprobe can't read it."""
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=format_name,duration:stream="
+                              "codec_type:stream_disposition=attached_pic", "-of", "json", str(path)],
+                             capture_output=True, text=True, timeout=60)
+        data = json.loads(res.stdout or "{}") if res.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not data or not data.get("format"):
+        return None
+    streams = data.get("streams") or []
+    audio = sum(1 for x in streams if x.get("codec_type") == "audio")
+    other = sum(1 for x in streams if x.get("codec_type") != "audio"
+                and not (x.get("disposition") or {}).get("attached_pic"))  # an MP3's cover art is fine
+    try:
+        dur = float(data["format"].get("duration"))
+    except (TypeError, ValueError):
+        dur = None
+    return set(str(data["format"].get("format_name") or "").split(",")), dur, audio, other
+
+
+def _new_id(name, taken):
+    from clipper import music
+    stem = re.sub(r"[^a-z0-9]+", "-", Path(str(name)).stem.lower()).strip("-")[:40].strip("-") or "sound"
+    sid, n = stem, 2
+    while sid in taken or sid in music.ROLES:
+        sid, n = f"{stem}-{n}", n + 1
+    return sid
+
+
+@op("add_sound")
+def add_sound(payload, cfg):
+    from automate import paths
+    from clipper import music
+    src = Path(str(payload.get("path") or ""))
+    inbox = (paths.tmp_dir() / "uploads").resolve()
+    if src.is_symlink() or not src.is_file() or src.resolve().parent != inbox:
+        raise ValueError("the upload must be a file in data/tmp/uploads")
+    name = str(payload.get("name") or "").replace("\\", "/").rsplit("/", 1)[-1]
+    ext = Path(name).suffix.lower()
+    kind = payload.get("kind")
+    if ext not in SOUND_FORMATS:
+        return {"problem": "Nur WAV-, MP3-, M4A- oder OGG-Dateien."}
+    if kind not in SOUND_SECONDS:
+        return {"problem": "Bitte wählen: Sound-Effekt oder Musik."}
+    role, mood = payload.get("role"), payload.get("mood")
+    if kind == "hit" and role not in music.ROLES:
+        return {"problem": f"Rolle muss eins von {', '.join(music.ROLES)} sein."}
+    if kind == "music" and mood not in music.MOODS:
+        return {"problem": f"Stimmung muss eins von {', '.join(music.MOODS)} sein."}
+    probe = _probe_audio(src)
+    if probe is None:
+        return {"problem": "Die Datei ist keine lesbare Audiodatei."}
+    formats, dur, audio, other = probe
+    if SOUND_FORMATS[ext] not in formats:
+        return {"problem": f"Die Datei ist keine echte {FORMAT_DE[ext]}-Datei (Inhalt: {', '.join(sorted(formats))})."}
+    if not audio or other:
+        return {"problem": "Die Datei muss genau Ton enthalten (kein Video)."}
+    lo, hi = SOUND_SECONDS[kind]
+    if dur is None or not lo <= dur <= hi:
+        what = "Ein Sound-Effekt" if kind == "hit" else "Musik"
+        return {"problem": f"{what} muss zwischen {lo:g} und {hi:g} Sekunden lang sein".replace(".", ",")
+                           + (f" (diese Datei: {dur:.1f} s).".replace(".", ",", 1) if dur is not None else ".")}
+    with _local_library() as data:
+        taken = {str(t.get("id")) for t in music.load_library()} | {str(t.get("id")) for t in data["tracks"]}
+        sid = _new_id(name, taken)
+        folder = music.MUSIC / "local"
+        dest = folder / f"{sid}{ext}"
+        with open(dest, "xb") as out, open(src, "rb") as inp:  # x: never overwrite anything
+            shutil.copyfileobj(inp, out)
+        try:
+            entry = {"id": sid, "file": dest.name, "kind": kind, "mood": mood if kind == "music" else "any",
+                     "claimable": bool(payload.get("claimable")), "approved": bool(payload.get("approved")),
+                     "title": re.sub(r"[\x00-\x1f]", "", Path(name).stem)[:80], "length": round(dur, 3)}
+            if kind == "hit":
+                entry["role"] = role
+            placed = {**entry, "path": dest}
+            level = music.peak_loudness(placed) if kind == "hit" else music.track_loudness(placed)
+            if level is not None:
+                entry["peak_lufs" if kind == "hit" else "lufs"] = round(level, 1)
+            data["tracks"].append(entry)
+        except BaseException:  # no file without its entry
+            dest.unlink(missing_ok=True)
+            raise
+    return {"track": next(_track_info(t, cfg) for t in music.load_library() if t.get("id") == sid)}
+
+
+@op("remove_sound")
+def remove_sound(payload, cfg):
+    from clipper import music
+    tid = payload.get("id")
+    folder = (music.MUSIC / "local").resolve()
+    with _local_library() as data:
+        entry = next((t for t in data["tracks"] if t.get("id") == tid and t.get("file")), None)
+        if entry is None:
+            shipped = any(t.get("id") == tid for t in music.load_library(music.MUSIC))
+            return {"problem": "Mitgelieferte Sounds lassen sich nicht löschen – nur sperren." if shipped
+                    else "Diesen Sound gibt es nicht."}
+        data["tracks"].remove(entry)
+        f = folder / str(entry["file"])
+        if f.parent.resolve() == folder and (f.is_file() or f.is_symlink()):
+            f.unlink()
+    return {"removed": tid}
 
 
 @op("resolve_creator")

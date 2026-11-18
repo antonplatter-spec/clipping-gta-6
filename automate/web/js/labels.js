@@ -66,6 +66,86 @@ export const CLIP_TYPES = {
 export const HOOK_STYLES = { bold: 'Fett (Montserrat)', box: 'Meme-Box', label: 'Label', none: 'Ohne Hook-Text' };
 export const CAPTION_STYLES = { boxed: 'Box (Bebas)', bold: 'Fett', comic: 'Comic' };
 
+// ---------------------------------------------------------------------------------------------------------------
+// Captions, hook banner and sound (automate/style.py mirrors the renderer's vocabulary; these are its German words)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** [{value, label, help}] per caption/hook/sound key, in the order the controls show them. */
+export const STYLE_CHOICES = {
+  caption_position: [
+    { value: 'auto', label: 'Automatisch', help: 'Pro Clip aus einigen Bildern gewählt: dort, wo am wenigsten Spiel verdeckt wird – nie über Gesicht, App-Buttons oder Bildrand.' },
+    { value: 'high', label: 'Oben', help: 'Facecam-Clips: oben im Spielbild direkt unter der Kamera. Vollbild-Clips: über dem Spielbild auf der Unschärfe.' },
+    { value: 'seam', label: 'Naht', help: 'Facecam-Clips: genau zwischen Kamera und Spiel (wie bei Kai Cenat). Sitzt dort der Hook, rutschen die Untertitel nach oben ins Spielbild.' },
+    { value: 'low', label: 'Unten', help: 'Facecam-Clips: unten im Spielbild über der App-Leiste. Vollbild-Clips: unter dem Spielbild auf der Unschärfe.' },
+    { value: 'classic', label: 'Klassisch', help: 'Die alte feste Stelle: mitten im Spielbild (Facecam-Clips) bzw. unter dem Bild.' },
+  ],
+  caption_size: [
+    { value: 'auto', label: 'Automatisch', help: 'Klein, wo die Untertitel auf dem Spiel liegen; mittel auf der Unschärfe oder der Naht.' },
+    { value: 'small', label: 'Klein', help: 'Verdeckt am wenigsten.' },
+    { value: 'medium', label: 'Mittel', help: 'Etwas größer, gut lesbar auf dem Handy.' },
+    { value: 'large', label: 'Groß', help: 'Die alte Größe – nur über ruhigen Bildern.' },
+  ],
+  caption_look: [
+    { value: 'auto', label: 'Automatisch', help: 'Jeder Clip bekommt einen Look aus der Familie seines Untertitel-Stils (derselbe Clip immer denselben), damit nicht jedes Video gleich aussieht.' },
+    { value: 'classic', label: 'Klassisch', help: 'Immer der Grundlook des Untertitel-Stils, wie früher.' },
+  ],
+  hook_size: [
+    { value: 'auto', label: 'Automatisch', help: 'Groß über dem Spielbild bei Vollbild-Clips, klein auf der Naht bei Facecam-Clips.' },
+    { value: 'small', label: 'Klein', help: 'Verdeckt am wenigsten von Gesicht und Spiel.' },
+    { value: 'medium', label: 'Mittel', help: 'Ein Kompromiss.' },
+    { value: 'large', label: 'Groß', help: 'Die alte Größe.' },
+  ],
+  hook_seconds: [
+    { value: 'auto', label: 'Automatisch', help: 'Vollbild: ganzer Clip. Facecam-Clips: Reaktion 3 s, Gameplay 4 s, Comedy und Szenario 5 s, News und Showcase ganzer Clip (dort ist der Hook die Titelkarte).' },
+    { value: 'whole', label: 'Ganzer Clip', help: 'Der Hook bleibt bis zum Ende stehen.' },
+    { value: 'seconds', label: 'Feste Sekunden', help: 'Der Hook steht so viele Sekunden und blendet dann kurz aus.' },
+  ],
+  sound_level: [
+    { value: 'off', label: 'Aus', help: 'Keine automatischen Effekte. Eigene Effekte und Musik eines Clips spielen trotzdem.' },
+    { value: 'subtle', label: 'Dezent', help: 'Ein Einschlag (Impact) auf dem stärksten Moment, kein Aufbau.' },
+    { value: 'normal', label: 'Normal', help: 'Bis zu 2 Momente: ein Riser baut in den Hauptmoment auf, dazu ein Impact; vor einem stillen Aufbau ein leises Spannungs-Bett.' },
+    { value: 'strong', label: 'Stark', help: 'Bis zu 3 Momente, längere Riser, alles etwas lauter.' },
+  ],
+};
+export const STYLE_LABELS = {
+  caption_position: 'Untertitel-Position', caption_size: 'Untertitel-Größe', caption_look: 'Untertitel-Look',
+  hook_size: 'Hook-Größe', hook_seconds: 'Hook-Anzeigedauer', sound_level: 'Sound-Stärke',
+};
+/** Caption looks per family (clipper.captions.LOOKS / LOOK_DE). */
+export const LOOKS = {
+  bold: { family: 'bold', label: 'Montserrat, 3 Wörter, Gelb' },
+  'bold-word': { family: 'bold', label: 'Montserrat, ein Wort' },
+  'bold-lime': { family: 'bold', label: 'Montserrat, 2 Wörter, Lime' },
+  'bold-clean': { family: 'bold', label: 'TikTok Sans, normale Schreibung, Lila' },
+  boxed: { family: 'boxed', label: 'Bebas auf Schwarz, 3 Wörter, Gelb' },
+  'boxed-word': { family: 'boxed', label: 'Bebas auf Schwarz, ein Wort' },
+  'boxed-lime': { family: 'boxed', label: 'Bebas auf Schwarz, 2 Wörter, Lime' },
+  comic: { family: 'comic', label: 'Comic, 3 Wörter, Gelb' },
+  'comic-word': { family: 'comic', label: 'Comic, ein Wort' },
+  'comic-orange': { family: 'comic', label: 'Comic, 2 Wörter, Orange' },
+};
+/** What brings back the look from before captions adapted (style.CLASSIC). */
+export const CLASSIC_STYLE = {
+  caption_position: 'classic', caption_size: 'large', caption_look: 'classic', hook_size: 'large', hook_seconds: 'whole',
+  sound_level: 'off',
+};
+export const styleValueLabel = (key, v) => {
+  if (key === 'caption_look' && LOOKS[v]) return LOOKS[v].label;
+  if (key === 'hook_seconds' && typeof v === 'number') return `${String(v).replace('.', ',')} s`;
+  const c = (STYLE_CHOICES[key] || []).find((x) => x.value === v);
+  return c ? c.label : v;
+};
+
+export const SOUND_ROLES = {
+  impact: { label: 'Impact', help: 'Einschlag: beginnt genau auf dem Moment.' },
+  riser: { label: 'Riser', help: 'Baut auf und endet genau auf dem Moment (startet bis zu 3 s vorher).' },
+  whoosh: { label: 'Whoosh', help: 'Kurzes Rauschen für einen harten Schnitt.' },
+  tension: { label: 'Spannung', help: 'Herzschlag-Bett, das zum Moment hin läuft.' },
+};
+export const MOODS = { suspense: 'Spannung', sneaky: 'Schleichen', epic: 'Episch', sad: 'Traurig', funny: 'Lustig' };
+export const FX_TYPES = { hit: 'Sound', flash: 'Blitz', zoom: 'Zoom' };
+export const FLASH_COLORS = { white: 'Weiß', red: 'Rot', orange: 'Orange', lime: 'Lime' };
+
 /** clipper hook structure → German label (whiteboard table ④). */
 export const HOOK_TYPES = {
   'number promise': 'Zahlen-Hook',
@@ -138,7 +218,7 @@ export const TOOL_PURPOSE = {
 // clipper check / simulate reports
 // ---------------------------------------------------------------------------------------------------------------
 
-const FAIL_KEYS = new Set(['variety', 'length', 'labels', 'fx', 'footage']);
+const FAIL_KEYS = new Set(['variety', 'length', 'labels', 'fx', 'footage', 'style']);
 export const CHECK_SECTIONS = {
   pairing: 'Hook/Titel-Paar',
   playbook: 'Playbook',
@@ -149,6 +229,7 @@ export const CHECK_SECTIONS = {
   edit: 'Schnitt',
   variety: 'Hook-Vielfalt',
   footage: 'Footage schon verwendet',
+  style: 'Untertitel, Hook & Sound',
 };
 
 const asList = (v) => {

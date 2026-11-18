@@ -3,7 +3,7 @@
 Pure module (no DB): store.py uses it to fill defaults and to validate every write, and the API serves `schema()` so
 the dashboard renders its forms from it (format = `SettingSchema` in automate/web/js/api.js).
 
-    REGISTRY: {key: Setting}  (display order)   SECRETS: {name: {label, help, env, prefix?}}
+    REGISTRY: {key: Setting}  (display order)   SECRETS: {name: {label, help, env, prefix?, pattern?, hint?}}
     GROUPS: {group id: German label}
     default(key) -> value (a deep copy; KeyError for an unknown key) ; defaults() -> {key: value}
     schema() -> {key: {type, default, label, help, group, group_label, choices?: [{value, label, help?}], min?, max?,
@@ -17,7 +17,8 @@ Types: "boolean"; "integer" (with `auto`: the string "auto" too); "number" (int 
 "string_list" (choices are suggestions; dub.auto_languages takes language codes like "es", "pt-BR"); "text"
 (multi-line; `nullable`: blank means null = "use the repo file"); "string" (ui.default_profile: a folder in
 profiles/); "json" (claude.prices: {model: {input, output, cache_read, cache_write}} USD per 1M tokens;
-watchlist.overrides: a mapping merged over watchlist.yaml).
+watchlist.overrides: a mapping merged over watchlist.yaml; the caption/hook/sound defaults in it, which the dashboard
+edits under Einstellungen → Untertitel & Sound, are checked by style.config_errors).
 """
 import copy
 import re
@@ -25,7 +26,7 @@ from dataclasses import dataclass
 
 import yaml
 
-from . import paths
+from . import paths, style
 
 
 class SettingsError(ValueError):
@@ -206,6 +207,20 @@ SECRETS = {
                           "help": "Aus deinem Google-Cloud-Projekt (OAuth-Client vom Typ Webanwendung)."},
     "youtube_client_secret": {"label": "YouTube OAuth-Clientschlüssel", "env": None,
                               "help": "Gehört zur Client-ID oben."},
+    # ---- Instagram (automate/instagram.py; entered under Konten → Instagram). Formats as Meta shows them: numeric
+    # app ids, hexadecimal secrets; checked loosely (pattern) so a pasted label or URL is caught, not a valid value.
+    "instagram_app_id": {"label": "Instagram-App-ID", "env": None, "pattern": r"\d{6,25}",
+                         "hint": "nur Ziffern, wie im Meta-Dashboard angezeigt",
+                         "help": "Meta-App → Instagram → API-Einrichtung mit Instagram-Login → Instagram-App-ID "
+                                 "(nur für „Mit Instagram anmelden“)."},
+    "instagram_app_secret": {"label": "Instagram-App-Geheimcode", "env": None, "pattern": r"[A-Za-z0-9]{16,64}",
+                             "hint": "Buchstaben und Ziffern", "help": "Gehört zur Instagram-App-ID oben."},
+    "meta_app_id": {"label": "Meta-App-ID", "env": None, "pattern": r"\d{6,25}",
+                    "hint": "nur Ziffern, wie im Meta-Dashboard angezeigt",
+                    "help": "Meta-App → App-Einstellungen → Allgemeines → App-ID (für den Weg über die "
+                            "Facebook-Seite)."},
+    "meta_app_secret": {"label": "Meta-App-Geheimcode", "env": None, "pattern": r"[A-Za-z0-9]{16,64}",
+                        "hint": "Buchstaben und Ziffern", "help": "Gehört zur Meta-App-ID oben."},
 }
 
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -371,6 +386,9 @@ def validate_overrides(overrides, base=None, what="der Datei"):
             raise ValueError("jeder Schlüssel muss ein Name sein")
         if isinstance(base.get(k), dict) and not isinstance(v, dict):
             raise ValueError(f"„{k}“ ist in {what} eine Gruppe von Werten; hier muss auch eine Gruppe stehen")
+    bad = style.config_errors(overrides)
+    if bad:
+        raise ValueError(" ".join(bad.values()))
     try:
         yaml.safe_dump(overrides)
     except yaml.YAMLError as e:
@@ -408,4 +426,7 @@ def validate_secret(name, value):
     prefix = SECRETS[name].get("prefix")
     if prefix and not v.startswith(prefix):
         raise SettingsError({name: f"{SECRETS[name]['label']}: muss mit „{prefix}“ beginnen"})
+    pattern = SECRETS[name].get("pattern")
+    if pattern and not re.fullmatch(pattern, v):
+        raise SettingsError({name: f"{SECRETS[name]['label']}: sieht nicht richtig aus ({SECRETS[name]['hint']})"})
     return v

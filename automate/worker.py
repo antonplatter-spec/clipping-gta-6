@@ -4,7 +4,7 @@ Lanes (store.claim_next_job by kind, so a 4-hour download never blocks a render 
     source-1..N   source jobs (fetch, analyze, select, gate); N = setting worker.concurrency, followed live
     live          live_chunk jobs: a ready chunk goes straight to ③–④
     render        render and dub jobs, one at a time (they number the `video N` folders)
-    upload        YouTube uploads
+    upload        uploads to YouTube and Instagram (social.Publisher)
 A supervisor thread heartbeats every running job (its lock), aborts a run whose lock is gone (canceled through the
 API, or released), releases the locks of workers that died (pipeline.release_stale: counted as an attempt),
 settles parents a crash left waiting (pipeline.reconcile, every minute and at start), restarts dead lane threads
@@ -170,6 +170,7 @@ class Run:
         self._dropped = 0
         self._noise_at = 0.0
         self._line_level = "debug"  # raw command output; the in-process calls' German status lines are "info"
+        self.upload_label = "Lade auf YouTube hoch"  # the upload stage sets its platform's ("Lade zu Instagram hoch")
 
     # -- state
     def abort(self, reason):
@@ -227,7 +228,7 @@ class Run:
         self._lines.append(("line", str(line)))
 
     def on_progress(self, done, total=None):
-        """youtube.upload_variant's on_progress(done_bytes, total_bytes)."""
+        """A publisher's on_progress(done_bytes, total_bytes) (shown as "<upload_label> … N %")."""
         self._lines.append(("bytes", (done, total)))
 
     def _drain(self, parse=None):
@@ -238,7 +239,7 @@ class Run:
             if kind == "bytes":
                 done, total = item
                 if total:
-                    self.progress(f"Lade auf YouTube hoch … {100 * float(done) / float(total):.0f} %")
+                    self.progress(f"{self.upload_label} … {100 * float(done) / float(total):.0f} %")
                 continue
             line = item.rstrip()
             if not line.strip():

@@ -8,7 +8,8 @@ service cached, and the health checks that raise and resolve dashboard alerts.
         asr_model (Parakeet only): whether the speech model is already in the Hugging Face cache; if not, the first
         analysis downloads it (~650 MB)
         tools come from clipper.setup.missing()/run(dry_run) through the bridge op `system_tools` (cached 10 min)
-    readiness() -> {anthropic_key, fish_key, youtube_connected, tools_ok, sources (number), automation}
+    readiness() -> {anthropic_key, fish_key, youtube_connected, instagram_connected, tools_ok, sources (number),
+                    automation}
     live_status() -> {streams: [{id, name, url, profile, platform, live, on_topic, recording, title, checked_at}],
                       recorders, checked_at}     (None fields = never checked; nothing here calls yt-dlp)
     check_all(now=None) -> [{key, action: "raised" | "resolved", level, message}]   (also recorded as a `health` run)
@@ -23,9 +24,13 @@ videos a second time), job.failed.<id> (raised by the pipeline, resolved here on
 scan.failed.<profile> (raised and resolved by the scan itself), pick.footage.<pick id> (the pipeline sent a pick back
 to approval because its footage is taken; resolved here once the pick is decided), prices.unknown.<model> (store:
 usage of a model without a price row; resolved here once the row exists), service.restarted (the scheduler's
-watchdog restarted a dead thread; resolved here a day later).
+watchdog restarted a dead thread; resolved here a day later), instagram.disconnected.<account id> /
+instagram.expiring.<account id> (raised and resolved by automate/instagram.py; check_all runs its token upkeep:
+a long-lived Instagram token is refreshed weekly, a Facebook-login token checked daily, a failure retried after
+6 hours at the earliest, never in a loop).
 """
 import copy
+import importlib
 import importlib.util
 import platform
 import shutil
@@ -183,6 +188,7 @@ def readiness():
     return {"anthropic_key": bool(store.get_secret("anthropic_api_key")),
             "fish_key": bool(store.get_secret("fish_api_key")),
             "youtube_connected": any(a.get("connected") for a in store.list_accounts("youtube")),
+            "instagram_connected": any(a.get("connected") for a in store.list_accounts("instagram")),
             "tools_ok": all(t["ok"] for t in rep["tools"] if t.get("required")),
             "sources": sources, "automation": bool(store.get_setting("automation.enabled"))}
 
@@ -302,6 +308,11 @@ def _live_checks(put, now):
         "Transkription installiert ist; Details stehen in jobs/_live/reanalyze.log.", {"chunks": failed})
 
 
+def _social_tokens(now):
+    """Instagram tokens: refreshed / checked when due; their alerts are raised and resolved by instagram.py."""
+    importlib.import_module("automate.instagram").maintain(now)
+
+
 def check_all(now=None):
     """Raise or resolve every alert this module owns; returns what changed (and records a `health` run)."""
     now = time.time() if now is None else now
@@ -376,6 +387,10 @@ def check_all(now=None):
             elif key == "service.restarted" and now - float((a.get("details") or {}).get("at") or 0) > 86400:
                 store.resolve_alert(key)
     except Exception as e:  # a broken check must not stop the others next time; it shows in the run
+        problems.append(repr(e)[:300])
+    try:
+        _social_tokens(now)
+    except Exception as e:
         problems.append(repr(e)[:300])
     active = store.list_alerts()
     after = {a["key"] for a in active}

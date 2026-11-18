@@ -9,7 +9,7 @@ at what is already on disk, so finished work is never redone):
     live_chunk  select -> gate -> approval | render (waiting_approval) -> finished (`clipper live done`, then done)
     render      render (one pick -> one `video N` folder -> videos + variants rows)
     dub         dub (`dub segments` -> agent.translate_dub -> `dub render` -> a video with `lang`)
-    upload      upload (youtube.upload_variant -> the posts row)
+    upload      upload (the account's platform publisher, social.PUBLISHERS: YouTube or Instagram -> the posts row)
 
 A parent (source / live_chunk) stays `waiting_approval` while any pick is undecided (stage approval) or an approved
 pick is still rendering (stage render); `settle_parent` finishes it once every pick is decided and every approved
@@ -45,8 +45,12 @@ Public (API):
     scan_running(profile=None) -> bool
     approve_pick(pick_id) -> render job id ; reject_pick(pick_id, reason=None) -> pick row
     update_pick_data(pick_id, changes) -> (pick row, check_report)       raises PickCheckFailed on fails
-    enqueue_dub(video_id, lang) -> job id ; enqueue_upload(variant_id, account_id, privacy, force=False) -> job id
-                                             (409 already_posted when posted there before, unless force)
+                                             changes: EDITABLE keys; fx, music and the caption/hook/sound keys
+                                             (style.KEYS) take null = drop the key (automatic / Einstellungen)
+    enqueue_dub(video_id, lang) -> job id
+    enqueue_upload(variant_id, account_id, options, force=False) -> job id   options: the platform's (YouTube:
+                                             {"privacy"} or the privacy string; Instagram: {"share_to_feed"});
+                                             409 already_posted when posted there before, unless force
     retry_job(job_id) -> job row ; cancel_job(job_id) -> job row
     on_settings_changed(keys) ; resume_waiting(force=False) -> [job ids]
     source_expires_at(job) -> float | None   when `clipper cleanup` deletes the job's source.mp4 (None: gone / never)
@@ -72,7 +76,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import costs, paths, runtime, store
+from . import costs, paths, runtime, store, style
 
 log = logging.getLogger("automate.pipeline")
 
@@ -98,17 +102,20 @@ T_SELECT = 60 * 60
 T_CHECK, T_RANK = 300, 900
 T_RENDER, STALL_RENDER = 3 * 3600, 90 * 60
 T_DUB_SEGMENTS, T_TRANSLATE, T_DUB_RENDER = 3600, 30 * 60, 3 * 3600
-T_UPLOAD = 4 * 3600
 T_VERIFY = 300
 DISK_WAIT_S = 15 * 60
 T_LIVE_DONE, T_CLEANUP, T_WATCH = 300, 1800, 3600
 
 KIND_DE = {"source": "Quelle", "live_chunk": "Live-Stück", "render": "Rendern", "dub": "Synchronisation",
-           "upload": "YouTube-Upload"}
+           "upload": "Upload"}
 CLIP_TYPES = ("reaction", "comedy", "news", "gameplay", "showcase", "scenario")
+# the report sections clipper.hooks.has_fails counts as fails (besides hook/title fails); `style` = the caption, hook
+# and sound keys (and music moods)
+FAIL_SECTIONS = ("variety", "length", "labels", "footage", "fx", "style")
+MAX_FX, MAX_MUSIC = 30, 10
+MOOD_DE = {"suspense": "Spannung", "sneaky": "Schleichen", "epic": "Episch", "sad": "Traurig", "funny": "Lustig"}
 HOOK_STYLES = ("bold", "box", "label", "none")
 CAPTION_STYLES = ("boxed", "bold", "comic")
-PRIVACY = ("private", "unlisted", "public")
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")
 SECTION_RE = re.compile(r"^(\d{1,2}(?::\d{1,2}){0,2})-(\d{1,2}(?::\d{1,2}){0,2})$")
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([\w-]{11})(?![\w-])")
@@ -186,8 +193,16 @@ def _agent():
     return importlib.import_module("automate.agent")
 
 
-def _youtube():
-    return importlib.import_module("automate.youtube")
+def _social():
+    return importlib.import_module("automate.social")
+
+
+def _kind_label(job):
+    """"Rendern", "YouTube-Upload", "Instagram-Upload" … for alerts."""
+    if job.get("kind") == "upload":
+        pub = _social().publisher((job.get("params") or {}).get("platform") or "youtube")
+        return f"{pub.label if pub else 'Social-Media'}-Upload"
+    return KIND_DE.get(job.get("kind"), job.get("kind"))
 
 
 def _wake():
@@ -326,7 +341,7 @@ def _report_fails(entry):
     entry = entry or {}
     if any(v.get("fails") for k in ("hooks", "titles") for v in (entry.get(k) or {}).values()):
         return True
-    return any(k in entry for k in ("variety", "length", "labels", "footage", "fx"))
+    return any(k in entry for k in FAIL_SECTIONS)
 
 
 def _fail_summary(report):
@@ -337,7 +352,7 @@ def _fail_summary(report):
         for kind in ("hooks", "titles"):
             for text, v in (e.get(kind) or {}).items():
                 out += [f"„{text}“: {f}" for f in v.get("fails") or []]
-        for k in ("variety", "length", "labels", "footage", "fx"):
+        for k in FAIL_SECTIONS:
             if k in e:
                 v = e[k]
                 out.append(f"{k}: {'; '.join(map(str, v)) if isinstance(v, list) else v}")
@@ -699,6 +714,8 @@ def _render_progress(n_hooks):
         if "no-hook arm" in line:
             state["total"] = 1
             return f"Rendere Video {n}: Variante ohne Hook (A/B-Test) …"
+        if "Untertitel:" in line:  # clipper prints the placement it chose (placement.plan's text_de)
+            return f"Rendere Video {n}: Untertitel und Hook platziert …"
         return None
     return parse
 
@@ -836,7 +853,7 @@ def _after_failure(job, message):
 def raise_failed_alert(job, message):
     what = job.get("title") or job.get("clipper_job") or job.get("source_url") or ""
     store.raise_alert(f"job.failed.{job['id']}", "error",
-                      f"Job #{job['id']} ({KIND_DE.get(job['kind'], job['kind'])}"
+                      f"Job #{job['id']} ({_kind_label(job)}"
                       + (f" „{what[:80]}“" if what else "") + f") ist fehlgeschlagen: {message} "
                       f"Unter Jobs → #{job['id']} kannst du ihn erneut versuchen.",
                       {"job_id": job["id"], "kind": job["kind"], "stage": job.get("stage")})
@@ -1392,6 +1409,11 @@ def _finish_with_video(run, job, pick, folder, lang):
                          result={**(job.get("result") or {}), "video_id": vid, "folder": paths.rel(folder)})
     run.event(f"{paths.rel(folder)} gespeichert ({n} Variante(n))"
               + (f"; Synchronisation eingereiht: {', '.join(dubs)}" if dubs else ""))
+    first = next(iter(_read_json(folder / "upload.json") or []), None)
+    for key in ("placement", "sound"):  # what the render decided, in clipper's own German sentence
+        text = ((first or {}).get(key) or {}).get("text_de") if isinstance(first, dict) else None
+        if isinstance(text, str) and text:
+            run.event(f"{folder.name} – {text}")
     for key in ("picks_file", "translation_file"):
         f = (job.get("params") or {}).get(key)
         if f:
@@ -1572,47 +1594,59 @@ def _stage_dub(run, job):
 # ---------------------------------------------------------------- stage: upload
 
 def _stage_upload(run, job):
+    """One publish call of the account's platform (social.Publisher). The resume state it reports (YouTube's
+    session, Instagram's container and publish marker) is written into the job's params the moment it exists, and a
+    retry, a restart or a new upload of the same variant hands it back, so finished work is asked for, not redone."""
     params = job.get("params") or {}
     post = store.get_post(params.get("post_id") or 0)
     if post and post["status"] == "posted":
         return {"status": "done", "progress": "Schon hochgeladen"}
-    yt = _youtube()
-    run.progress("Lade auf YouTube hoch …", force=True)
+    pub = _social().publisher(params.get("platform") or "youtube")
+    if pub is None:
+        raise StageError(f"Für „{params.get('platform')}“ gibt es kein direktes Hochladen.", retryable=False)
+    run.upload_label = pub.uploading
+    run.progress(f"{pub.uploading} …", force=True)
+    state = {k: params[k] for k in pub.STATE_KEYS if params.get(k) is not None}
 
-    def keep_session(uri):  # before the first byte: a retry after a crash asks this session instead of re-uploading
-        run.update(params={**(run.job.get("params") or {}), "upload_session": uri})
-    if params.get("upload_session"):
-        run.event("Frage YouTube zuerst, wie weit der letzte Versuch kam (kein doppelter Upload)")
+    def keep(changes):  # before the step it protects: a retry after a crash asks Instagram/YouTube first
+        run.update(params={**(run.job.get("params") or {}), **changes})
+    note = pub.resume_note(state)
+    if note:
+        run.event(note)
     try:
-        res = run.call(yt.upload_variant, params["variant_id"], params["account_id"], params["privacy"],
-                       on_progress=run.on_progress, cancel=run.cancel, timeout=T_UPLOAD,
-                       session=params.get("upload_session"), on_session=keep_session)
-    except yt.YouTubeError as e:
+        res = run.call(pub.publish, params["variant_id"], params["account_id"], pub.options_of(params),
+                       state=state, on_state=keep, on_progress=run.on_progress, cancel=run.cancel, log=run.log,
+                       timeout=pub.TIMEOUT, progress=lambda line: line[:200])
+    except pub.errors() as e:
         if getattr(e, "code", "") == "canceled" and run.cancel.is_set():
             raise Canceled(run.reason or "cancel") from None
-        raise StageError(str(e), retryable=bool(getattr(e, "retryable", False))) from None
-    _record_upload(run, job, params, res)
+        raise StageError(str(e), retryable=bool(getattr(e, "retryable", False)),
+                         slow=bool(getattr(e, "slow", False))) from None
+    _record_upload(run, job, params, res, pub)
     return None
 
 
-def _record_upload(run, job, params, res):
-    """The video is on YouTube: its post says so whatever happened to the job meanwhile. A cancel that arrived while
-    the last bytes went out is too late to undo the upload, so the job ends `done` (not canceled with the video
-    forgotten); a job another worker holds by now is left to it (it resumes the same session)."""
-    url = res.get("url") or res.get("video_id")
+def _record_upload(run, job, params, res, pub):
+    """The video is online: its post says so whatever happened to the job meanwhile. A cancel that arrived after
+    the last bytes (YouTube) or the publish request (Instagram) went out is too late to undo, so the job ends `done`
+    (not canceled with the video forgotten); a job another worker holds by now is left to it (it resumes the same
+    session / container)."""
+    external = res.get("external_id") or res.get("video_id")
+    url = res.get("url") or external
     late = False
     with store.transaction():
         if params.get("post_id"):
-            store.update_post(params["post_id"], status="posted", external_id=res.get("video_id"), url=res.get("url"),
+            store.update_post(params["post_id"], status="posted", external_id=external, url=res.get("url"),
                               error=None)
         cur = store.get_job(job["id"]) or {}
         late = cur.get("status") == "canceled"
         if late or (cur.get("status") == "running" and cur.get("locked_by") == run.worker_id):
-            store.update_job(job["id"], status="done", stage="finished", error=None, progress=f"Hochgeladen: {url}",
+            store.update_job(job["id"], status="done", stage="finished", error=None,
+                             progress=f"Hochgeladen: {url}" if url else "Veröffentlicht",
                              result={**(job.get("result") or {}), **res})
     if late:
-        run.event("Der Abbruch kam zu spät: das Video war schon vollständig bei YouTube", "warning")
-    run.event(f"Auf YouTube: {url}")
+        run.event(pub.too_late, "warning")
+    run.event(pub.done(url) if url else f"Auf {pub.label} veröffentlicht (Link nicht ermittelbar)")
 
 
 _STAGES = {
@@ -1715,33 +1749,47 @@ def enqueue_dub(video_id, lang):
     return jid
 
 
-def _earlier_session(variant_id, account_id, privacy):
-    """The resumable session of an earlier upload of this variant to this account (failed or canceled, same
-    privacy), so a new upload asks it first: if that one actually finished, YouTube returns its video instead of a
-    second copy being created."""
+def _earlier_state(pub, variant_id, account_id, options):
+    """Resume state of an earlier failed or canceled upload of this variant to this account, newest first, so a new
+    upload asks it first: if that one actually finished (YouTube: its session; Instagram: its container or the
+    publish it sent), the existing video is recorded instead of a second copy being created."""
     for j in store.list_jobs(kind="upload", status=["failed", "canceled"], limit=1000)[0]:
         p = j.get("params") or {}
-        if (p.get("variant_id"), p.get("account_id"), p.get("privacy")) == (variant_id, account_id, privacy) \
-                and p.get("upload_session"):
-            return p["upload_session"]
-    return None
+        if (p.get("variant_id"), p.get("account_id")) != (variant_id, account_id) \
+                or (p.get("platform") or "youtube") != pub.platform:
+            continue
+        state = pub.carry(p, options)
+        if state:
+            return state
+    return {}
 
 
-def enqueue_upload(variant_id, account_id, privacy, force=False):
-    """A YouTube upload job (and its post, status uploading). Refused while the variant is uploading to that account,
-    and when it is already posted there unless `force` (the owner confirmed a second, identical video)."""
-    if privacy not in PRIVACY:
-        raise PipelineError("Sichtbarkeit: privat, nicht gelistet oder öffentlich.", "invalid_privacy", 422,
-                            {"privacy": "private, unlisted oder public"})
+def enqueue_upload(variant_id, account_id, options=None, force=False):
+    """An upload job for the account's platform (and its post, status uploading). Refused while the variant is
+    uploading to that account, and when it is already posted there unless `force` (the owner confirmed a second,
+    identical video). The platform checks its options and the variant's file first (Instagram: the Reels rules)."""
     variant = store.get_variant(variant_id)
     if not variant:
         raise PipelineError("Diese Variante gibt es nicht.", "not_found", 404)
     account = store.get_account(account_id)
     if not account:
         raise PipelineError("Dieses Konto gibt es nicht.", "not_found", 404)
-    if account["platform"] != "youtube" or not account.get("connected"):
-        raise PipelineError("Das Konto ist nicht mit YouTube verbunden (Konten → YouTube verbinden).",
+    social = _social()
+    pub = social.publisher(account["platform"])
+    if pub is None:
+        raise PipelineError(f"Auf {social.PLATFORMS.get(account['platform'], account['platform'])} kann das Dashboard "
+                            "nicht direkt hochladen – lade die MP4 selbst hoch und markiere sie als gepostet.",
+                            "not_supported", 409)
+    try:
+        options = pub.options(options)
+    except social.OptionsError as e:
+        raise PipelineError(e.message, e.code, 422, e.fields) from None
+    if not pub.connected(account):
+        raise PipelineError(f"Das Konto ist nicht mit {pub.label} verbunden (Konten → {pub.label} verbinden).",
                             "not_connected", 409)
+    problems = pub.problems(variant)
+    if problems:
+        raise PipelineError(f"{pub.label} nimmt diese Datei nicht an: {' '.join(problems)}", "unsupported_media", 422)
     video = store.get_video(variant["video_id"])
     pick = store.get_pick((video or {}).get("pick_id") or 0)
     with store.transaction():
@@ -1754,13 +1802,14 @@ def enqueue_upload(variant_id, account_id, privacy, force=False):
             raise PipelineError(f"Diese Variante ist schon auf „{account['label']}“ hochgeladen"
                                 + (f" ({where})" if where else "") + ". Ein zweiter Upload erzeugt dort ein zweites, "
                                 "identisches Video.", "already_posted", 409)
-        session = None if done else _earlier_session(variant_id, account_id, privacy)
-        post_id = store.add_post(variant_id, "youtube", account_id=account_id, status="uploading", privacy=privacy)
+        carry = {} if done else _earlier_state(pub, variant_id, account_id, options)
+        post_id = store.add_post(variant_id, pub.platform, account_id=account_id, status="uploading",
+                                 privacy=options.get("privacy"))
         jid = store.create_job("upload", (video or {}).get("profile") or store.get_setting("ui.default_profile"),
                                parent_id=(pick or {}).get("job_id"), title=variant.get("title"),
                                priority=PRIORITY["upload"], progress="Wartet",
-                               params={"variant_id": variant_id, "account_id": account_id, "privacy": privacy,
-                                       "post_id": post_id, **({"upload_session": session} if session else {}),
+                               params={"variant_id": variant_id, "account_id": account_id, "platform": pub.platform,
+                                       **pub.job_params(options), "post_id": post_id, **carry,
                                        **({"forced": True} if done else {})})
     _wake()
     return jid
@@ -1834,11 +1883,83 @@ def reject_pick(pick_id, reason=None):
     return store.get_pick(pick_id)
 
 
-def _edit_errors(data, changes):
-    """{field: German message} for a PATCH body of /api/picks/{id}."""
-    allowed = {"hooks", "titles", "description", "hashtags", "voiceover", "start", "end", "clip_type", "hook_style",
-               "caption_style"}
-    errs = {k: "Dieses Feld lässt sich nicht bearbeiten" for k in changes if k not in allowed}
+EDITABLE = ("hooks", "titles", "description", "hashtags", "voiceover", "start", "end", "clip_type", "hook_style",
+            "caption_style", "fx", "music", *style.KEYS)
+NULLABLE = ("fx", "music", *style.KEYS)  # null removes the key: automatic / the default from Einstellungen
+
+
+def _clip_window(data, changes):
+    """(lo, hi) of the pick's fx/music time base: source seconds of a single clip, clip seconds of a story cut."""
+    segs = data.get("segments")
+    if segs:
+        return 0.0, sum(float(x["end"]) - float(x["start"]) for x in segs)
+    return float(changes.get("start", data.get("start", 0))), float(changes.get("end", data.get("end", 0)))
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _sound_off(track):
+    """Why a known hit sound can't play (German), or None when it can (clipper.music.usable, for the pick's profile)."""
+    if track.get("usable"):
+        return None
+    if not track.get("exists", True):
+        return "seine Datei fehlt"
+    if not track.get("approved"):
+        return "er ist ausgeschaltet (Einstellungen → Assets)"
+    return "er kann einen Content-ID-Claim auslösen und ist für dieses Profil gesperrt"
+
+
+def _fx_error(items, lo, hi, sounds, keep=()):
+    if not isinstance(items, list) or len(items) > MAX_FX:
+        return f"Liste mit höchstens {MAX_FX} Effekten (leer = keine Effekte, null = automatisch)"
+    for i, f in enumerate(items, 1):
+        if not isinstance(f, dict) or not _num(f.get("t")) or f.get("type") not in style.FX_TYPES:
+            return f"Effekt {i}: braucht eine Zeit und eine Art (Blitz, Zoom oder Sound)"
+        extra = set(f) - {"t", "type", "color", "sound"}
+        if extra:
+            return f"Effekt {i}: unbekannte Angaben ({', '.join(sorted(extra))})"
+        if not lo - 0.001 <= f["t"] < hi:
+            return f"Effekt {i} liegt außerhalb des Clips"
+        if "color" in f and f["type"] != "flash":
+            return f"Effekt {i}: eine Farbe gibt es nur beim Blitz"
+        if "color" in f and not style.valid_colour(f["color"]):
+            return f"Effekt {i}: unbekannte Farbe (white, red, orange, lime oder #RRGGBB)"
+        if "sound" in f and f["type"] != "hit":
+            return f"Effekt {i}: einen Sound gibt es nur bei der Art Sound"
+        if "sound" in f and not (isinstance(f["sound"], str) and (f["sound"] in style.SOUND_ROLES or sounds is None
+                                                                  or f["sound"] in sounds or f["sound"] in keep)):
+            return f"Effekt {i}: den Sound „{f['sound']}“ gibt es nicht (mehr) in der Bibliothek"
+        why = sounds and f.get("sound") in sounds and f["sound"] not in keep and _sound_off(sounds[f["sound"]])
+        if why:
+            return (f"Effekt {i}: den Sound „{f['sound']}“ kannst du nicht wählen – {why}. Nimm einen anderen "
+                    "oder eine Rolle")
+    return None
+
+
+def _music_error(items, lo, hi):
+    if not isinstance(items, list) or len(items) > MAX_MUSIC:
+        return f"Liste mit höchstens {MAX_MUSIC} Musik-Abschnitten (leer = keine Musik, null = automatisch)"
+    for i, m in enumerate(items, 1):
+        if not isinstance(m, dict) or set(m) != {"s", "e", "mood"} or not (_num(m["s"]) and _num(m["e"])):
+            return f"Musik {i}: braucht Anfang, Ende und Stimmung"
+        if m["mood"] not in MOOD_DE:
+            return f"Musik {i}: Stimmung muss eins von {', '.join(MOOD_DE.values())} sein"
+        if m["e"] - m["s"] < 1:
+            return f"Musik {i}: das Ende muss mindestens 1 s nach dem Anfang liegen"
+        if m["s"] < lo - 0.001 or m["e"] > hi + 0.001:
+            return f"Musik {i} liegt außerhalb des Clips"
+    return None
+
+
+def _edit_errors(data, changes, sounds=None):
+    """{field: German message} for a PATCH body of /api/picks/{id}. `sounds`: {id: track} of the music library's hit
+    sounds as bridge `music_library` lists them for the pick's profile (None: not checked here; `clipper check` checks
+    the ids anyway). A named sound must be usable; one the saved pick already names stays allowed after it was
+    switched off or deleted (the render takes another of its role, the Freigabe marks it), so other edits to the
+    effects still save."""
+    errs = {k: "Dieses Feld lässt sich nicht bearbeiten" for k in changes if k not in EDITABLE}
 
     def strings(key, lo, hi):
         v = changes[key]
@@ -1874,7 +1995,40 @@ def _edit_errors(data, changes):
             errs["end"] = "Ende muss nach dem Start liegen"
         elif e - s > 60:
             errs["end"] = "Höchstens 60 Sekunden"
+    for key in style.KEYS:
+        if changes.get(key) is not None and not style.valid(key, changes[key]):
+            errs[key] = f"{style.KEY_DE[key]}: eins von {style.allowed_de(key)}"
+    look = changes["caption_look"] if "caption_look" in changes else data.get("caption_look")
+    cap = changes.get("caption_style", data.get("caption_style"))
+    if "caption_look" not in errs and style.look_mismatch(look, cap):
+        errs["caption_look"] = (f"Der Look „{look}“ gehört zum Untertitel-Stil „{style.LOOKS[look]}“, nicht "
+                                f"zu „{cap}“: wähle einen Look dieses Stils, „Klassisch“ oder „Automatisch“")
+    try:
+        lo, hi = _clip_window(data, changes)
+    except (KeyError, TypeError, ValueError):
+        lo, hi = 0.0, float("inf")
+    keep = {f["sound"] for f in data.get("fx") or [] if isinstance(f, dict) and isinstance(f.get("sound"), str)}
+    checks = (("fx", lambda v: _fx_error(v, lo, hi, sounds, keep)), ("music", lambda v: _music_error(v, lo, hi)))
+    for key, check in checks:
+        if changes.get(key) is not None and not {"start", "end"} & set(errs):
+            msg = check(changes[key])
+            if msg:
+                errs[key] = msg
     return errs
+
+
+def _hit_sounds(changes, profile):
+    """{id: track} of the library's hit sounds (with `usable` for this profile) when the edit names a sound that isn't
+    a role, else None (no lookup)."""
+    named = [f.get("sound") for f in changes.get("fx") or [] if isinstance(f, dict) and f.get("sound")]
+    if not any(isinstance(x, str) and x not in style.SOUND_ROLES for x in named):
+        return None
+    try:
+        tracks = runtime.run_bridge("music_library", {}, profile, timeout=T_CHECK).get("tracks") or []
+    except runtime.BridgeError as e:
+        log.warning("music library for a pick edit: %s", e.message)
+        return None
+    return {t["id"]: t for t in tracks if isinstance(t, dict) and t.get("kind") == "hit" and t.get("id")}
 
 
 def update_pick_data(pick_id, changes):
@@ -1887,13 +2041,13 @@ def update_pick_data(pick_id, changes):
         raise PipelineError(f"Nur offene Clips lassen sich bearbeiten (Status: {pick['status']}).", "not_proposed",
                             409)
     base = pick["data"] or {}
-    errs = _edit_errors(base, changes)
+    errs = _edit_errors(base, changes, _hit_sounds(changes, pick["profile"]))
     if errs:
         raise PipelineError("Bitte prüfe die Eingaben.", "invalid", 422, errs)
     new = dict(base)
     for k, v in changes.items():
-        if k == "voiceover" and not (v or "").strip():
-            new.pop("voiceover", None)
+        if k == "voiceover" and not (v or "").strip() or k in NULLABLE and v is None:
+            new.pop(k, None)
         else:
             new[k] = [x.strip() for x in v] if k in ("hooks", "titles") else v
     job = store.get_job(pick["job_id"])

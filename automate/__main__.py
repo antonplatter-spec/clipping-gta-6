@@ -5,7 +5,8 @@
                      SIGTERM shut it down cleanly (jobs' subprocesses stop, detached live recorders keep going)
     reset-login [--yes] [--wipe-keys]   delete the account (password, 2FA, sessions) and print a new setup code so
                      the dashboard's setup wizard runs again (the way back in when both password and 2FA are lost:
-                     shell access on this PC is the proof of ownership); keys and YouTube tokens stay unless --wipe-keys
+                     shell access on this PC is the proof of ownership); keys and the YouTube and Instagram
+                     connections stay unless --wipe-keys
     serve prints a one-time setup code (and opens the dashboard with it) whenever the setup is open: only the code's
     holder can create the login (api/auth.py)
     doctor           health.system_report() in German; exit 1 when something required is missing
@@ -245,7 +246,7 @@ def reset_login(argv):
                                 description="Login zurücksetzen (Passwort, 2FA, Sitzungen).")
     p.add_argument("--yes", action="store_true", help="ohne Rückfrage")
     p.add_argument("--wipe-keys", action="store_true",
-                   help="auch alle API-Schlüssel löschen und YouTube-Verbindungen trennen")
+                   help="auch alle API-Schlüssel und App-IDs löschen und YouTube- und Instagram-Verbindungen trennen")
     args = p.parse_args(argv)
     from . import store
     from .api import auth
@@ -255,11 +256,11 @@ def reset_login(argv):
         print("Es gibt kein eingerichtetes Konto – die Einrichtung ist offen.\n"
               f"  Einrichtung: {auth.setup_url(_running_url(), token)}\n  Einrichtungs-Code: {token}")
         return 0
-    kept = ("API-Schlüssel (Anthropic, Fish Audio, Google-OAuth-Client) und verbundene YouTube-Konten werden "
-            "GELÖSCHT bzw. getrennt." if args.wipe_keys else
-            "API-Schlüssel (Anthropic, Fish Audio, Google-OAuth-Client) und verbundene YouTube-Konten BLEIBEN "
-            "erhalten – wer die Einrichtung abschließt, kann sie benutzen. Mit --wipe-keys werden sie auch "
-            "gelöscht.")
+    keys = ("API-Schlüssel und App-Zugangsdaten (Anthropic, Fish Audio, Google-OAuth-Client, Instagram- und "
+            "Meta-App-ID mit Geheimcode) und verbundene YouTube- und Instagram-Konten")
+    kept = (f"{keys} werden GELÖSCHT bzw. getrennt." if args.wipe_keys else
+            f"{keys} BLEIBEN erhalten – wer die Einrichtung abschließt, kann sie benutzen. Mit --wipe-keys werden sie "
+            "auch gelöscht.")
     print(f"Das setzt den Login „{user['username']}“ zurück: Konto, Passwort, 2FA und Wiederherstellungscodes werden "
           f"gelöscht, alle Sitzungen abgemeldet. Quellen, Videos und Einstellungen bleiben erhalten. {kept} "
           f"Danach legst du im Dashboard mit dem neuen Einrichtungs-Code ein neues Konto mit neuer 2FA an.")
@@ -278,7 +279,7 @@ def reset_login(argv):
         token = auth.issue_setup_token()
     if args.wipe_keys:
         _wipe_keys()
-    print("Login zurückgesetzt" + (", Schlüssel gelöscht und YouTube getrennt" if args.wipe_keys else "")
+    print("Login zurückgesetzt" + (", Schlüssel gelöscht, YouTube und Instagram getrennt" if args.wipe_keys else "")
           + ". Ein laufender Server muss nicht neu starten.\n"
           f"  Einrichtung: {auth.setup_url(_running_url(), token)}\n  Einrichtungs-Code: {token}\n"
           "  (Startest du den Server neu, gilt der Code, den er dann im Terminal zeigt.)")

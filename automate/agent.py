@@ -58,7 +58,7 @@ from datetime import datetime
 import anthropic
 
 from . import agent_tools as T
-from . import costs, prompts, runtime, store
+from . import costs, prompts, runtime, store, style
 
 BETAS = ["server-side-fallback-2026-07-01"]
 MAX_TOKENS = 32000  # thinking + the reply; a full submit_picks of several picks is ~5k
@@ -431,7 +431,12 @@ def _first_message(ctx, max_turns, max_fix):
         moods, hits = music
         music_text = (f"moods with an approved track: {', '.join(moods)}" if moods else
                       "no approved track in any mood, so music windows would be skipped: use \"music\": [] where check "
-                      "notes a quiet stretch") + (f"; hit sounds: {', '.join(hits)}" if hits else "; no hit sounds")
+                      "notes a quiet stretch")
+        music_text += ("; hit sounds by role (name a role, or one id for that exact sound): "
+                       + "; ".join(f"{role}: {', '.join(ids)}" for role, ids in hits.items())) if hits else \
+            "; no approved hit sounds: leave hits out"
+    cfg = prompts.profile_config(ctx.profile)
+    defaults = ", ".join(f"{k} {cfg.get(k) if style.valid(k, cfg.get(k)) else style.DEFAULTS[k]}" for k in style.KEYS)
     facts = [
         ("Job", f"{ctx.clipper_job} (worker job #{job.get('id')}, "
                 f"{'a chunk of a live stream' if live else 'an uploaded video'})"),
@@ -449,6 +454,7 @@ def _first_message(ctx, max_turns, max_fix):
         ("How earlier videos' hooks and titles open", "; ".join(f"\"{o}\"" for o in openers) + " (don't start a "
          "hook or title with the same three words as any of these)" if openers else "no earlier videos yet"),
         ("Music", music_text),
+        ("Caption, hook and sound defaults (what a pick that leaves the key out gets)", defaults),
         ("Requests", f"{max_turns} in total for this job (every round trip with tool results is one)"),
         ("Fix rounds", f"{max_fix} rejected submission(s) come back for fixing; the next rejection fails the job"
          if max_fix else "none: the first rejected submission fails the job"),
@@ -489,6 +495,9 @@ def _say_call(ctx, name, inp):
         ctx.say(f"Claude sieht sich {what} an")
     elif name == "find_line":
         ctx.say(f"Claude sucht „{inp.get('pattern')}“ in anderen Streams")
+    elif name == "preview":
+        at = inp.get("at")
+        ctx.say("Claude sieht sich die Vorschau eines Clips an" + (f" (bei {at} s)" if T._num(at) else ""))
     elif name == "check":
         ctx.say("Claude prüft einen Entwurf")
     elif name == "simulate":

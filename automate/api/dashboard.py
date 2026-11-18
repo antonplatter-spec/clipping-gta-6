@@ -217,7 +217,8 @@ def overview():
         "recent_jobs": [job_out(j) for j in store.list_jobs(limit=8)[0]],
         "ready": {"anthropic_key": store.secret_info("anthropic_api_key")["set"],
                   "fish_key": store.secret_info("fish_api_key")["set"],
-                  "youtube_connected": social.youtube_connected(), "tools_ok": tools_ok,
+                  "youtube_connected": social.youtube_connected(),
+                  "instagram_connected": social.instagram_connected(), "tools_ok": tools_ok,
                   "sources": len(streams) + len(creators)},
     }
 

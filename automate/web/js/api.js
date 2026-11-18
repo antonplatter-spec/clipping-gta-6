@@ -42,6 +42,13 @@
 //     `/#/konten?youtube=error&message=<urlencoded German text>`.
 // 11. Tool rows in GET /api/system may carry `required` (bool) and `purpose` (German, what the tool is for).
 // 12. GET /api/keys and GET /api/social/accounts use the general list shape `{items, total}` (§7 wrote `[...]`).
+// 13. Round 2: uploads go to YouTube or Instagram through one route (POST /api/variants/{id}/upload with the
+//     platform's `options`); GET /api/social/platforms lists the platforms and their option fields, Account gains
+//     `can_upload` and `connection`, and the Instagram connection has its own routes (section "Upload platforms and
+//     Instagram" at the end of this file).
+// 14. Round 2, captions and sound: PickData gains the caption/hook/sound keys (PATCH takes them, null = back to the
+//     default from Einstellungen); GET /api/picks/{id}/preview draws a layout still; Video gains `made`; the music
+//     library lists roles, lengths and own sounds, which can be uploaded (raw body), listened to and deleted.
 //
 // Decided here where §7 is silent (the backend implements exactly these; details at each function):
 //  - POST /api/login → State. Wrong credentials → 401 `invalid_credentials` (the client does not redirect on it).
@@ -126,16 +133,18 @@ function handleUnauthorized() {
  * The one place that talks to the server.
  * @param {string} method
  * @param {string} path path below /api, e.g. "/jobs/3"
- * @param {{body?: any, params?: Object, signal?: AbortSignal, redirect401?: boolean}} [opts]
+ * @param {{body?: any, params?: Object, signal?: AbortSignal, redirect401?: boolean, raw?: Blob, rawType?: string}} [opts]
+ *   `raw`: send this Blob/File as the body instead of JSON (with `rawType` as its Content-Type)
  */
-export async function request(method, path, { body, params, signal, redirect401 = true } = {}) {
+export async function request(method, path, { body, params, signal, redirect401 = true, raw, rawType } = {}) {
   const headers = { 'X-Requested-With': 'automate', Accept: 'application/json' };
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (raw !== undefined) headers['Content-Type'] = rawType || 'application/octet-stream';
+  else if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res;
   try {
     res = await fetch(BASE + path + query(params), {
       method, headers, signal, credentials: 'same-origin', cache: 'no-store',
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
     if (e && e.name === 'AbortError') throw e;
@@ -294,8 +303,9 @@ export const confirmTotp = (body) => request('POST', '/account/totp/confirm', { 
  * @property {number} videos_today
  * @property {{disk_free_gb: number|null, tools_ok: boolean, missing: string[]}} system
  * @property {Job[]} recent_jobs        newest first, about 8
- * @property {{anthropic_key: boolean, fish_key: boolean, youtube_connected: boolean, tools_ok: boolean,
- *   sources: number}} ready           ADDITION: sources = active (non-paused) creators + streams of enabled profiles
+ * @property {{anthropic_key: boolean, fish_key: boolean, youtube_connected: boolean, instagram_connected: boolean,
+ *   tools_ok: boolean, sources: number}} ready  ADDITION: sources = active (non-paused) creators + streams of
+ *   enabled profiles; instagram_connected (round 2) = an Instagram account with a stored token
  */
 
 /**
@@ -426,15 +436,24 @@ export const scanNow = (body = {}) => request('POST', '/scan', { body });
  * @property {string[]} [hashtags]
  * @property {string} [voiceover]
  * @property {Array<{s: number, e: number, text: string}>} [labels]
- * @property {Array<{t: number, type: "flash"|"zoom"|"hit", sound?: string, color?: string}>} [fx]
- * @property {Array<{s: number, e: number, mood: string}>} [music]
+ * @property {Array<{t: number, type: "flash"|"zoom"|"hit", sound?: string, color?: string}>} [fx]  edit beats in
+ *   the pick's time base (source seconds of a single clip, clip seconds of a story cut); missing = the render scores
+ *   the clip itself (zooms, sound on its epic beats up to sound_level), [] = no effects. A hit's `sound` is a role
+ *   (impact | riser | whoosh | tension; a riser ENDS on t) or a library sound id.
+ * @property {Array<{s: number, e: number, mood: string}>} [music]  missing = automatic; [] = no added audio at all
  * @property {Object<string,string>} [caption_fixes]
+ * @property {"auto"|"high"|"seam"|"low"|"classic"} [caption_position]  missing = the default from Einstellungen
+ * @property {"auto"|"small"|"medium"|"large"} [caption_size]
+ * @property {string} [caption_look]  "auto" | "classic" | a look of the caption_style's family (labels.LOOKS)
+ * @property {"auto"|"small"|"medium"|"large"} [hook_size]
+ * @property {"auto"|"whole"|number} [hook_seconds]  number = 1-30 seconds, then a short fade
+ * @property {"off"|"subtle"|"normal"|"strong"} [sound_level]  automatic sound for a pick without fx
  */
 
 /**
  * `clipper check` result for ONE pick: the value `hooks.check_picks` (+ footage check) produces under "video N".
- * Fails (block approval): hooks/titles `fails`, and the keys variety, length, labels, fx, footage (as in
- * `clipper.hooks.has_fails`). Notes (judgment calls): hooks/titles `notes`, pairing, playbook, clip_type, edit.
+ * Fails (block approval): hooks/titles `fails`, and the keys variety, length, labels, fx, footage, style (as in
+ * `clipper.hooks.has_fails`; style = a caption, hook or sound key or a music mood the renderer doesn't know). Notes (judgment calls): hooks/titles `notes`, pairing, playbook, clip_type, edit.
  * Messages are clipper's own (English). `{}` = clean.
  * @typedef {Object} CheckReport
  * @property {Object<string, {fails: string[], notes?: string[]}>} [hooks]   keyed by hook text
@@ -448,6 +467,7 @@ export const scanNow = (body = {}) => request('POST', '/scan', { body });
  * @property {string[]} [edit]
  * @property {string} [variety]
  * @property {string[]} [footage]
+ * @property {string[]} [style]
  */
 
 /**
@@ -501,12 +521,46 @@ export const getPick = (id) => request('GET', `/picks/${id}`);
  * `simulate_report` matches the new hook texts) and saves only when there are no fails.
  * Fails → 422 `{code: "check_failed", message, check_report}` and nothing is saved.
  * `voiceover: ""` or null removes the voiceover. Not proposed → 409.
+ * The caption/hook/sound keys, `fx` and `music` (PickData) take their value, or null = drop the key (back to the
+ * default from Einstellungen / the render's automatic choice); `[]` for fx or music = none on purpose. Invalid
+ * values → 422 with German `fields` (e.g. "Effekt 2 liegt außerhalb des Clips").
  * @param {number} id
  * @param {{hooks?: string[], titles?: string[], description?: string, hashtags?: string[], voiceover?: string|null,
- *   start?: number, end?: number, clip_type?: ClipType, hook_style?: string, caption_style?: string}} changes
+ *   start?: number, end?: number, clip_type?: ClipType, hook_style?: string, caption_style?: string,
+ *   caption_position?: string|null, caption_size?: string|null, caption_look?: string|null, hook_size?: string|null,
+ *   hook_seconds?: string|number|null, sound_level?: string|null, fx?: Object[]|null, music?: Object[]|null}} changes
  * @returns {Promise<{pick: Pick, check_report: CheckReport}>}
  */
 export const updatePick = (id, changes) => request('PATCH', `/picks/${id}`, { body: changes });
+
+/**
+ * One composited still of the saved pick as it will render (`clipper preview`: layout, hook banner, caption on screen).
+ * Drawn on the server, cached per pick content + time + hook (an edit gives a new `key`), at most two at once.
+ * Always 200: `ok: false` with `reason` source_gone (the source video is deleted) | busy (try again shortly) | failed,
+ * and a German `message`.
+ * @typedef {Object} PreviewResult
+ * @property {boolean} ok
+ * @property {string} [key]
+ * @property {string} [image]      URL of the PNG (1080x1920), session cookie only (for <img>)
+ * @property {number} [at]         seconds into the finished clip
+ * @property {string|null} [hook]  the hook drawn (null: none, e.g. the no-hook A/B arm)
+ * @property {boolean} [hook_visible]
+ * @property {boolean} [no_hook_arm]  this clip posts without a banner (A/B test)
+ * @property {string} [caption]    the caption on screen then
+ * @property {{text_de: string, captions: Object, hook: Object, layout: string}} [placement]
+ * @property {boolean} [cached]
+ * @property {"source_gone"|"busy"|"failed"} [reason]
+ * @property {string} [message]
+ */
+
+/**
+ * GET /api/picks/{id}/preview
+ * @param {number} id
+ * @param {{at?: number|null, hook?: number}} [params]  at: seconds into the finished clip (omit: the first caption
+ *   while the hook shows); hook: which hook variant (1 = first)
+ * @returns {Promise<PreviewResult>}
+ */
+export const getPickPreview = (id, params = {}) => request('GET', `/picks/${id}/preview`, { params });
 
 /**
  * POST /api/picks/{id}/approve — queues the render job. Pick with hook/title fails → 422; not proposed → 409.
@@ -550,10 +604,11 @@ export const sheetUrl = (jobId, name) => `${BASE}/jobs/${jobId}/sheets/${encodeU
  * @property {number} variant_id
  * @property {number|null} account_id
  * @property {Platform} platform
- * @property {"posted"|"uploading"|"failed"} status  uploading = YouTube upload job still running
+ * @property {"posted"|"uploading"|"failed"} status  uploading = an upload job (YouTube, Instagram) still running
  * @property {string|null} external_id
- * @property {string|null} url
- * @property {"private"|"unlisted"|"public"|null} privacy
+ * @property {string|null} url    for uploads: the YouTube video / the Instagram Reel's permalink (null when Instagram
+ *   published it but the link could not be read)
+ * @property {"private"|"unlisted"|"public"|null} privacy  YouTube only (Instagram posts: null)
  * @property {string|null} note
  * @property {string|null} error   German, for failed uploads
  * @property {number} created_at
@@ -592,6 +647,9 @@ export const sheetUrl = (jobId, name) => `${BASE}/jobs/${jobId}/sheets/${encodeU
  * @property {number|null} job_id
  * @property {number|null} pick_id
  * @property {Variant[]} variants  by rank
+ * @property {{placement: string|null, sound: string|null, sound_level: string|null,
+ *   sound_layers: Array<{id: string, role: string, start: number, end: number}>}|null} made
+ *   what the render decided (clipper's German sentences from upload.json); null for older renders and dubs
  */
 
 /**
@@ -625,14 +683,19 @@ export const markPosted = (variantId, body) => request('POST', `/variants/${vari
 export const deletePost = (id) => request('DELETE', `/posts/${id}`);
 
 /**
- * POST /api/variants/{id}/upload — YouTube upload as a job (creates a Post with status "uploading").
- * Account not connected → 409 `not_connected`; the variant is uploading to that account right now → 409
- * `already_uploading`; it is already posted to that account → 409 `already_posted` unless `force: true` (send it
- * only after the owner confirmed a second, identical video on that channel). A new upload first asks the resumable
- * session of an earlier failed/canceled upload of the same variant, account and privacy, so a video that reached
- * YouTube anyway is recorded instead of uploaded again.
+ * POST /api/variants/{id}/upload — CHANGED (round 2): one route for every platform the account can upload to
+ * (YouTube, Instagram), as a job (creates a Post with status "uploading"). `options` are the platform's own fields
+ * (GET /api/social/platforms): YouTube `{privacy}`, Instagram `{share_to_feed}` (default true). The old top-level
+ * `privacy` is still accepted for YouTube. A bad option → 422 with `fields`; a platform without direct upload → 409
+ * `not_supported`; account not connected → 409 `not_connected`; the variant is uploading to that account right
+ * now → 409 `already_uploading`; it is already posted to that account → 409 `already_posted` unless `force: true`
+ * (send it only after the owner confirmed a second, identical post there); Instagram refuses the file (Reels rules)
+ * → 422 `unsupported_media` (German reasons in `message`). A new upload first asks what an earlier failed/canceled
+ * upload of the same variant and account left (YouTube: its session; Instagram: its container, or the publish it
+ * sent), so a video that went online anyway is recorded instead of posted again.
  * @param {number} variantId
- * @param {{account_id: number, privacy: "private"|"unlisted"|"public", force?: boolean}} body
+ * @param {{account_id: number, options?: Object<string, any>, privacy?: "private"|"unlisted"|"public",
+ *   force?: boolean}} body
  * @returns {Promise<{job_id: number}>}
  */
 export const uploadVariant = (variantId, body) => request('POST', `/variants/${variantId}/upload`, { body });
@@ -832,20 +895,48 @@ export const putResearch = (body) => request('PUT', '/research', { body });
  * @property {string} file
  * @property {"music"|"hit"} kind
  * @property {string} mood       suspense | sneaky | epic | sad | funny | any
+ * @property {"impact"|"riser"|"whoosh"|"tension"|null} role  sound effects only (null for music)
+ * @property {string[]} tags     what the automatic sound asks for (big, boom, sub, braam, swell, short)
+ * @property {number|null} length  seconds
+ * @property {number|null} beat_at  seconds into the file where its beat is (when the library says)
  * @property {boolean} claimable can get a Content-ID claim
  * @property {boolean} approved
- * @property {boolean} usable    approved and file present (and not blocked as claimable)
+ * @property {boolean} usable    the render can play it for that profile: approved, file present, and not Content-ID
+ *                               claimable unless the profile's music.allow_claimable is on (clipper.music.usable)
  * @property {boolean} local     defined in assets/music/local/library.yaml
+ * @property {"own"|"built-in"} source  own = uploaded (or added by hand) in assets/music/local/
+ * @property {string|null} title  the original file name of an own sound
+ * @property {boolean} exists
  */
 
 /**
- * GET /api/assets
+ * GET /api/assets[?profile=] — `usable` of each track holds for that profile (default: the default profile).
+ * @param {string} [profile]
  * @returns {Promise<{fonts: Array<{name: string, file: string, license?: string|null}>, music: MusicTrack[]}>}
  */
-export const getAssets = () => request('GET', '/assets');
+export const getAssets = (profile) => request('GET', '/assets', { params: profile ? { profile } : undefined });
 
 /** PATCH /api/assets/music/{id} @param {string} id @param {{approved: boolean}} body @returns {Promise<MusicTrack>} */
 export const updateMusic = (id, body) => request('PATCH', `/assets/music/${encodeURIComponent(id)}`, { body });
+
+/** URL of a library sound (GET /api/assets/music/{id}/file, Range support) for <audio>. */
+export const soundFileUrl = (id) => `${BASE}/assets/music/${encodeURIComponent(id)}/file`;
+
+/**
+ * POST /api/assets/music — upload an own sound effect or music track (the file itself is the body; at most 25 MB;
+ * WAV, MP3, M4A or OGG). The server checks that it really is audio of a sane length and files it under a name it
+ * chooses. Problems → 422 with `fields.file` (German), too big → 413.
+ * @param {File|Blob} file
+ * @param {{name: string, kind: "hit"|"music", role?: string, mood?: string, claimable: boolean, approved: boolean}} meta
+ * @returns {Promise<MusicTrack>}
+ */
+export const uploadSound = (file, meta) => request('POST', '/assets/music', {
+  raw: file, rawType: file.type || 'application/octet-stream',
+  params: { ...meta, claimable: meta.claimable ? 1 : 0, approved: meta.approved ? 1 : 0 },
+});
+
+/** DELETE /api/assets/music/{id} — own sounds only (a built-in one → 409 not_removable). @returns {Promise<Ok>} */
+export const deleteSound = (id) => request('DELETE', `/assets/music/${encodeURIComponent(id)}`);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Costs and API keys
@@ -925,14 +1016,16 @@ export const testKey = (name) => request('POST', `/keys/${name}/test`);
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * @typedef {Object} Account  credentials (OAuth tokens) are never returned
+ * @typedef {Object} Account  credentials (OAuth tokens, Instagram tokens) are never returned
  * @property {number} id
  * @property {Platform} platform
  * @property {string} label
- * @property {string|null} handle
+ * @property {string|null} handle     YouTube: the channel handle; Instagram: "@username"
  * @property {string|null} profile    which clipper profile posts here (null = any)
- * @property {boolean} connected      YouTube: OAuth tokens present and valid; other platforms: always false
- * @property {string|null} external_id  YouTube channel id
+ * @property {boolean} connected      YouTube/Instagram: a connection is stored; other platforms: always false
+ * @property {boolean} can_upload     ADDITION (round 2): connected and its credentials are present
+ * @property {InstagramConnection|null} connection  ADDITION (round 2): Instagram only, non-secret token facts
+ * @property {string|null} external_id  YouTube channel id / Instagram user id
  * @property {string|null} notes
  */
 
@@ -985,8 +1078,103 @@ export const putYoutubeApp = (body) => request('PUT', '/social/youtube/app', { b
  */
 export const youtubeConnect = (body = {}) => request('POST', '/social/youtube/connect', { body });
 
-/** POST /api/social/accounts/{id}/disconnect — revokes/forgets tokens. @returns {Promise<Account>} */
+/** POST /api/social/accounts/{id}/disconnect — revokes (YouTube) and forgets the tokens. @returns {Promise<Account>} */
 export const disconnectAccount = (id) => request('POST', `/social/accounts/${id}/disconnect`);
+
+// ---------------------------------------------------------------------------------------------------------------
+// Upload platforms and Instagram (round 2: Reels publishing; backend automate/social.py, automate/instagram.py)
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * One option of a platform's upload dialog.
+ * @typedef {Object} UploadOption
+ * @property {string} key                e.g. "privacy" (YouTube), "share_to_feed" (Instagram)
+ * @property {"choice"|"boolean"} type
+ * @property {string} label              German
+ * @property {any} default
+ * @property {{value: string, label: string}[]} [choices]   type "choice"
+ * @property {string} [help]             German
+ */
+
+/** @typedef {{platform: Platform, label: string, options: UploadOption[]}} UploadPlatform */
+
+/** GET /api/social/platforms — the platforms the dashboard uploads to. @returns {Promise<{items: UploadPlatform[], total: number}>} */
+export const getPlatforms = () => request('GET', '/social/platforms');
+
+/**
+ * GET /api/variants/{id}/upload/preview — what each platform would post: `{youtube: {label, title, description,
+ * problems}, instagram: {label, caption, problems}}`; `problems` are German reasons the platform would refuse the
+ * file (Instagram's Reels rules: codec, length, size, …), [] = fine.
+ * @returns {Promise<Object<string, {label: string, title?: string, description?: string, caption?: string, problems: string[]}>>}
+ */
+export const uploadPreview = (variantId) => request('GET', `/variants/${variantId}/upload/preview`);
+
+/**
+ * Non-secret facts about an Instagram connection (Account.connection).
+ * @typedef {Object} InstagramConnection
+ * @property {"instagram"|"facebook"} kind   which login the token comes from (Instagram Login / Facebook Page)
+ * @property {string|null} username
+ * @property {number|null} expires_at        null = no expiry (Facebook Page token)
+ * @property {boolean} expires_estimated     true = a pasted token whose age is unknown: expires at the latest then
+ * @property {number|null} refreshed_at      last automatic refresh
+ * @property {number|null} checked_at        last time Meta confirmed the token
+ * @property {string|null} refresh_error     German, the last failed refresh/check (the token is kept)
+ * @property {string|null} page_name         Facebook Page (kind "facebook")
+ */
+
+/**
+ * @typedef {Object} InstagramApp   the ids only as masked hints; secrets are write-only
+ * @property {boolean} app_id_set           Instagram app id (Instagram Login, OAuth)
+ * @property {boolean} app_secret_set
+ * @property {string|null} app_id_hint
+ * @property {boolean} meta_app_id_set      Meta app id (the Facebook-Page path: exchanges the pasted token)
+ * @property {boolean} meta_app_secret_set
+ * @property {string|null} meta_app_id_hint
+ * @property {string|null} redirect_uri     null = OAuth unavailable (needs an HTTPS --public-url)
+ * @property {boolean} oauth_available
+ * @property {string} oauth_note            German
+ * @property {string} graph_version         e.g. "v26.0"
+ * @property {string[]} permissions         Instagram Login scopes
+ * @property {string[]} fb_permissions      Graph API Explorer permissions for the Facebook-Page path
+ */
+
+/** GET /api/social/instagram/app @returns {Promise<InstagramApp>} */
+export const getInstagramApp = () => request('GET', '/social/instagram/app');
+
+/**
+ * PUT /api/social/instagram/app — send any of the four; `null` clears it. Bad format → 422 `fields`.
+ * @param {{app_id?: string|null, app_secret?: string|null, meta_app_id?: string|null, meta_app_secret?: string|null}} body
+ * @returns {Promise<InstagramApp>}
+ */
+export const putInstagramApp = (body) => request('PUT', '/social/instagram/app', { body });
+
+/**
+ * POST /api/social/instagram/token — the paste path (write-only): an Instagram-Login token ("IG…", app dashboard) or
+ * a Facebook user token ("EAA…", Graph API Explorer; needs the Meta app id/secret). Validated at Meta first; returns
+ * the connected account(s) (the Facebook path connects every Page's Instagram account it finds). Refused token →
+ * 422 with `fields.access_token` (`instagram_token_invalid`, `instagram_not_professional`, `instagram_no_account`,
+ * `instagram_permission`, `instagram_wrong_account`, `instagram_token_format`); Meta app missing → 409
+ * `instagram_app_missing`; Meta unreachable → 502 `instagram_unreachable`.
+ * @param {{access_token: string, account_id?: number}} body
+ * @returns {Promise<{items: Account[], total: number}>}
+ */
+export const instagramToken = (body) => request('POST', '/social/instagram/token', { body });
+
+/**
+ * POST /api/social/instagram/connect — OAuth (Instagram Login); the dashboard navigates to `auth_url`. Only with an
+ * HTTPS --public-url (else 409 `instagram_needs_https`); app id/secret missing → 409 `instagram_app_missing`. The
+ * callback sends the browser to `/#/konten?instagram=connected&account=<id>` or `?instagram=error&message=…`.
+ * @param {{account_id?: number}} [body]
+ * @returns {Promise<{auth_url: string}>}
+ */
+export const instagramConnect = (body = {}) => request('POST', '/social/instagram/connect', { body });
+
+/**
+ * POST /api/social/instagram/accounts/{id}/check — asks Meta whether the token still works (refreshes it when due).
+ * Dead token → 409 `instagram_disconnected` (the account is disconnected, an alert raised).
+ * @returns {Promise<Account>}
+ */
+export const instagramCheck = (id) => request('POST', `/social/instagram/accounts/${id}/check`);
 
 // ---------------------------------------------------------------------------------------------------------------
 // System

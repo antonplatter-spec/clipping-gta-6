@@ -1,4 +1,5 @@
-// Freigabe-Queue: review Claude's picks, edit hooks/titles/text, approve → render, reject; history tabs.
+// Freigabe-Queue: review Claude's picks, edit hooks/titles/text, caption/hook/sound settings, effects and music (with a
+// layout preview still), approve → render, reject; history tabs.
 import * as api from '../api.js';
 import {
   html, useState, useEffect, useMemo, useRef, useData, useTitle, useNow, fmt, cx, toast, hookText, plainHook,
@@ -9,9 +10,13 @@ import {
   SelectField, TagInput, Callout, Modal, PickStatusBadge, Pager,
 } from '../ui.js';
 import {
-  CLIP_TYPES, HOOK_STYLES, CAPTION_STYLES, readCheck, rankingFor, rowType, hookTypeLabel, factorTone,
+  CLIP_TYPES, HOOK_STYLES, CAPTION_STYLES, readCheck, rankingFor, rowType, hookTypeLabel, factorTone, LOOKS,
+  SOUND_ROLES, FX_TYPES, STYLE_LABELS, styleValueLabel,
 } from '../labels.js';
-import { overview, loadProfiles } from '../store.js';
+import { overview, loadProfiles, loadSounds, loadStyleDefaults } from '../store.js';
+import {
+  LayoutPreview, StyleControls, FxEditor, MusicEditor, styleDraftOf, styleChangesOf, layoutChanged,
+} from './approval-style.js';
 
 const TABS = [
   { id: 'offen', status: 'proposed', label: 'Offen', tone: 'yellow' },
@@ -34,12 +39,18 @@ export function ApprovalPage({ route }) {
   // The queue itself is never re-rendered under the owner's hands; a light poll only announces new picks.
   const probe = useData(() => api.listPicks({ status: 'proposed', profile, limit: 1 }), [profile], { interval: 15000 });
   const profiles = useData(() => loadProfiles(), []);
+  const items = list.data ? list.data.items || [] : [];
+  // the sounds each pick's profile can play (a Content-ID sound may be allowed in one profile only)
+  const pickProfiles = [...new Set(items.map((p) => p.profile))].sort().join('\n');
+  const sounds = useData(() => (isQueue && pickProfiles
+    ? Promise.all(pickProfiles.split('\n').map((p) => loadSounds(p).then((t) => [p, t]))).then(Object.fromEntries)
+    : Promise.resolve({})), [isQueue, pickProfiles]);
+  const styleDefaults = useData(() => (isQueue ? loadStyleDefaults() : Promise.resolve({})), [isQueue]);
   const [selected, setSelected] = useState(new Set());
   const [dirty, setDirty] = useState(new Set());
   const [bulkBusy, setBulkBusy] = useState(null);
   useEffect(() => { setSelected(new Set()); }, [tab.id, profile, offset]);
 
-  const items = list.data ? list.data.items || [] : [];
   const counts = (probe.data && probe.data.counts) || (list.data && list.data.counts) || {};
   const tabCount = (t) => t.status.split(',').reduce((n, s) => n + (counts[s] || 0), 0);
   const newCount = isQueue && probe.data && list.data ? Math.max(0, probe.data.total - list.data.total) : 0;
@@ -115,6 +126,7 @@ export function ApprovalPage({ route }) {
       : html`<div class="stack-lg">
           ${items.map((p) => (isQueue
             ? html`<${PickEditor} key=${p.id} pick=${p} focus=${focusId === p.id} selected=${selected.has(p.id)}
+                sounds=${sounds.data && sounds.data[p.profile]} defaults=${styleDefaults.data}
                 onSelect=${(on) => setSelected((s) => { const n = new Set(s); if (on) n.add(p.id); else n.delete(p.id); return n; })}
                 onDone=${(id) => removeLocal([id])} onSaved=${replaceLocal} onDirty=${(d) => markDirty(p.id, d)} />`
             : html`<${PickHistory} key=${p.id} pick=${p} />`))}
@@ -153,6 +165,7 @@ function draftOf(pick) {
     clip_type: d.clip_type || '',
     hook_style: d.hook_style || '',
     caption_style: d.caption_style || '',
+    ...styleDraftOf(d),
   };
 }
 
@@ -169,15 +182,17 @@ function changesOf(draft, base) {
   }
   if (JSON.stringify(draft.hashtags) !== JSON.stringify(base.hashtags)) out.hashtags = draft.hashtags;
   for (const k of ['start', 'end']) if (draft[k] !== base[k] && draft[k] != null && !Number.isNaN(draft[k])) out[k] = draft[k];
-  return out;
+  return { ...out, ...styleChangesOf(draft, base) };
 }
 
-function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty }) {
+function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty, sounds, defaults }) {
   const base = useMemo(() => draftOf(pick), [pick]);
   const [draft, setDraft] = useState(base);
   const [report, setReport] = useState({ data: pick.check_report, forKey: keyOf(base) });
   const [busy, setBusy] = useState(null);
   const [saveError, setSaveError] = useState(null);
+  const [cursor, setCursor] = useState(null);  // the preview's moment (null: its default, `shown`)
+  const [shown, setShown] = useState(null);
   const ref = useRef(null);
   useEffect(() => { setDraft(base); setReport({ data: pick.check_report, forKey: keyOf(base) }); }, [base]);
   useEffect(() => { if (focus && ref.current) ref.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, [focus]);
@@ -194,7 +209,15 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
   const blocked = reportCurrent && check.failCount > 0 && !footageOnly;
   const emptyHook = draft.pairs.some((p) => !p.hook.trim());
 
-  const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
+  const set = (patch) => setDraft((d) => {
+    const p = typeof patch === 'function' ? patch(d) : patch;
+    const next = { ...d, ...p };
+    const look = LOOKS[next.style.caption_look];
+    const family = next.caption_style || (defaults && defaults.caption_style) || 'bold';
+    if ('caption_style' in p && look && look.family !== family) next.style = { ...next.style, caption_look: '' };  // the old style's look
+    return next;
+  });
+  const setStyle = (k, v) => set((d) => ({ style: { ...d.style, [k]: v } }));
   const setPair = (i, patch) => setDraft((d) => ({ ...d, pairs: d.pairs.map((p, j) => (j === i ? { ...p, ...patch } : p)) }));
   const move = (i, dir) => setDraft((d) => {
     const pairs = [...d.pairs];
@@ -260,11 +283,20 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
 
   const d = pick.data || {};
   const headingId = `pick-${pick.id}-h`;
+  const fields = (saveError && saveError.fields) || {};
+  const offset = d.segments && d.segments.length ? 0 : Number(draft.start ?? d.start ?? 0);
+  const clipDur = d.segments && d.segments.length ? pick.duration : Math.max(0, Number(draft.end ?? 0) - Number(draft.start ?? 0));
+  const savedOffset = d.segments && d.segments.length ? 0 : Number(d.start || 0);
+  const marks = (Array.isArray(d.fx) ? d.fx : []).filter((f) => f.type === 'hit')
+    .map((f) => ({ label: SOUND_ROLES[f.sound] ? SOUND_ROLES[f.sound].label : FX_TYPES.hit, t: Number(f.t) - savedOffset }))
+    .filter((m, i, all) => m.t >= 0 && m.t < pick.duration && all.findIndex((x) => Math.abs(x.t - m.t) < 0.05) === i);
   return html`<article class=${cx('card pick-card', selected && 'is-selected')} ref=${ref} aria-labelledby=${headingId} id=${`pick-${pick.id}`}>
     <${PickHead} pick=${pick} headingId=${headingId} selectable selected=${selected} onSelect=${onSelect} />
     ${pick.error && html`<div style="padding:0 18px"><${Callout} tone="warning" title="Zurück in der Freigabe">${pick.error}<//></div>`}
     <div class="pick-body">
       <aside class="pick-side">
+        <${LayoutPreview} pick=${pick} at=${cursor} onAt=${setCursor} onShown=${setShown} duration=${pick.duration} marks=${marks}
+          stale=${layoutChanged(draft, base)} />
         <${Sheets} sheets=${pick.sheets} title=${pick.job && pick.job.title} />
         <${Why} pick=${pick} />
         <${FxSummary} data=${d} />
@@ -292,6 +324,15 @@ function PickEditor({ pick, focus, selected, onSelect, onDone, onSaved, onDirty 
           <${TextField} label="Voiceover" optional value=${draft.voiceover} onInput=${(v) => set({ voiceover: v })}
             placeholder="Leer = kein Voiceover" help="Ein Satz, höchstens 10 Wörter. Wird von Fish Audio (oder der System-Stimme) gesprochen."
             maxLength=${120} showCount />
+        </section>
+        <${StyleControls} style=${draft.style} family=${draft.caption_style || (defaults && defaults.caption_style) || 'bold'}
+          defaults=${defaults} errors=${fields} onChange=${setStyle} />
+        <section class="stack">
+          <h3 class="section-label">Effekte & Musik</h3>
+          <${FxEditor} mode=${draft.fxMode} items=${draft.fx} onMode=${(m) => set({ fxMode: m })} onItems=${(fx) => set({ fx })}
+            offset=${offset} duration=${clipDur} cursor=${cursor ?? shown} sounds=${sounds} error=${fields.fx} />
+          <${MusicEditor} mode=${draft.musicMode} items=${draft.music} onMode=${(m) => set({ musicMode: m })} onItems=${(music) => set({ music })}
+            offset=${offset} duration=${clipDur} cursor=${cursor ?? shown} error=${fields.music} />
         </section>
         <details class="details">
           <summary><${Icon} name="chevron-right" size=${16} />Schnitt & Stil</summary>
@@ -389,7 +430,8 @@ function Why({ pick }) {
 function FxSummary({ data }) {
   const chips = [];
   if (data.layout && data.layout.type) chips.push(data.layout.type === 'split' ? 'Facecam oben (split)' : 'Vollbild (fit)');
-  if (Array.isArray(data.fx)) chips.push(data.fx.length ? `${data.fx.length} Effekte` : 'keine Effekte');
+  if (Array.isArray(data.fx)) chips.push(data.fx.length ? fmt.plural(data.fx.length, 'Effekt', 'Effekte') : 'keine Effekte');
+  if (data.sound_level) chips.push(`Sound: ${styleValueLabel('sound_level', data.sound_level)}`);
   if (Array.isArray(data.music)) chips.push(data.music.length ? `Musik: ${[...new Set(data.music.map((m) => m.mood))].join(', ')}` : 'keine Musik');
   if (data.labels && data.labels.length) chips.push(`${data.labels.length} Labels`);
   if (data.caption_fixes && Object.keys(data.caption_fixes).length) chips.push(`${Object.keys(data.caption_fixes).length} Namensfixes`);
@@ -433,6 +475,12 @@ function HookRow({ i, n, pair, pick, check, onChange, onMove, onRemove }) {
   </li>`;
 }
 
+const FIELD_LABELS = {
+  hooks: 'Hooks', titles: 'Titel', description: 'Beschreibung', hashtags: 'Hashtags', voiceover: 'Voiceover',
+  start: 'Start', end: 'Ende', clip_type: 'Clip-Typ', hook_style: 'Hook-Stil', caption_style: 'Untertitel-Stil',
+  fx: 'Effekte', music: 'Musik', ...STYLE_LABELS,
+};
+
 function CheckSummary({ check, current, dirty, error, footageOnly }) {
   const general = [...check.fails.map((x) => ({ ...x, fail: true })), ...check.notes];
   if (!current && dirty) {
@@ -440,7 +488,10 @@ function CheckSummary({ check, current, dirty, error, footageOnly }) {
       <span>Geändert – beim Speichern prüft der Server Hooks und Titel erneut (Check + Swipe-Test).</span></p></div>`;
   }
   if (!general.length && !check.failCount) {
-    if (error && !error.check_report) return html`<${Callout} tone="danger" title=${error.message} />`;
+    if (error && !error.check_report) {
+      return html`<${Callout} tone="danger" title=${error.message}>${error.fields && html`<ul class="plain-list">
+        ${Object.entries(error.fields).map(([k, m]) => html`<li><b>${FIELD_LABELS[k] || k}:</b> ${m}</li>`)}</ul>`}<//>`;
+    }
     return html`<div class="check-summary"><p class="issue" style="color:var(--green)"><${Icon} name="circle-check" size=${14} /><span>Qualitäts-Check ohne Fehler.</span></p></div>`;
   }
   return html`<div class=${cx('check-summary', check.failCount && 'has-fail')} role=${check.failCount ? 'alert' : undefined}>

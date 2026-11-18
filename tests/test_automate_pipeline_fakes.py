@@ -1,6 +1,6 @@
 """Fakes for the orchestrator tests (no tests in here): a stand-in for runtime.run_clipper / run_bridge that plays
-each clipper command on the temp jobs/exports dirs, fake automate.agent and automate.youtube modules, and the
-temp-data-dir base class. Imported by tests/test_automate_{pipeline,scheduler,health}.py."""
+each clipper command on the temp jobs/exports dirs, fake automate.agent, automate.youtube and automate.instagram
+modules, and the temp-data-dir base class. Imported by tests/test_automate_{pipeline,scheduler,health}.py."""
 import json
 import os
 import sys
@@ -18,6 +18,18 @@ from automate import db, health, paths, runtime, scheduler, store, worker
 from automate.runtime import ProcResult
 
 KEY = "sk-ant-test-0123456789abcdef"
+
+
+# what clipper's render writes about the clip's caption/hook placement and its added sound (placement.summary and
+# render.sound_summary, shortened)
+PLACEMENT = {"layout": "split", "captions": {"position": "high", "size": "small", "look": "boxed-word"},
+             "hook": {"size": "small", "seconds": 3.0},
+             "text_de": "Untertitel: oben im Spielbild, klein – ruhigster Bereich · Look: Bebas auf Schwarz, ein Wort "
+                        "· Hook: auf der Naht, klein, 3 s, dann ausblenden – Reaktion: das Gesicht ist der Hook"}
+SOUND = {"level": "normal", "auto": True, "beats": [{"t": 9.5, "why": "jump", "roles": ["riser", "impact"]}],
+         "layers": [{"id": "noise-riser", "role": "riser", "start": 7.5, "end": 9.5, "gain_db": -1.0},
+                    {"id": "cinematic-impact", "role": "impact", "start": 9.5, "end": 11.7, "gain_db": 2.0}],
+         "text_de": "Sound: normal – Riser + Impact bei 9,5 s (Lautstärkesprung +14 dB)"}
 
 
 def make_pick(n, start=10.0):
@@ -74,6 +86,11 @@ class FakeClipper:
         self.render_active = self.render_max = 0
         self.seen_audio = None
         self.bad_videos = []      # one list of broken file names (or None) per `verify_videos` call
+        self.library = [          # bridge `music_library` (`usable` as clipper.music.usable says for the profile)
+            {"id": "boom", "kind": "hit", "role": "impact", "approved": True, "usable": True, "exists": True},
+            {"id": "my-riser", "kind": "hit", "role": "riser", "approved": True, "usable": True, "exists": True},
+            {"id": "quirky", "kind": "music", "mood": "funny", "approved": True, "usable": True, "exists": True}]
+        self.library_profiles = []  # the profile of each `music_library` call
 
     @staticmethod
     def after_dashes(args):
@@ -153,7 +170,8 @@ class FakeClipper:
                             "hashtags": pick.get("hashtags") or [], "duration": 20.0, "predicted": 1.3 - i / 10,
                             "source": "https://www.youtube.com/watch?v=x&t=10s",
                             "sources": ["https://www.youtube.com/watch?v=x&t=10s"],
-                            **({"lang": lang} if lang else {}), **({"footage": footage} if footage else {})})
+                            **({"lang": lang} if lang else {}), **({"footage": footage} if footage else {}),
+                            **({} if lang else {"placement": dict(PLACEMENT), "sound": dict(SOUND)})})
         (folder / "upload.json").write_text(json.dumps(entries))
         return entries
 
@@ -171,6 +189,7 @@ class FakeClipper:
                 n = max([int(p.name.split()[1]) for p in out.glob("video *")], default=0) + 1
                 folder = out / f"video {n}"
                 folder.mkdir()
+            emit(f"[render] video {n}: {PLACEMENT['text_de']}")
             emit(f"[render] video {n} (1 of 1): separating voices + diarizing ...")
             for h in pick["hooks"]:
                 emit(f"[render]   video {n}/{h}.mp4")
@@ -249,6 +268,9 @@ class FakeClipper:
                     report.setdefault(f"video {n}", {})["footage"] = hits
                     fails = True
             return {"report": report, "fails": fails}
+        if op == "music_library":
+            self.library_profiles.append(profile)
+            return {"tracks": [dict(t) for t in self.library]}
         if op == "verify_videos":
             bad = (self.bad_videos.pop(0) if self.bad_videos else None) or []
             return {"videos": [{"file": f, "ok": Path(f).name not in bad, "width": 1080, "height": 1920,
@@ -377,6 +399,66 @@ def make_youtube():
     return mod
 
 
+def make_instagram():
+    """A stand-in for automate.instagram with the real one's resume contract: the container and the publish marker
+    go through on_state as they happen, and a container published once answers every later attempt with its media
+    (never a second Reel). `script` items: an exception raised before the publish request, or one with
+    `after_publish = True` raised after it went out (a power cut, a lost answer); a callable is called first."""
+    mod = types.ModuleType("automate.instagram")
+
+    class InstagramError(Exception):
+        def __init__(self, message, *, retryable=False, code="instagram_error", slow=False):
+            super().__init__(message)
+            self.retryable, self.code, self.slow = retryable, code, slow
+
+    mod.InstagramError = InstagramError
+    mod.STATE_KEYS = ("ig_container", "ig_container_at", "ig_uploaded", "ig_publish_at", "ig_media")
+    mod.CONTAINER_TTL_S = 23 * 3600
+    mod.calls, mod.states, mod.script, mod.problems, mod.published = [], [], [], [], {}
+
+    def result(mid):
+        return {"external_id": mid, "media_id": mid, "url": f"https://www.instagram.com/reel/{mid}/"}
+
+    def publish(variant_id, account_id, options, *, state=None, on_state=None, on_progress=None, cancel=None,
+                log=None):
+        st = dict(state or {})
+        mod.calls.append((variant_id, account_id, dict(options)))
+        mod.states.append(dict(st))
+
+        def save(**changes):
+            st.update(changes)
+            on_state(dict(changes))
+        if st.get("ig_publish_at") and st.get("ig_container") in mod.published:
+            return result(mod.published[st["ig_container"]])
+        if not st.get("ig_container"):
+            save(ig_container=f"C{len(mod.calls)}", ig_container_at=time.time(), ig_uploaded=False)
+        if on_progress:
+            on_progress(100, 100)
+        save(ig_uploaded=True)
+        if log:
+            log("Instagram verarbeitet das Video …")
+        item = mod.script.pop(0) if mod.script else None
+        if callable(item):
+            item = item()
+        if isinstance(item, BaseException) and not getattr(item, "after_publish", False):
+            raise item
+        if cancel is not None and cancel.is_set():
+            raise InstagramError("Upload abgebrochen.", code="canceled")
+        save(ig_publish_at=time.time())
+        mid = f"M{len(mod.published) + 1}"
+        mod.published[st["ig_container"]] = mid
+        if isinstance(item, BaseException):
+            raise item
+        return result(mid)
+
+    mod.publish = publish
+    mod.file_problems = lambda variant: list(mod.problems)
+    mod.caption = lambda variant, video=None: variant.get("title") or ""
+    mod.connection_info = lambda account: {"kind": "instagram"}
+    mod.maintain = lambda now=None: []
+    return mod
+
+
 class PipelineCase(unittest.TestCase):
     """Temp data/jobs/exports dirs, the gta6 profile, an Anthropic key, and every outside layer faked."""
 
@@ -395,16 +477,20 @@ class PipelineCase(unittest.TestCase):
         store.ensure_profile("gta-rp", False)
         store.set_secret("anthropic_api_key", KEY)
         self.clip = FakeClipper()
-        self.agent, self.yt = make_agent(), make_youtube()
+        self.agent, self.yt, self.ig = make_agent(), make_youtube(), make_instagram()
         for patcher in (mock.patch.object(runtime, "run_clipper", self.clip.run_clipper),
                         mock.patch.object(runtime, "run_bridge", self.clip.run_bridge),
                         mock.patch.object(worker, "reap_orphans", lambda module, args: []),
-                        mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt}),
+                        mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt,
+                                                      "automate.instagram": self.ig}),
                         mock.patch.object(health, "_live", None),
                         mock.patch.dict(health._sys_cache, {"at": 0.0, "data": None}),
                         mock.patch.dict(scheduler._hold, {"until": 0.0}),
                         mock.patch.object(scheduler, "recorders", lambda: []),  # never this machine's processes
-                        mock.patch.object(health, "_old_schedules", lambda: [])):
+                        mock.patch.object(health, "_old_schedules", lambda: []),
+                        # plenty of free disk whatever this machine has (a test of the wait patches disk_low itself)
+                        mock.patch("shutil.disk_usage", return_value=mock.Mock(total=1000e9, used=500e9,
+                                                                                free=500e9))):
             patcher.start()
             self.addCleanup(patcher.stop)
         from automate import pipeline

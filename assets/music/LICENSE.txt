@@ -5,6 +5,30 @@ and contain no third-party audio:
   boom.wav    aevalsrc='0.95*sin(2*PI*(38+70*exp(-12*t))*t)*exp(-2.8*t)' + lowpassed brown noise (1.6s)
   whoosh.wav  pink noise, band-passed 400-6000 Hz, faded in 0.45s and out 0.35s (0.8s)
 
+noise-riser.wav, reverse-swell.wav, cinematic-impact.wav, sub-drop.wav, braam.wav and heartbeat.wav were synthesized for this
+project with numpy by clipper/sfx.py (`python -m clipper.sfx` writes them again, identical: fixed noise seeds) and
+contain no third-party audio. 44.1 kHz mono, 16-bit; each levelled to its loudest 400 ms (momentary LUFS, in
+library.yaml as peak_lufs) with sample peaks at most -1 dBFS:
+
+  noise-riser.wav    3.0s  white noise through a 0.7-octave band swept 300 Hz -> 9 kHz (exponential), with a
+                           tremolo speeding up 6 -> 22 Hz, plus three band-limited saws (detuned 0, +0.6, -0.6%)
+                           gliding 110 -> 440 Hz; the mix swells as (t/3)^2.2 to full level at the very end, the
+                           beat (seed 101)
+  reverse-swell.wav  1.6s  white noise shaped to five narrow resonances (3.1, 5.3, 7.9, 9.6, 12 kHz, 0.08 octave)
+                           over a 0.15 floor, decaying exp(-3.5t) like a cymbal, then reversed so it peaks at the
+                           end (seed 202)
+  cinematic-impact.wav 2.2s  a sine thump gliding 142 -> 42 Hz (exp(-25t)) decaying exp(-3t) with its 2nd harmonic,
+                           a noise body around 180 Hz (1.2 octave) decaying exp(-9t), a 2-9 kHz noise crack
+                           decaying exp(-70t) and a noise tail low-passed at 1.5 kHz decaying exp(-2.4t), summed
+                           and soft-clipped with tanh (seed 303)
+  sub-drop.wav       2.0s  a sine gliding 95 -> 32 Hz (32 + 63 exp(-2.2t)) with its 2nd and 3rd harmonics at 0.4
+                           and 0.2, decaying exp(-1.4t)
+  braam.wav          2.6s  band-limited saws at 55, 82.41, 110 and 110.33 Hz (a low power chord) with 0.3% vibrato
+                           at 5 Hz, each harmonic rolled off above a cutoff closing 3 kHz -> 400 Hz (exp(-2.5t)),
+                           35 ms attack, decaying exp(-0.9t), soft-clipped with tanh
+  heartbeat.wav      3.2s  four heartbeats at 75 BPM: a 52 Hz "lub" and, 0.28s later, a 60 Hz "dub" (each a sine
+                           with a short pitch drop and 2nd/3rd harmonics); it loops without a seam
+
 They are dedicated to the public domain under CC0 1.0 Universal:
 https://creativecommons.org/publicdomain/zero/1.0/
 

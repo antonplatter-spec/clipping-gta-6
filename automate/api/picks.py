@@ -4,7 +4,13 @@ A pick row from the store is enriched for the dashboard (`Pick` in api.js): `dur
 (the source at the pick's start, from jobs/<id>/job.json's url + offset), `sheets` (contact sheets of the
 candidates/scenarios the pick overlaps, most overlap first), `source_expires_at` (pipeline.source_expires_at: when
 `clipper cleanup` deletes the source video; None while the pipeline module is missing).
-Edits and decisions go through automate.pipeline (it rewrites picks.json and re-checks).
+Edits and decisions go through automate.pipeline (it rewrites picks.json and re-checks). The caption, hook and sound
+keys (automate.style.KEYS), `fx` and `music` are passed on as sent (null = drop the key); pipeline._edit_errors
+validates them with German per-field messages.
+
+Layout preview (automate.previews): GET /picks/{id}/preview?at=&hook= draws or reuses the still and answers with its
+metadata and image URL (200 also when it can't: {ok: false, reason, message}, so the card shows a German note);
+GET /picks/{id}/preview/file?key= serves only a still the server drew for that pick.
 """
 import json
 import os
@@ -13,7 +19,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Query, Request
 
-from .. import paths, store
+from .. import paths, previews, store, style
 from . import files
 from .common import ApiError, Form, invalid, mapped, need, not_found, optional, page
 
@@ -185,6 +191,15 @@ def update_pick(pick_id: int, body: dict | None = Body(None)):
     for key, choices in (("clip_type", CLIP_TYPES), ("hook_style", HOOK_STYLES), ("caption_style", CAPTION_STYLES)):
         if form.has(key):
             changes[key] = form.choice(key, choices)
+    for key in style.KEYS:  # a choice, or null: back to the default from Einstellungen
+        if form.has(key):
+            changes[key] = form.body[key]
+    for key, cap in (("fx", 30), ("music", 10)):  # a list ([] = none on purpose), or null: automatic
+        if form.has(key):
+            v = form.body[key]
+            if v is not None and (not isinstance(v, list) or len(v) > cap):
+                form.error(key, f"Liste mit höchstens {cap} Einträgen oder null.")
+            changes[key] = v
     if not changes:
         form.error("_", "Keine Änderung angegeben.")
     form.check()
@@ -192,6 +207,29 @@ def update_pick(pick_id: int, body: dict | None = Body(None)):
     with mapped():
         pick, report = pipeline.update_pick_data(pick_id, changes)
     return {"pick": enrich(store.get_pick(pick_id) or pick), "check_report": report}
+
+
+@router.get("/picks/{pick_id}/preview")
+def preview(pick_id: int, at: float | None = Query(None), hook: int = Query(1)):
+    pick = _get(pick_id)
+    errors = {}
+    if at is not None and not 0 <= at <= 3600:
+        errors["at"] = "Sekunden im fertigen Clip (0–3600)."
+    if not 1 <= hook <= 12:
+        errors["hook"] = "Welcher Hook (1–12)."
+    if errors:
+        raise invalid(errors)
+    return previews.still(pick, at, hook)
+
+
+@router.get("/picks/{pick_id}/preview/file")
+def preview_file(request: Request, pick_id: int, key: str = Query("")):
+    _get(pick_id)
+    f = previews.image_path(pick_id, key)
+    if f is None:
+        raise not_found("Diese Vorschau gibt es nicht (mehr).")
+    fd, st = files.open_under(paths.tmp_dir() / "previews", f)
+    return files.file_response(request, fd, st, "image/png", cache="private, max-age=86400")
 
 
 @router.post("/picks/{pick_id}/approve")

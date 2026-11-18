@@ -1,16 +1,21 @@
-// Einstellungen: schema-driven forms (GET /api/settings) plus dedicated editors for the watchlist, profile config,
-// research/prompt and assets.
+// Einstellungen: schema-driven forms (GET /api/settings) plus dedicated editors for the watchlist (Analyse, and the
+// caption, hook and sound defaults of "Untertitel & Sound": the same watchlist overrides, one source of truth),
+// profile config, research/prompt and assets (incl. listening to and uploading own sounds).
 import * as api from '../api.js';
 import { html, useState, useEffect, useMemo, useData, useTitle, fmt, cx, toast, confirmDialog, useId } from '../lib.js';
 import {
   PageHeader, Card, Button, IconButton, Badge, Icon, Loading, ErrorState, Empty, TextareaField,
-  Toggle, Segmented, TagInput, Callout, describedBy, CopyButton,
+  Toggle, Segmented, TagInput, Callout, describedBy, CopyButton, SelectField, FormError,
 } from '../ui.js';
-import { overview, loadProfiles } from '../store.js';
+import { overview, loadProfiles, invalidateSounds, invalidateStyleDefaults } from '../store.js';
+import {
+  STYLE_CHOICES, LOOKS, CLASSIC_STYLE, styleValueLabel, SOUND_ROLES, MOODS as MOOD_LABELS,
+} from '../labels.js';
 
 const SECTIONS = [
   { id: 'zeitplan', label: 'Zeitplan & Automatik', icon: 'calendar-clock', group: 'automation' },
   { id: 'clips', label: 'Clips', icon: 'clapperboard', group: 'clips' },
+  { id: 'untertitel', label: 'Untertitel & Sound', icon: 'type' },
   { id: 'freigabe', label: 'Freigabe', icon: 'badge-check', group: 'approval' },
   { id: 'claude', label: 'Claude', icon: 'sparkles', group: 'claude' },
   { id: 'analyse', label: 'Analyse', icon: 'activity' },
@@ -23,12 +28,13 @@ const KNOWN_GROUPS = new Set(SECTIONS.map((s) => s.group).filter(Boolean));
 const INTRO = {
   zeitplan: 'Wann gesucht, aufgenommen und geprüft wird. Änderungen gelten ab dem nächsten Takt, ohne Neustart.',
   clips: 'Was pro Lauf entsteht: Voiceover, wie viele Videos und wie viele Hook-Varianten.',
+  untertitel: 'Wo Untertitel und Hook im Video sitzen, wie groß, in welchem Look und wie viel Sound epische Momente bekommen. Gilt für jeden Clip, bei dem Claude oder du in der Freigabe nichts anderes festlegst.',
   freigabe: 'Ob Claudes Picks erst in die Freigabe-Queue kommen oder direkt gerendert werden.',
   claude: 'Modell, Denktiefe und Grenzen für den Claude-API-Agenten (Schritt ③ und ⑥).',
   analyse: 'Was in einem Video als Highlight zählt (watchlist.yaml). Gespeichert wird nur, was du vom Repo-Standard abweichst.',
   profil: 'Themenfilter, Stichwörter, Hashtags und Suchen eines Profils (profiles/<name>/profile.yaml).',
   recherche: 'Das Playbook ist Claudes System-Prompt für Schritt ③. Du kannst es ersetzen oder ergänzen.',
-  assets: 'Schriften und Musik, die der Render verwenden darf.',
+  assets: 'Sounds, Musik und Schriften, die der Render verwenden darf – auch eigene Sounds hochladen.',
   weitere: 'Einstellungen, für die es (noch) keine eigene Seite gibt.',
 };
 
@@ -53,6 +59,7 @@ export function SettingsPage({ route }) {
         <${SettingsForm} key=${section.id} groups=${groups} data=${settings.data} onSaved=${merge} radioCards=${section.id === 'freigabe'} />`;
     }
   } else if (section.id === 'analyse') body = html`<${WatchlistEditor} />`;
+  else if (section.id === 'untertitel') body = html`<${StyleEditor} />`;
   else if (section.id === 'profil') body = html`<${ProfileEditor} />`;
   else if (section.id === 'recherche') body = html`<${ResearchEditor} />`;
   else body = html`<${AssetsEditor} />`;
@@ -274,7 +281,7 @@ function buildOverrides(prev, form, base, fields) {
   return out;
 }
 
-function ConfigEditor({ load, save, fields, sections, deps, extra }) {
+function ConfigEditor({ load, save, fields, sections, deps, extra, raw = true, onSaved }) {
   const doc = useData(load, deps);
   const [form, setForm] = useState(null);
   const [json, setJson] = useState(null);
@@ -302,6 +309,7 @@ function ConfigEditor({ load, save, fields, sections, deps, extra }) {
     try {
       const res = await save(overrides);
       doc.setData(res);
+      if (onSaved) onSaved(res);
       toast.success(what === 'reset' ? 'Auf Standard zurückgesetzt.' : 'Gespeichert.');
     } catch (err) {
       if (err.fields) setErrors(err.fields);
@@ -325,7 +333,7 @@ function ConfigEditor({ load, save, fields, sections, deps, extra }) {
     ${sections.map((sec) => html`<${Card} title=${sec.title} subtitle=${sec.subtitle} key=${sec.title}>
       ${sec.render ? sec.render({ form, set, base, errors, disabled: jsonChanged }) : html`<div class="setting-list">${fields.filter((f) => f.section === sec.id).map(field)}</div>`}
     <//>`)}
-    <${Card} title="Erweitert: Abweichungen als JSON" icon="terminal" subtitle=${nOverrides ? `${fmt.plural(nOverrides, 'Schlüssel weicht', 'Schlüssel weichen')} vom Repo-Standard ab` : 'Keine Abweichungen – es gilt der Repo-Standard.'}
+    ${raw && html`<${Card} title="Erweitert: Abweichungen als JSON" icon="terminal" subtitle=${nOverrides ? `${fmt.plural(nOverrides, 'Schlüssel weicht', 'Schlüssel weichen')} vom Repo-Standard ab` : 'Keine Abweichungen – es gilt der Repo-Standard.'}
       actions=${html`<${Button} size="sm" variant="danger" icon="rotate-ccw" busy=${busy === 'reset'} disabled=${!nOverrides || !!busy} onClick=${reset}>Auf Standard zurücksetzen<//>`}>
       <details class="details"><summary><${Icon} name="chevron-right" size=${16} />JSON bearbeiten (für Schlüssel ohne eigenes Feld)</summary>
         <div class="details-body">
@@ -335,7 +343,7 @@ function ConfigEditor({ load, save, fields, sections, deps, extra }) {
             <pre class="playbook" style="max-height:320px">${JSON.stringify(base, null, 2)}</pre></details>
         </div>
       </details>
-    <//>
+    <//>`}
     ${(dirty || formError) && html`<div class="savebar" role="region" aria-label="Ungespeicherte Änderungen">
       <span class="grow">${formError ? html`<span style="color:var(--red)">${formError.message}</span>` : jsonChanged ? 'JSON geändert – nicht gespeichert' : 'Änderungen nicht gespeichert'}</span>
       <${Button} variant="ghost" disabled=${!!busy} onClick=${() => { doc.setData({ ...doc.data }); setErrors({}); setFormError(null); }}>Verwerfen<//>
@@ -373,14 +381,46 @@ function ConfigField({ f, value, onChange, error, overridden, baseValue, onReset
         <span class="num" style="width:44px;text-align:right">${Math.round((value || 0) * 100)} %</span></div>`;
       break;
     case 'kv': control = html`<${KvEditor} value=${value || {}} onChange=${onChange} disabled=${disabled} />`; break;
+    case 'select': {
+      const c = (f.choices || []).find((x) => x.value === value);
+      control = html`<div class="stack-sm"><div class="select-wrap"><select id=${id} class="input select" value=${String(value ?? '')} disabled=${disabled}
+          aria-describedby=${`${id}-ch`} onChange=${(e) => onChange(e.currentTarget.value)}>
+          ${value != null && !c && html`<option value=${String(value)}>${f.show ? f.show(value) : String(value)}</option>`}
+          ${(f.choices || []).map((x) => html`<option value=${x.value}>${x.label}</option>`)}</select>
+        <${Icon} name="chevron-down" size=${16} class="select-caret" /></div>
+        ${c && c.help && html`<p class="setting-help" id=${`${id}-ch`}>${c.help}</p>`}</div>`;
+      break;
+    }
+    case 'hookseconds': {
+      const fixed = typeof value === 'number';
+      const c = STYLE_CHOICES.hook_seconds.find((x) => x.value === (fixed ? 'seconds' : value));
+      control = html`<div class="stack-sm"><div class="row" style="gap:8px">
+          <div class="select-wrap grow"><select id=${id} class="input select" value=${fixed ? 'seconds' : String(value ?? 'auto')} disabled=${disabled}
+            onChange=${(e) => { const v = e.currentTarget.value; onChange(v === 'seconds' ? 5 : v); }}>
+            ${STYLE_CHOICES.hook_seconds.map((x) => html`<option value=${x.value}>${x.label}</option>`)}</select>
+            <${Icon} name="chevron-down" size=${16} class="select-caret" /></div>
+          ${fixed && numInput(value, onChange, { 'aria-label': 'Sekunden' })}${fixed && html`<span class="muted">s</span>`}</div>
+        ${c && html`<p class="setting-help">${c.help}</p>`}</div>`;
+      break;
+    }
+    case 'looks': {
+      const on = new Set(Array.isArray(value) ? value : Object.keys(LOOKS));
+      const flip = (k) => { const n = new Set(on); if (n.has(k)) n.delete(k); else n.add(k); onChange(Object.keys(LOOKS).filter((x) => n.has(x))); };
+      control = html`<div class="look-grid">${['bold', 'boxed', 'comic'].map((fam) => html`<div class="look-family" key=${fam}>
+        <span class="small muted">Stil ${STYLE_FAMILY[fam]}</span>
+        ${Object.entries(LOOKS).filter(([, l]) => l.family === fam).map(([k, l]) => html`<label class="checkbox small" key=${k}>
+          <input type="checkbox" checked=${on.has(k)} disabled=${disabled} onChange=${() => flip(k)} />${l.label}${k === fam ? ' (Grundlook)' : ''}</label>`)}
+      </div>`)}</div>`;
+      break;
+    }
     default: control = html`<div class="row" style="gap:6px">${numInput(value, onChange)}${f.unit && html`<span class="muted">${f.unit}</span>`}</div>`;
   }
-  return html`<div class=${cx('setting', overridden && 'is-dirty', (f.kind === 'tags' || f.kind === 'kv') && f.wide && 'is-wide')}>
+  return html`<div class=${cx('setting', overridden && 'is-dirty', (f.kind === 'tags' || f.kind === 'kv' || f.kind === 'looks') && f.wide && 'is-wide')}>
     <div class="setting-text"><label class="setting-label" for=${id}>${f.label}</label>
       ${f.help && html`<p class="setting-help">${f.help}</p>`}<span class="setting-key">${f.path}</span></div>
     <div class="setting-control">${control}
       ${error && html`<p class="field-error" role="alert"><${Icon} name="alert-circle" size=${14} />${error}</p>`}
-      ${overridden && html`<span class="base-hint">Weicht ab · Standard: ${fmtBase(baseValue)} <button type="button" class="linklike" onClick=${onReset} disabled=${disabled}>zurücksetzen</button></span>`}
+      ${overridden && html`<span class="base-hint">Weicht ab · Standard: ${f.show ? f.show(baseValue) : fmtBase(baseValue)} <button type="button" class="linklike" onClick=${onReset} disabled=${disabled}>zurücksetzen</button></span>`}
     </div>
   </div>`;
 }
@@ -443,9 +483,6 @@ const WATCH_FIELDS = [
   { path: 'keep_live_sources_hours', label: 'Live-Video aufbewahren', section: 'keep', kind: 'nullnum', unit: 'Std.', min: 0, nullLabel: 'nie löschen', fallback: 3, help: 'Nach dem Clippen; Zeit für Multi-Streamer-Edits.' },
   { path: 'keep_sources_days', label: 'Andere Quellvideos aufbewahren', section: 'keep', kind: 'nullnum', unit: 'Tage', min: 0, nullLabel: 'nie löschen', fallback: 2, help: 'Transkripte, Picks und Exporte bleiben immer.' },
   { path: 'min_free_gb', label: 'Alarm unter freiem Speicher', section: 'keep', kind: 'num', unit: 'GB', min: 1, help: 'Darunter: Alarm, und neue Downloads und Live-Aufnahmen warten, bis wieder Platz ist.' },
-  { path: 'caption_style', label: 'Untertitel-Stil (Standard)', section: 'style', kind: 'choice', choices: [{ value: 'bold', label: 'Fett' }, { value: 'boxed', label: 'Box' }, { value: 'comic', label: 'Comic' }] },
-  { path: 'censor_captions', label: 'Schimpfwörter in Untertiteln maskieren', section: 'style', kind: 'bool', help: 'F*CK statt des Worts; der Ton bleibt unverändert.' },
-  { path: 'no_hook_share', label: 'Anteil ohne Hook (A/B-Test)', section: 'style', kind: 'percent', help: 'So viele Clips gehen ohne Hook-Text raus, zum Vergleich.' },
 ];
 
 function Weights({ form, set, base, errors, disabled }) {
@@ -485,9 +522,64 @@ function WatchlistEditor() {
       { id: 'length', title: 'Cliplängen & Kandidaten' },
       { id: 'live', title: 'Live-Limits' },
       { id: 'keep', title: 'Aufbewahrung & Speicher' },
-      { id: 'style', title: 'Untertitel & A/B-Test' },
+    ]} />
+    <p class="muted small">Untertitel, Hook und Sound stellst du unter <a href="#/einstellungen/untertitel">Untertitel & Sound</a> ein.</p>`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Untertitel & Sound (the caption, hook and sound defaults: keys of watchlist.yaml, stored as its overrides)
+// ---------------------------------------------------------------------------------------------------------------
+
+const STYLE_FAMILY = { bold: 'Fett', boxed: 'Box', comic: 'Comic' };
+const styleField = (path, label, section, extra = {}) => ({
+  path, label, section, kind: 'select', choices: STYLE_CHOICES[path], show: (v) => styleValueLabel(path, v), ...extra,
+});
+const STYLE_FIELDS = [
+  { path: 'caption_style', label: 'Untertitel-Stil, wenn keiner gewählt ist', section: 'captions', kind: 'select',
+    show: (v) => STYLE_FAMILY[v] || v,
+    help: 'Claude wählt den Stil meist pro Clip passend zum Clip-Typ; dieser gilt nur, wenn nicht.',
+    choices: [{ value: 'bold', label: 'Fett', help: 'Montserrat mit Kontur – für Kommentar und News.' },
+      { value: 'boxed', label: 'Box', help: 'Bebas auf schwarzem Kasten – für Streamer-Reaktionen.' },
+      { value: 'comic', label: 'Comic', help: 'Luckiest Guy – für verspieltes Gameplay.' }] },
+  styleField('caption_position', 'Position', 'captions'),
+  styleField('caption_size', 'Größe', 'captions'),
+  styleField('caption_look', 'Look', 'captions', { choices: [...STYLE_CHOICES.caption_look, ...Object.entries(LOOKS)
+    .map(([value, l]) => ({ value, label: `Immer: ${l.label}`, help: 'Gilt für jeden Clip, egal welcher Untertitel-Stil – meist besser „Automatisch“.' }))] }),
+  { path: 'caption_looks', label: 'Looks, aus denen „Automatisch“ wählt', section: 'captions', kind: 'looks', wide: true,
+    show: (v) => (Array.isArray(v) ? `${v.length} Looks` : 'alle'),
+    help: 'Jeder Clip bekommt einen dieser Looks aus der Familie seines Stils. Ist für einen Stil keiner angehakt, nimmt er seinen Grundlook. „TikTok Sans, Lila“ kommt nur über ruhige, dunklere Bilder.' },
+  { path: 'censor_captions', label: 'Schimpfwörter in Untertiteln maskieren', section: 'captions', kind: 'bool', help: 'F*CK statt des Worts; der Ton bleibt unverändert.' },
+  styleField('hook_size', 'Größe', 'hook'),
+  { path: 'hook_seconds', label: 'Anzeigedauer', section: 'hook', kind: 'hookseconds', min: 1, max: 30, step: 0.5,
+    show: (v) => styleValueLabel('hook_seconds', v) },
+  { path: 'no_hook_share', label: 'Anteil ohne Hook (A/B-Test)', section: 'hook', kind: 'percent', help: 'So viele Clips gehen ohne Hook-Text raus, zum Vergleich.' },
+  styleField('sound_level', 'Sound-Stärke', 'sound', { help: 'Für Clips, deren Effekte automatisch sind. Eigene Effekte eines Clips (Freigabe) spielen immer.' }),
+];
+
+function ClassicCard({ form, set, base }) {
+  const isClassic = Object.entries(CLASSIC_STYLE).every(([k, v]) => form[k] === v);
+  const isAuto = Object.keys(CLASSIC_STYLE).every((k) => JSON.stringify(form[k]) === JSON.stringify(base[k]));
+  return html`<${Card} title="Alter oder neuer Look" icon="rotate-ccw"
+    subtitle="Vorher saßen die Untertitel groß mitten im Spielbild, der Hook blieb den ganzen Clip, und Sound gab es nur, wo Claude ihn gesetzt hat.">
+    <div class="row">
+      <${Button} icon="rotate-ccw" disabled=${isClassic} onClick=${() => Object.entries(CLASSIC_STYLE).forEach(([k, v]) => set(k, v))}>Alten Look wiederherstellen<//>
+      <${Button} variant="ghost" icon="sparkles" disabled=${isAuto} onClick=${() => Object.keys(CLASSIC_STYLE).forEach((k) => set(k, base[k]))}>Alles wieder automatisch<//>
+    </div>
+    <p class="muted small" style="margin-top:8px">Danach „Speichern“. Gilt für alle Clips, die ab dann gerendert werden; was ein Clip in der Freigabe selbst festlegt, bleibt.</p>
+  <//>`;
+}
+
+function StyleEditor() {
+  return html`<${ConfigEditor} deps=${[]} load=${() => api.getWatchlist()} save=${(overrides) => api.putWatchlist({ overrides })}
+    fields=${STYLE_FIELDS} raw=${false} onSaved=${() => invalidateStyleDefaults()}
+    extra=${(form, set, base) => html`<${ClassicCard} form=${form} set=${set} base=${base} />`}
+    sections=${[
+      { id: 'captions', title: 'Untertitel', subtitle: '„Automatisch“ schaut sich pro Clip einige Bilder an und legt die Untertitel dorthin, wo sie am wenigsten vom Spiel verdecken – nie über das Gesicht, die App-Buttons oder den Bildrand.' },
+      { id: 'hook', title: 'Hook-Banner', subtitle: 'Der Satz oben im Video, der zum Weiterschauen bringt.' },
+      { id: 'sound', title: 'Sound auf epischen Momenten', subtitle: 'Hat ein Clip keine eigenen Effekte, findet der Render seine Höhepunkte (Pointe, lautester Sprung, geschriener Satz) und setzt dort einen Aufbau (Riser) und einen Einschlag (Impact) – sparsam, nie über Sprache gelegt, die Lautstärke am Ende wie immer.' },
     ]} />`;
 }
+
 
 // ---------------------------------------------------------------------------------------------------------------
 // Profil (profiles/<name>/profile.yaml)
@@ -573,7 +665,9 @@ function ResearchEditor() {
 // Assets
 // ---------------------------------------------------------------------------------------------------------------
 
-const MOODS = { suspense: 'Spannung', sneaky: 'Schleichen', epic: 'Episch', sad: 'Traurig', funny: 'Lustig', any: 'Sound-Hit' };
+const KIND_TITLES = { hit: 'Sound-Effekte', music: 'Musik' };
+const ACCEPT = '.wav,.mp3,.m4a,.ogg,audio/wav,audio/mpeg,audio/mp4,audio/ogg';
+const MAX_UPLOAD_MB = 25;
 
 function AssetsEditor() {
   const doc = useData(() => api.getAssets(), []);
@@ -581,38 +675,113 @@ function AssetsEditor() {
   if (doc.error && !doc.data) return html`<${ErrorState} error=${doc.error} onRetry=${doc.reload} />`;
   if (!doc.data) return html`<div class="card"><${Loading} lines=${8} /></div>`;
   const toggle = async (t, approved) => {
-    if (approved && t.claimable && !(await confirmDialog({ title: 'Content-ID-gefährdeten Track freigeben?', confirmLabel: 'Freigeben',
-      message: 'Dieser Track kann einen Urheberrechts-Claim auslösen. Er spielt nur, wenn das Profil music.allow_claimable erlaubt.' }))) return;
+    if (approved && t.claimable && !(await confirmDialog({ title: 'Content-ID-gefährdeten Sound freigeben?', confirmLabel: 'Freigeben',
+      message: 'Dieser Sound kann einen Urheberrechts-Claim auslösen. Er spielt nur, wenn das Profil music.allow_claimable erlaubt.' }))) return;
     setBusyId(t.id);
     try {
       const upd = await api.updateMusic(t.id, { approved });
       doc.setData((d) => ({ ...d, music: d.music.map((m) => (m.id === upd.id ? upd : m)) }));
+      invalidateSounds();
+    } catch (err) { toast.fail(err); } finally { setBusyId(null); }
+  };
+  const remove = async (t) => {
+    if (!(await confirmDialog({ title: `„${t.title || t.id}“ löschen?`, confirmLabel: 'Löschen', danger: true,
+      message: 'Die Datei wird gelöscht. Clips, die genau diesen Sound verwenden, bekommen beim Rendern einen anderen Sound derselben Rolle.' }))) return;
+    setBusyId(t.id);
+    try {
+      await api.deleteSound(t.id);
+      doc.setData((d) => ({ ...d, music: d.music.filter((m) => m.id !== t.id) }));
+      invalidateSounds();
+      toast.success('Sound gelöscht.');
     } catch (err) { toast.fail(err); } finally { setBusyId(null); }
   };
   const music = doc.data.music || [];
-  const groups = [['music', 'Musik'], ['hit', 'Sound-Hits']];
-  return html`${groups.map(([kind, title]) => {
+  return html`<${UploadCard} onAdded=${(t) => { doc.setData((d) => ({ ...d, music: [...d.music, t] })); invalidateSounds(); }} />
+    ${['hit', 'music'].map((kind) => {
       const rows = music.filter((m) => m.kind === kind);
-      return html`<${Card} key=${kind} title=${title} icon=${kind === 'music' ? 'music' : 'zap'}
-        subtitle=${`${rows.filter((m) => m.usable).length} von ${rows.length} nutzbar. Nur freigegebene Tracks spielen im Render.`}>
-        ${rows.length ? html`<div class="list">${rows.map((t) => html`<div class="list-row" key=${t.id}>
-          <div class="list-main">
-            <div class="list-title"><span class="mono">${t.id}</span>
-              ${kind === 'music' && html`<${Badge} tone="neutral">${MOODS[t.mood] || t.mood}<//>`}
-              ${t.claimable && html`<${Badge} tone="yellow" icon="alert">Content-ID<//>`}
-              ${t.local && html`<${Badge} tone="muted">lokal<//>`}
-              ${t.approved && !t.usable && html`<${Badge} tone="red">nicht nutzbar<//>`}
-            </div>
-            <span class="list-sub">${t.file}</span>
-          </div>
-          <${Toggle} checked=${!!t.approved} label=${`${t.id} freigeben`} hideLabel stateText=${t.approved ? 'freigegeben' : 'gesperrt'} busy=${busyId === t.id} onChange=${(v) => toggle(t, v)} />
-        </div>`)}</div>` : html`<p class="muted">Keine Einträge in assets/music/library.yaml.</p>`}
+      return html`<${Card} key=${kind} title=${KIND_TITLES[kind]} icon=${kind === 'music' ? 'music' : 'zap'}
+        subtitle=${`${rows.filter((m) => m.usable).length} von ${rows.length} nutzbar. Nur freigegebene spielen im Render.`}>
+        ${rows.length ? html`<div class="list">${rows.map((t) => html`<${SoundRow} key=${t.id} t=${t} busy=${busyId === t.id}
+            onToggle=${(v) => toggle(t, v)} onRemove=${() => remove(t)} />`)}</div>`
+          : html`<p class="muted">Noch keine.</p>`}
       <//>`;
     })}
     <${Card} title="Schriften" icon="type" subtitle="Gebündelt in assets/fonts (OFL/Apache). Für andere Alphabete wählt der Render automatisch eine passende Schrift.">
       ${(doc.data.fonts || []).length ? html`<div class="list">${doc.data.fonts.map((f) => html`<div class="list-row" key=${f.file}>
         <div class="list-main"><span class="list-title">${f.name}</span><span class="list-sub">${f.file}${f.license ? ` · ${f.license}` : ''}</span></div></div>`)}</div>`
         : html`<p class="muted">Keine Schriften gefunden.</p>`}
-      <p class="muted small" style="margin-top:10px">Eigene Musik: Dateien nach <code>assets/music/local/</code> legen und in <code>assets/music/local/library.yaml</code> eintragen; sie erscheinen dann hier zum Freigeben.</p>
     <//>`;
+}
+
+function SoundRow({ t, busy, onToggle, onRemove }) {
+  const role = t.role && SOUND_ROLES[t.role];
+  return html`<div class="list-row sound-row">
+    <div class="list-main">
+      <div class="list-title">${t.title || t.id}
+        ${role && html`<${Badge} tone="neutral" title=${role.help}>${role.label}<//>`}
+        ${t.kind === 'music' && html`<${Badge} tone="neutral">${MOOD_LABELS[t.mood] || t.mood}<//>`}
+        <${Badge} tone="muted">${t.source === 'own' ? 'eigener' : 'mitgeliefert'}<//>
+        ${t.claimable && html`<${Badge} tone="yellow" icon="alert" title="Kann einen Urheberrechts-Claim auslösen">Content-ID-gefährdet<//>`}
+        ${t.approved && !t.usable && html`<${Badge} tone="red">nicht nutzbar<//>`}
+      </div>
+      <div class="sound-meta">
+        ${t.title && t.title !== t.id && html`<span class="mono">${t.id}</span>`}
+        ${t.length != null && html`<span>${fmt.num1(t.length)} s</span>`}
+        ${(t.tags || []).length > 0 && html`<span>· Tags: ${t.tags.join(', ')}</span>`}
+      </div>
+      ${t.exists ? html`<audio controls preload="none" src=${api.soundFileUrl(t.id)} aria-label=${`${t.title || t.id} anhören`}></audio>`
+        : html`<span class="small" style="color:var(--red)">Datei fehlt</span>`}
+    </div>
+    <${Toggle} checked=${!!t.approved} label=${`${t.title || t.id} freigeben`} hideLabel stateText=${t.approved ? 'freigegeben' : 'gesperrt'} busy=${busy} onChange=${onToggle} />
+    ${t.source === 'own' && html`<${IconButton} icon="trash" label=${`${t.title || t.id} löschen`} disabled=${busy} onClick=${onRemove} />`}
+  </div>`;
+}
+
+function UploadCard({ onAdded }) {
+  const [file, setFile] = useState(null);
+  const [kind, setKind] = useState('hit');
+  const [role, setRole] = useState('impact');
+  const [mood, setMood] = useState('epic');
+  const [claimable, setClaimable] = useState(false);
+  const [approved, setApproved] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [inputKey, setInputKey] = useState(0);
+  const ext = file ? (file.name.split('.').pop() || '').toLowerCase() : '';
+  const local = !file ? null : !['wav', 'mp3', 'm4a', 'ogg'].includes(ext) ? 'Nur WAV-, MP3-, M4A- oder OGG-Dateien.'
+    : file.size > MAX_UPLOAD_MB * 1024 * 1024 ? `Die Datei ist zu groß (höchstens ${MAX_UPLOAD_MB} MB).` : null;
+  const submit = async () => {
+    setBusy(true); setError(null);
+    try {
+      const t = await api.uploadSound(file, { name: file.name, kind, role: kind === 'hit' ? role : '', mood: kind === 'music' ? mood : '', claimable, approved });
+      toast.success(`„${t.title || t.id}“ hinzugefügt${t.usable ? ' und freigegeben' : ''}.`);
+      onAdded(t);
+      setFile(null); setInputKey((k) => k + 1);
+    } catch (err) { setError(err); } finally { setBusy(false); }
+  };
+  const fieldError = error && error.fields ? Object.values(error.fields)[0] : null;
+  return html`<${Card} title="Eigenen Sound hochladen" icon="upload"
+    subtitle="Ein eigener Effekt oder Musiktitel (WAV, MP3, M4A oder OGG, höchstens 25 MB). Er landet in assets/music/local/ und steht danach in der Freigabe und für die Automatik bereit.">
+    <div class="upload-form">
+      <div class="field span-2"><label class="field-label" for="snd-file">Datei</label>
+        <input key=${inputKey} id="snd-file" class="input" type="file" accept=${ACCEPT} onChange=${(e) => { setFile(e.currentTarget.files[0] || null); setError(null); }} />
+        ${(local || fieldError) && html`<p class="field-error" role="alert"><${Icon} name="alert-circle" size=${14} />${local || fieldError}</p>`}
+      </div>
+      <div class="field"><span class="field-label">Art</span>
+        <${Segmented} label="Art" value=${kind} onChange=${setKind} options=${[{ value: 'hit', label: 'Sound-Effekt' }, { value: 'music', label: 'Musik' }]} />
+        <p class="field-help">${kind === 'hit' ? 'Kurz, für einen Moment: Einschlag, Aufbau, Schnitt oder Spannung (0,1–30 s).' : 'Ein Stück für Abschnitte ohne Sprache (3 s bis 10 Min.); es wird leiser, sobald jemand spricht.'}</p></div>
+      ${kind === 'hit' ? html`<${SelectField} label="Rolle" value=${role} onChange=${setRole}
+          options=${Object.entries(SOUND_ROLES).map(([v, r]) => ({ value: v, label: r.label }))} help=${SOUND_ROLES[role].help} />`
+        : html`<${SelectField} label="Stimmung" value=${mood} onChange=${setMood} options=${MOOD_LABELS}
+          help="Claude und die Freigabe wählen Musik nach Stimmung." />`}
+      <${Toggle} checked=${claimable} onChange=${setClaimable} label="Content-ID-gefährdet"
+        description="An, wenn der Sound aus einem Spiel, Film oder Song stammt: dann spielt er nur, wenn das Profil music.allow_claimable erlaubt." />
+      <${Toggle} checked=${approved} onChange=${setApproved} label="Gleich freigeben" description="Freigegebene Sounds verwendet der Render sofort." />
+    </div>
+    ${error && !error.fields && html`<div style="margin-top:10px"><${FormError} error=${error} /></div>`}
+    <div class="row" style="margin-top:12px">
+      <${Button} variant="primary" icon="upload" busy=${busy} disabled=${!file || !!local} onClick=${submit}>Hochladen<//>
+      ${file && !local && html`<span class="muted small">${file.name} · ${file.size < 1024 * 1024 ? `${fmt.num(Math.ceil(file.size / 1024))} KB` : `${fmt.num1(file.size / 1024 / 1024)} MB`}</span>`}
+    </div>
+  <//>`;
 }

@@ -2,7 +2,7 @@
 
 Die Automatik ist ein kleiner Server, der **nur auf deinem eigenen PC** läuft. Er sucht nach Zeitplan neue GTA-6-Videos
 deiner Creator, nimmt Live-Streams auf, lässt Claude (über die Claude API) die besten Momente auswählen und rendert
-fertige Shorts. Gesteuert wird alles über ein Dashboard im Browser. API-Schlüssel, YouTube-Verbindung, Quellen und
+fertige Shorts. Gesteuert wird alles über ein Dashboard im Browser. API-Schlüssel, YouTube- und Instagram-Verbindung, Quellen und
 Zeitplan trägst du dort ein – nach der Installation musst du keine Dateien mehr bearbeiten.
 
 Diese Anleitung bringt dich von einem Rechner ohne alles bis zum laufenden, eingerichteten Dashboard. Du musst ein
@@ -16,15 +16,16 @@ Terminal öffnen und Befehle hineinkopieren können, mehr nicht.
 4. [Erster Start und Einrichtung](#4-erster-start-und-einrichtung)
 5. [Tägliche Bedienung](#5-tägliche-bedienung)
 6. [YouTube verbinden](#6-youtube-verbinden-optional)
-7. [Dauerbetrieb (Autostart)](#7-dauerbetrieb-autostart)
-8. [Zugriff vom Handy im Heimnetz](#8-zugriff-vom-handy-im-heimnetz)
-9. [Aktualisieren](#9-aktualisieren)
-10. [Datensicherung](#10-datensicherung)
-11. [Zugang verloren](#11-zugang-verloren)
-12. [Fehlersuche](#12-fehlersuche)
-13. [Deinstallieren](#13-deinstallieren)
-14. [Rechtliches](#14-rechtliches)
-15. [Alle Befehle auf einen Blick](#15-alle-befehle-auf-einen-blick)
+7. [Instagram verbinden](#7-instagram-verbinden-optional)
+8. [Dauerbetrieb (Autostart)](#8-dauerbetrieb-autostart)
+9. [Zugriff vom Handy im Heimnetz](#9-zugriff-vom-handy-im-heimnetz)
+10. [Aktualisieren](#10-aktualisieren)
+11. [Datensicherung](#11-datensicherung)
+12. [Zugang verloren](#12-zugang-verloren)
+13. [Fehlersuche](#13-fehlersuche)
+14. [Deinstallieren](#14-deinstallieren)
+15. [Rechtliches](#15-rechtliches)
+16. [Alle Befehle auf einen Blick](#16-alle-befehle-auf-einen-blick)
 
 ---
 
@@ -41,7 +42,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Terminal schließen, ein **neues** öffnen, dann:
 
 ```bash
-git clone --branch automate https://github.com/antonplatter-spec/clipping-gta-6.git ~/clipping-gta-6
+git clone https://github.com/antonplatter-spec/clipping-gta-6.git ~/clipping-gta-6
 cd ~/clipping-gta-6
 ./start.sh
 ```
@@ -91,6 +92,8 @@ bzw. den Apple-Chip, wenn vorhanden). Wie viele Live-Streams dein Rechner gleich
   (siehe [Schlüssel](#schritt-4-schlüssel)).
 - **Fish-Audio-Schlüssel** – optional, für KI-Voiceover und Dubs.
 - **Google-Konto mit YouTube-Kanal** – optional, nur wenn der Clipper direkt zu YouTube hochladen soll.
+- **Professionelles Instagram-Konto** (Creator oder Business) und ein Facebook-Konto für die Meta-App – optional, nur
+  wenn der Clipper Reels direkt auf Instagram posten soll.
 
 ---
 
@@ -122,7 +125,7 @@ Danach das Terminal schließen und ein neues öffnen, damit `uv` gefunden wird.
 **3. Clipper herunterladen** – in deinen Home-Ordner:
 
 ```bash
-git clone --branch automate https://github.com/antonplatter-spec/clipping-gta-6.git ~/clipping-gta-6
+git clone https://github.com/antonplatter-spec/clipping-gta-6.git ~/clipping-gta-6
 ```
 
 **4. Starten:**
@@ -160,7 +163,7 @@ Danach das Terminal-Fenster schließen und ein neues öffnen.
 **3. Clipper herunterladen und starten:**
 
 ```bash
-git clone --branch automate https://github.com/antonplatter-spec/clipping-gta-6.git ~/clipping-gta-6
+git clone https://github.com/antonplatter-spec/clipping-gta-6.git ~/clipping-gta-6
 cd ~/clipping-gta-6
 ./start.sh
 ```
@@ -171,7 +174,7 @@ Statt `./start.sh` im Terminal kannst du künftig auch im Finder im Ordner `clip
 Hinweise für den Mac:
 
 - Lass den Ordner in deinem Home-Ordner (`~/clipping-gta-6`), nicht unter *Dokumente*, *Schreibtisch* oder
-  *Downloads*: Diese Ordner schützt macOS vor Hintergrundprogrammen, und der [Autostart](#7-dauerbetrieb-autostart)
+  *Downloads*: Diese Ordner schützt macOS vor Hintergrundprogrammen, und der [Autostart](#8-dauerbetrieb-autostart)
   könnte dort nicht hinein.
 - Die Ersatzstimme fürs Voiceover (`say`) ist in macOS eingebaut.
 - Optional erkennt **WhisperKit**, wer in einem Clip spricht (bessere Untertitel bei mehreren Sprechern):
@@ -199,7 +202,7 @@ Wichtig unter WSL:
 - Den Clipper **im Linux-Home-Ordner** lassen (`~/clipping-gta-6`, wie oben), nicht unter `/mnt/c/…`: Auf dem
   Windows-Laufwerk ist WSL sehr langsam.
 - Das Dashboard im Windows-Browser unter <http://localhost:8765> öffnen. WSL leitet diese Adresse an den Server weiter.
-- Der Server läuft nur, solange sein Ubuntu-Fenster offen ist (oder der [Autostart](#7-dauerbetrieb-autostart) ihn
+- Der Server läuft nur, solange sein Ubuntu-Fenster offen ist (oder der [Autostart](#8-dauerbetrieb-autostart) ihn
   startet).
 
 ---
@@ -231,7 +234,7 @@ abgeschlossen ist, zeigt das Terminal keinen Code mehr. Jeder weitere Start daue
 Pakete jedes Mal kurz und bringt sie nach einem Update auf den neuen Stand).
 
 **Das Terminal-Fenster ist der Server.** Solange es offen ist, läuft der Clipper. Mit **Strg+C** beendest du ihn. Damit
-er ohne offenes Fenster und nach einem Neustart des PCs läuft, richte den [Autostart](#7-dauerbetrieb-autostart) ein.
+er ohne offenes Fenster und nach einem Neustart des PCs läuft, richte den [Autostart](#8-dauerbetrieb-autostart) ein.
 
 ### Der Einrichtungsassistent
 
@@ -309,7 +312,7 @@ dürfen dastehen:
 
 Fehlt ein Pflicht-Werkzeug, steht der Befehl zum Installieren direkt daneben. Nach der Installation **Erneut prüfen**.
 Unter der Liste steht außerdem, ob das Parakeet-Sprachmodell schon heruntergeladen ist; wenn nicht, lädt es die erste
-Analyse (rund 650 MB, siehe [Fehlersuche](#12-fehlersuche)).
+Analyse (rund 650 MB, siehe [Fehlersuche](#13-fehlersuche)).
 
 #### Schritt 6: Quellen
 
@@ -355,18 +358,90 @@ wenn `nvidia-smi` vorhanden ist, sonst die CPU (langsamer, funktioniert aber). F
 
 - **Übersicht** – Status, *Bereit zum Start*-Liste, Alarme, die nächste Suche. **Jetzt nach neuen Videos suchen**
   startet eine Suche sofort; unter *Video-URL direkt clippen* gibst du ein einzelnes Video ein (**Clippen**).
-- **Freigabe** – Claudes Vorschläge: Hooks und Titel ansehen und ändern, dann **Freigeben → Render** oder
-  **Ablehnen**. Wenn alles ohne dich gerendert werden soll: *Einstellungen → Freigabe → Automatisch*. Dieselben
+- **Freigabe** – Claudes Vorschläge: Hooks und Titel ansehen und ändern, in der **Vorschau** sehen, wo Untertitel und
+  Hook im fertigen Video sitzen, Untertitel, Hook, Effekte und Musik anpassen (siehe
+  [Untertitel, Hook und Sound](#untertitel-hook-und-sound)), dann **Freigeben → Render** oder **Ablehnen**. Wenn alles ohne dich gerendert werden soll: *Einstellungen → Freigabe → Automatisch*. Dieselben
   Szenen werden nie zweimal gerendert: Nutzt ein Clip Szenen, die schon ein anderer (fertiger, freigegebener oder
   älterer offener) Clip nutzt, lässt er sich nicht freigeben, bis du einen der beiden ablehnst oder Start/Ende änderst.
   Stellt sich das erst beim Rendern heraus, kommt der Clip mit Begründung in die Freigabe zurück (und ein Alarm sagt es).
-- **Videos** – die fertigen Shorts, je Hook eine Variante. **Titel kopieren**, MP4 herunterladen,
-  **Als gepostet markieren** oder **Auf YouTube hochladen**. Ist die Variante auf dem gewählten Kanal schon online,
-  fragt das Dashboard vor einem zweiten Upload nach.
+- **Videos** – die fertigen Shorts, je Hook eine Variante. Über den Varianten steht, wo der Render die Untertitel und
+  den Hook hingelegt hat und welcher Sound dazukam (z. B. *Untertitel: oben im Spielbild, klein – ruhigster Bereich*).
+  **Titel kopieren**, MP4 herunterladen,
+  **Als gepostet markieren** oder **Hochladen** (auf ein verbundenes YouTube- oder Instagram-Konto). Ist die Variante
+  auf dem gewählten Konto schon online, fragt das Dashboard vor einem zweiten Upload nach; das Abzeichen beim Video
+  verlinkt das YouTube-Video bzw. den Reel.
 - **Jobs** – was gerade läuft und was gescheitert ist (mit **Erneut versuchen**).
 - **Kosten & Schlüssel** – Claude-Kosten pro Tag in Euro, **Tageslimit** und **Höchstens pro Auswahl**,
   API-Schlüssel.
 - **Quellen**, **Einstellungen**, **Konten**, **System** – alles Weitere.
+
+### Untertitel, Hook und Sound
+
+Früher lagen die Untertitel groß mitten im Spielbild und der Hook stand den ganzen Clip über Gesicht und Spiel. Jetzt
+entscheidet der Render **pro Clip** anhand einiger Bilder aus dem Clip:
+
+- **Untertitel** kommen dorthin, wo sie am wenigsten vom Spiel verdecken – nie über das Gesicht des Streamers, die
+  Buttons und Leisten von YouTube, Instagram und TikTok oder den Bildrand –, und sind dort klein, wo sie auf dem Spiel
+  liegen. Der **Look** wechselt von Clip zu Clip (Schrift, Farbe des gerade gesprochenen Worts, Wörter pro Einblendung),
+  derselbe Clip bekommt aber immer denselben.
+- Der **Hook** ist bei Facecam-Clips klein und blendet nach ein paar Sekunden aus (Reaktion 3 s, Gameplay 4 s, Comedy
+  und Szenario 5 s); bei News und Showcase und bei Vollbild-Clips bleibt er stehen.
+- **Epische Momente bekommen Sound:** Hat ein Clip keine eigenen Effekte, findet der Render seine Höhepunkte (die Pointe
+  eines Story-Cuts, den lautesten Sprung, einen geschrienen Satz) und setzt dort einen **Riser** (baut auf und endet
+  genau auf dem Moment) und einen **Impact** (Einschlag), vor einem stillen Aufbau ein leises Spannungs-Bett –
+  sparsam, nie über Sprache gelegt, die Lautstärke des Videos bleibt wie immer.
+
+Claude kennt das alles auch: Es sieht sich bei Facecam-Clips eine Vorschau an und legt Position, Größe, Hook-Zeit und
+Effekte nur fest, wenn es einen Grund sieht; seine Begründung steht in der Freigabe.
+
+**Voreinstellungen ändern: *Einstellungen → Untertitel & Sound*.** Jede Auswahl erklärt in einem Satz, was sie tut:
+
+- *Untertitel:* **Position** (Automatisch · Oben · Naht · Unten · Klassisch), **Größe** (Automatisch · Klein · Mittel ·
+  Groß), **Look** (Automatisch · Klassisch · ein fester Look), **Looks, aus denen „Automatisch“ wählt** (Häkchen pro
+  Look), **Untertitel-Stil, wenn keiner gewählt ist** und **Schimpfwörter in Untertiteln maskieren**.
+- *Hook-Banner:* **Größe**, **Anzeigedauer** (Automatisch · Ganzer Clip · Feste Sekunden) und **Anteil ohne Hook
+  (A/B-Test)**.
+- *Sound auf epischen Momenten:* **Sound-Stärke** (Aus · Dezent · Normal · Stark).
+
+Danach **Speichern**; das gilt für alle Clips, die ab dann gerendert werden. **Den alten Look zurückholen:** In der
+Karte *Alter oder neuer Look* auf **Alten Look wiederherstellen** klicken und **Speichern** – dann sitzen Untertitel
+wieder groß an der alten Stelle, der Hook bleibt den ganzen Clip, und es kommt kein automatischer Sound dazu.
+**Alles wieder automatisch** stellt die neuen Standards wieder her.
+
+**Pro Clip in der Freigabe:** Links zeigt die **Vorschau** ein Standbild des fertigen Videos – das echte Spielbild mit
+Hook und dem Untertitel, der in diesem Moment läuft. Mit dem Regler **Zeitpunkt im Clip** oder den Knöpfen darunter
+(**Erster Untertitel**, *Hook blendet aus*, die Zeiten der Effekte) schaust du dir andere Momente an; bei mehreren
+Hooks wählst du unter **Hook**, welcher gezeigt wird. Ein Klick vergrößert das Bild. Ist das Quellvideo schon gelöscht,
+steht dort ein Hinweis statt des Bilds.
+
+- Unter **Untertitel, Hook & Sound** stellst du für diesen Clip Position, Größe, Look, Hook-Größe, Hook-Anzeigedauer
+  und Sound-Stärke ein. **Standard (…)** heißt: wie in den Einstellungen (in Klammern steht, was das gerade ist).
+- Unter **Effekte & Musik** gibt es je drei Möglichkeiten: **Automatisch** (der Render entscheidet selbst), **Keine**
+  (bewusst nichts) und **Eigene** (nur, was du in die Liste schreibst). Zeiten sind Sekunden im fertigen Clip.
+  **Epischer Moment bei …** legt einen Riser und einen Impact auf den Zeitpunkt, den die Vorschau gerade zeigt;
+  **Sound**, **Blitz** und **Zoom** fügen einzelne Effekte hinzu. Bei einem Sound wählst du eine Rolle (**Impact**,
+  **Riser**, **Whoosh**, **Spannung**) oder einen bestimmten Sound, auch einen eigenen. **Keine** bei der Musik heißt:
+  keine Musik und – solange die Effekte automatisch sind – auch kein automatischer Sound.
+- **Speichern** prüft den Clip neu (wie bisher); erst danach zeigt die Vorschau die Änderung.
+
+### Eigene Sounds
+
+Unter ***Einstellungen → Assets*** stehen alle Sounds und Musikstücke mit Rolle bzw. Stimmung, Länge, Herkunft
+(*mitgeliefert* oder *eigener*) und dem Hinweis **Content-ID-gefährdet**; jeden kannst du direkt anhören und mit dem
+Schalter freigeben oder sperren. Nur freigegebene spielen im Render.
+
+**Eigenen Sound hochladen:** In der Karte *Eigenen Sound hochladen* eine Datei wählen (WAV, MP3, M4A oder OGG,
+höchstens 25 MB), **Sound-Effekt** oder **Musik** wählen, dazu die **Rolle** (Impact, Riser, Whoosh, Spannung) bzw. die
+**Stimmung**, bei Bedarf **Content-ID-gefährdet** und **Gleich freigeben** einschalten, dann **Hochladen**. Der Server
+prüft, dass die Datei wirklich Ton in diesem Format ist und eine passende Länge hat (Effekte 0,1–30 s, Musik 3 s bis
+10 Minuten), und legt sie unter einem eigenen Namen in `assets/music/local/` ab. Danach kann Claude den Sound über seine
+Rolle wählen, und in der Freigabe steht er unter *Bestimmter Sound*. Eigene Sounds lassen sich mit dem Papierkorb
+wieder löschen; mitgelieferte nur sperren.
+
+Gesperrte Sounds (und Content-ID-gefährdete, solange das Profil `music.allow_claimable` nicht erlaubt) bekommt Claude
+nicht angeboten, und die Freigabe lässt sie nicht neu auswählen. Nennt ein offener Clip schon einen Sound, der
+inzwischen gesperrt oder gelöscht ist, steht er dort mit *(ausgeschaltet)* bzw. *(gelöscht)* und dem Hinweis „der Render
+nimmt einen anderen Sound dieser Rolle“ – wähle einen anderen Sound oder eine Rolle, oder lass ihn so.
 
 ---
 
@@ -397,7 +472,7 @@ die du gleich brauchst. Die Menünamen bei Google ändern sich gelegentlich; sin
    Das ist deine eigene App – über *Erweitert* weiter zur App. Alle Häkchen setzen (besonders *Videos hochladen*) und
    zulassen. Das Dashboard meldet *„YouTube ist verbunden.“*
 
-Hochladen: **Videos** → Variante → **Auf YouTube hochladen**, Konto und Sichtbarkeit (privat, nicht gelistet,
+Hochladen: **Videos** → Variante → **Hochladen**, YouTube-Konto und Sichtbarkeit (privat, nicht gelistet,
 öffentlich) wählen.
 
 **Grenzen von Googles Seite** – das kann ich von hier nicht nachprüfen; laut Google, bitte dort prüfen:
@@ -415,7 +490,87 @@ Hochladen: **Videos** → Variante → **Auf YouTube hochladen**, Konto und Sich
 
 ---
 
-## 7. Dauerbetrieb (Autostart)
+## 7. Instagram verbinden (optional)
+
+Damit der Clipper Reels direkt auf Instagram veröffentlicht, braucht er Zugriff auf dein Instagram-Konto – über Metas
+offizielle Schnittstelle (Instagram Graph API), ohne dein Passwort. Dafür legst du einmalig eine eigene, kostenlose
+„Meta-App“ an (etwa 15 Minuten). Ohne das geht alles andere genauso: MP4 herunterladen, selbst in Instagram posten
+und als gepostet markieren.
+
+**Ehrlich vorweg:** Diese Anbindung ist nach Metas Unterlagen gebaut und nur gegen eine Nachbildung von Instagram
+getestet – mit einem echten Konto ließ sie sich bisher nicht ausprobieren. Metas Menüs und Regeln ändern sich oft. Wo
+„laut Meta, bitte dort prüfen“ steht, konnte ich die Angabe nicht selbst bei Meta nachlesen.
+
+**Voraussetzung:** Dein Instagram-Konto ist ein **professionelles Konto** (Creator oder Business). Umstellen in der
+Instagram-App unter *Einstellungen → Kontotyp und Tools → Zu professionellem Konto wechseln* (kostenlos). Private
+Konten können über die Schnittstelle nicht posten.
+
+Es gibt zwei Wege. Im Dashboard unter **Konten → Instagram verbinden** stehen dieselben Schritte.
+
+**Weg A: über eine Facebook-Seite (empfohlen).** Laut Metas Anleitung dürfen nur Apps mit Facebook-Login ein Video
+direkt vom eigenen PC hochladen (ohne öffentliche Internetadresse) – dieser Weg passt deshalb zu einem privaten PC.
+
+1. Dein Instagram-Konto mit einer **Facebook-Seite** verknüpfen (eine Seite legst du bei Facebook kostenlos an): in
+   der Instagram-App über die Kontenübersicht oder auf Facebook in den Einstellungen der Seite unter *Verknüpfte
+   Konten* (laut Meta, bitte dort prüfen).
+2. <https://developers.facebook.com/apps> öffnen (mit deinem Facebook-Konto; beim ersten Mal registrierst du dich als
+   Entwickler) → **App erstellen** → als Typ **Business** bzw. den Anwendungsfall für Instagram-Inhalte wählen, Name
+   z. B. „GTA Clipper“ (laut Meta, bitte dort prüfen).
+3. In der App das Produkt **Instagram** hinzufügen und **API-Einrichtung mit Facebook-Login** wählen. Die App darf im
+   **Entwicklungsmodus** bleiben: Für dein eigenes Konto – du bist Admin der App – braucht es keine App-Prüfung
+   (laut Meta, bitte dort prüfen).
+4. **App-Einstellungen → Allgemeines**: **App-ID** und **App-Geheimcode** kopieren, im Dashboard unter *Weg A*
+   eintragen → **Speichern**. Damit macht der Server aus deinem Token eines, das nicht nach einer Stunde abläuft.
+5. Den **Graph API Explorer** öffnen (<https://developers.facebook.com/tools/explorer/>): oben deine App und
+   **Benutzer-Token** wählen, die Berechtigungen `instagram_basic`, `instagram_content_publish`, `pages_show_list`
+   und `pages_read_engagement` hinzufügen (gehört die Seite zu einem Business-Portfolio, zusätzlich
+   `business_management`) → **Generate Access Token** → im Meta-Fenster deine Seite und dein Instagram-Konto
+   auswählen und erlauben.
+6. Das Token (beginnt mit `EAA`) kopieren, im Dashboard bei **Token einfügen** einsetzen → **Token prüfen und
+   verbinden**. Der Server prüft es bei Meta, holt daraus das Seiten-Token (das laut Meta nicht abläuft) und legt für
+   jedes gefundene Instagram-Konto ein Konto an. Einmal am Tag fragt er nach, ob es noch gilt.
+
+**Weg B: nur Instagram (ohne Facebook-Seite).** Einfacher einzurichten – aber laut Metas Anleitung ist das direkte
+Hochladen einer Videodatei für diesen Weg nicht vorgesehen. Der Server versucht es trotzdem; lehnt Meta ab, steht die
+Antwort beim Upload-Job unter **Jobs**, und Weg A ist die Lösung.
+
+1. <https://developers.facebook.com/apps> → **App erstellen** mit dem Anwendungsfall für Instagram bzw. dem Produkt
+   **Instagram → API-Einrichtung mit Instagram-Login** (laut Meta, bitte dort prüfen).
+2. **App-Rollen → Rollen**: dein Instagram-Konto als **Instagram-Tester** einladen und die Einladung in Instagram
+   annehmen (unter *Apps und Websites → Tester-Einladungen*; laut Meta, bitte dort prüfen).
+3. Bei **API-Einrichtung mit Instagram-Login → Zugriffstoken generieren** dein Konto hinzufügen, anmelden, das Token
+   (beginnt mit `IG`) kopieren und im Dashboard bei **Token einfügen** einsetzen → **Token prüfen und verbinden**.
+
+Ein Token aus Weg B gilt 60 Tage. Der Server erneuert es selbst – zum ersten Mal einen Tag nach dem Einfügen, danach
+jede Woche (laut Meta geht das, sobald es 24 Stunden alt ist). Scheitert das, versucht er es frühestens 6 Stunden
+später wieder, behält solange das alte Token und meldet sich wenige Tage vor dem Ablauf in der **Übersicht**.
+
+**Mit Instagram anmelden statt Token einfügen:** Das geht nur, wenn dein Server unter einer eigenen **HTTPS-Adresse**
+erreichbar ist (`./start.sh --public-url https://…`, fortgeschritten): Meta nimmt als Weiterleitung nach allen Quellen,
+die ich prüfen konnte, keine `http://localhost`-Adresse an (laut Meta, bitte dort prüfen). Dann stehen im Kasten unter
+*Weg B → Statt Token: mit Instagram anmelden* die Weiterleitungs-URI für die Meta-App und Felder für
+**Instagram-App-ID** und **Instagram-App-Geheimcode** (aus *API-Einrichtung mit Instagram-Login*). Für einen privaten
+PC ist das Token-Einfügen der einfachere Weg.
+
+**Posten:** **Videos** → Variante → **Hochladen** → Instagram-Konto wählen. **Auch im Feed zeigen** (Standard: an)
+zeigt den Reel zusätzlich im Profil-Raster und im Feed. Darunter steht der **Text des Reels**: Titel, Beschreibung mit
+Quellenangabe und die Hashtags (ohne YouTubes `#Shorts`; höchstens 2.200 Zeichen und 30 Hashtags). Würde Instagram die
+Datei nicht annehmen (zu kurz, falsches Format …), sagt der Dialog das, bevor etwas hochgeladen wird. Nach dem
+Hochladen verarbeitet Instagram das Video meist einige Minuten (*„Instagram verarbeitet das Video …“* beim Job);
+danach verlinkt das Dashboard den Reel. Ein Upload lässt sich abbrechen, bis die Veröffentlichung an Instagram
+geschickt ist. Stürzt der Server mittendrin ab oder reißt die Verbindung ab, macht der nächste Versuch beim selben
+Instagram-Container weiter und prüft zuerst, ob der Reel schon online ist – gepostet wird er nur einmal.
+
+**Grenzen von Metas Seite** – laut Meta, bitte dort prüfen:
+
+- Höchstens 100 Beiträge pro Konto in 24 Stunden über die Schnittstelle; ist das erreicht, sagt es der Upload.
+- Reels: MP4 mit H.264 und AAC, 3 Sekunden bis 15 Minuten, höchstens 300 MB – die Shorts des Clippers passen.
+- Der Clipper spricht mit Version v26.0 der Graph API. Meta schaltet alte Versionen nach etwa zwei Jahren ab; dann
+  braucht es ein Clipper-Update.
+
+---
+
+## 8. Dauerbetrieb (Autostart)
 
 Damit der Server „rund um die Uhr clippt“, ohne dass ein Terminal offen sein muss, und nach einem Neustart von selbst
 wieder läuft. Am besten erst nach dem Einrichtungsassistenten einrichten (der Server läuft dann im Hintergrund, und
@@ -454,7 +609,7 @@ Was `install` je nach System einrichtet:
   `install` den Autostart-Ordner nicht, zeigt es den Inhalt der Datei an, die du dann selbst anlegst
   (Windows-Taste + R → `shell:startup`). Bis zur nächsten Anmeldung startest du den Server wie gewohnt mit `./start.sh`.
 
-`install` noch einmal aufrufen (z. B. mit anderen Optionen, siehe [Handy-Zugriff](#8-zugriff-vom-handy-im-heimnetz))
+`install` noch einmal aufrufen (z. B. mit anderen Optionen, siehe [Handy-Zugriff](#9-zugriff-vom-handy-im-heimnetz))
 ersetzt die alte Einrichtung. Ein Neustart des Servers ist harmlos: Laufende Live-Aufnahmen nehmen weiter auf, und
 unterbrochene Jobs macht der Server danach weiter – eine unterbrochene Claude-Auswahl an der Stelle, an der sie war
 (höchstens eine Anfrage wird wiederholt). Damit ein Job, der immer wieder unterbrochen wird, nicht endlos wiederholt
@@ -476,7 +631,7 @@ löschst du dort – die kann der Server nicht sehen. `autostart install` und `a
 
 ---
 
-## 8. Zugriff vom Handy im Heimnetz
+## 9. Zugriff vom Handy im Heimnetz
 
 Normalerweise ist das Dashboard nur auf dem PC selbst erreichbar. Fürs Handy im selben WLAN:
 
@@ -495,7 +650,7 @@ Was das bedeutet:
   fremden oder öffentlichen WLAN nicht.
 - **Niemals** im Router eine Portweiterleitung auf diesen Port einrichten – der Server ist nicht dafür gebaut, offen
   im Internet zu stehen.
-- *YouTube verbinden* geht trotzdem nur am PC selbst.
+- *YouTube verbinden* geht trotzdem nur am PC selbst. Ein Instagram-Token einfügen geht auch vom Handy.
 - Fragt macOS, ob Python eingehende Verbindungen annehmen darf: erlauben. Unter Ubuntu mit aktiver Firewall (ufw):
   `sudo ufw allow 8765/tcp`.
 - Unter **WSL2** ist der Server so nicht vom Handy erreichbar (WSL hängt hinter Windows' eigenem Netz). Das lässt sich
@@ -503,7 +658,7 @@ Was das bedeutet:
 
 ---
 
-## 9. Aktualisieren
+## 10. Aktualisieren
 
 Deine Daten (`data/`, `exports/`, `jobs/`, Logs) liegen nicht in Git und bleiben bei einem Update unberührt, ebenso
 alle Einstellungen im Dashboard.
@@ -545,7 +700,7 @@ und den Server neu starten (Strg+C und `./start.sh`, bzw. `uv run python -m auto
 
 ---
 
-## 10. Datensicherung
+## 11. Datensicherung
 
 Was wo liegt (alles im Clipper-Ordner):
 
@@ -554,11 +709,12 @@ Was wo liegt (alles im Clipper-Ordner):
 | `data/automate.db` | Die Datenbank: dein Login, Quellen, Einstellungen, Jobs, Picks, die Liste der Videos, Kosten – **und alle Schlüssel** |
 | `exports/` | Die fertigen Shorts mit Titeln und Beschreibungen |
 | `jobs/` | Arbeitsdateien: Transkripte und Picks bleiben, große Quellvideos werden automatisch gelöscht |
-| `assets/music/local/` | Musik, die du im Dashboard freigegeben hast |
+| `assets/music/local/` | Deine hochgeladenen Sounds und Musik sowie deine Freigaben für Musik und Sounds |
 | `logs/` | Protokolle |
 
 **Ehrlich zu den Schlüsseln:** Der Anthropic-Schlüssel, der Fish-Audio-Schlüssel, Client-ID und Client-Secret von
-Google sowie die YouTube-Zugangstokens stehen **im Klartext** in `data/automate.db`. Geschützt sind sie nur durch die
+Google, App-IDs und App-Geheimcodes deiner Meta-App sowie die YouTube- und Instagram-Zugangstokens stehen **im
+Klartext** in `data/automate.db`. Geschützt sind sie nur durch die
 Dateirechte: Die Datei und der Ordner `data/` sind nur für deinen Benutzer lesbar. Wer an deinen Benutzer-Account,
 an die Festplatte oder an eine Kopie der Datei kommt, kann sie lesen. Dasselbe gilt für das 2FA-Geheimnis (der
 Server braucht es lesbar, um Codes zu prüfen). Nur dein Passwort und die Wiederherstellungscodes sind als Hash
@@ -570,7 +726,9 @@ Darum:
   geteilten Cloud-Ordner legen.
 - Gerät verkauft oder eine Kopie verloren? Schlüssel beim Anbieter widerrufen: Anthropic-Schlüssel in der Claude
   Console löschen, Fish-Schlüssel bei Fish Audio, in der Google Cloud Console ein neues Client-Secret erzeugen und
-  unter <https://myaccount.google.com/permissions> den Zugriff der App entfernen.
+  unter <https://myaccount.google.com/permissions> den Zugriff der App entfernen; bei Meta in der App einen neuen
+  App-Geheimcode erzeugen und den Zugriff der App entfernen (Facebook: *Einstellungen → Business-Integrationen*,
+  Instagram: *Apps und Websites*; laut Meta, bitte dort prüfen).
 
 **Sichern:** Dieser Befehl kopiert die Datenbank in einem stimmigen Zustand nach `sicherung.db` – auch während der
 Server läuft (Autostart inklusive):
@@ -589,7 +747,7 @@ als `data/automate.db` hineinlegen, Server wieder starten (`./start.sh` bzw. `�
 
 ---
 
-## 11. Zugang verloren
+## 12. Zugang verloren
 
 - **Handy weg, Passwort bekannt:** Bei der Anmeldung *„Kein Zugriff auf die App? Wiederherstellungscode verwenden“*
   und einen der gespeicherten Codes eingeben. Danach unter **System → 2FA neu einrichten** das neue Handy verbinden.
@@ -601,14 +759,14 @@ als `data/automate.db` hineinlegen, Server wieder starten (`./start.sh` bzw. `�
   ```
 
   Zum Bestätigen `RESET` eintippen. Das löscht dein Konto (Passwort, 2FA, Wiederherstellungscodes, Sitzungen);
-  Quellen, Videos und Einstellungen bleiben, ebenso die API-Schlüssel und YouTube-Verbindungen (willst du die auch
-  löschen, hänge `--wipe-keys` an). Der Befehl zeigt danach einen neuen **Einrichtungs-Code** und den Link
+  Quellen, Videos und Einstellungen bleiben, ebenso die API-Schlüssel, die Meta-/Instagram-App-IDs und die
+  YouTube-/Instagram-Verbindungen (willst du die auch löschen, hänge `--wipe-keys` an). Der Befehl zeigt danach einen neuen **Einrichtungs-Code** und den Link
   *Einrichtung:* – öffne ihn und lege das Konto im Assistenten neu an. Der Server muss dafür nicht neu starten. Der
   Zugriff auf das Terminal dieses PCs ist hier der Beweis, dass du der Besitzer bist.
 
 ---
 
-## 12. Fehlersuche
+## 13. Fehlersuche
 
 **Erster Schritt – der Systemcheck im Terminal:**
 
@@ -643,7 +801,7 @@ steht im Dashboard unter **Jobs** beim jeweiligen Job.
 - **Downloads scheitern (yt-dlp)** – bei *„Sign in to confirm you're not a bot“* blockiert YouTube deine
   IP-Adresse (häufig bei VPNs und Servern im Rechenzentrum); hilft nur Abwarten oder ein anderer Internetanschluss.
   Bei Fehlern wie *„Requested format is not available“* oder Problemen mit YouTubes „Challenges“ yt-dlp aktualisieren
-  ([Abschnitt 9](#9-aktualisieren)).
+  ([Abschnitt 10](#10-aktualisieren)).
 - **Die erste Analyse hängt oder scheitert beim Modell** – beim allerersten Transkribieren lädt der Clipper das
   Parakeet-Modell (etwa 650 MB) von huggingface.co in `~/.cache/huggingface`. Ohne Internet oder wenn eine Firewall
   huggingface.co sperrt, scheitert das. Später läuft alles offline. Ob das Modell schon da ist, steht unter **System**.
@@ -664,7 +822,7 @@ steht im Dashboard unter **Jobs** beim jeweiligen Job.
   der **Freigabe**: einen der beiden ablehnen oder Start/Ende ändern, dann freigeben.
 - **Alarm „Die Suche … hat keine einzige Quelle erreicht“** – meist war beim Suchen kein Internet da; die geplante
   Suche versucht es alle 15 Minuten erneut. Bleibt der Alarm, Internetverbindung prüfen bzw. yt-dlp aktualisieren
-  ([Abschnitt 9](#9-aktualisieren)).
+  ([Abschnitt 10](#10-aktualisieren)).
 - **Voiceover scheitert beim Rendern** – kein Fish-Schlüssel und keine Systemstimme: Fish-Schlüssel eintragen oder
   `sudo apt install espeak-ng`.
 - **Der Browser öffnet sich nicht** – auf Rechnern ohne Bildschirm oder unter WSL ohne Hilfsprogramm normal; die
@@ -672,12 +830,24 @@ steht im Dashboard unter **Jobs** beim jeweiligen Job.
 - **Mac: „Dieser Mac meldet sich als Intel (x86_64)“** – entweder ein Intel-Mac (nicht unterstützt) oder das Terminal
   läuft unter Rosetta: Programme → Dienstprogramme → Terminal → *Informationen* → Haken bei *Mit Rosetta öffnen*
   entfernen.
+- **Instagram: „Das ist ein privates Instagram-Konto“** – auf ein professionelles Konto umstellen
+  ([Abschnitt 7](#7-instagram-verbinden-optional)), dann ein neues Token erzeugen und einfügen.
+- **Instagram: „Dem Token fehlen Berechtigungen“ / „Dem Zugriff fehlt eine Berechtigung“** – im Graph API Explorer
+  bzw. beim Token-Erzeugen alle Berechtigungen aus Abschnitt 7 setzen, neues Token einfügen.
+- **Instagram: „Zu diesem Token gibt es keine Facebook-Seite mit verknüpftem Instagram-Profikonto“** – Instagram-Konto
+  und Facebook-Seite verknüpfen und beim Erzeugen des Tokens Seite *und* Instagram-Konto auswählen.
+- **Instagram-Upload: „… funktioniert das direkte Hochladen … nur mit einer Meta-App mit Facebook-Login“** – Meta nimmt
+  Weg B für Uploads nicht an: Weg A einrichten (Abschnitt 7).
+- **Alarm „Instagram-Konto … ist nicht mehr verbunden“ oder „Der Instagram-Zugriff … läuft … ab“** – unter **Konten**
+  ein neues Token einfügen; mit **Prüfen** neben dem Konto fragt das Dashboard Meta sofort, ob das Token gilt.
+- **Instagram: „Instagram ist nicht erreichbar“** – meist keine Internetverbindung; ein Upload-Job versucht es selbst
+  noch einmal (**Jobs**).
 - **WSL: <http://localhost:8765> geht im Windows-Browser nicht** – prüfen, ob das Ubuntu-Fenster mit dem Server noch
   offen ist; in PowerShell `wsl --update` ausführen und WSL mit `wsl --shutdown` neu starten.
 
 ---
 
-## 13. Deinstallieren
+## 14. Deinstallieren
 
 1. Autostart entfernen (beendet auch den Server):
 
@@ -693,24 +863,26 @@ steht im Dashboard unter **Jobs** beim jeweiligen Job.
 4. Den Ordner löschen: `rm -rf ~/clipping-gta-6`.
 5. Optional aufräumen: heruntergeladene Modelle in `~/.cache/huggingface` (nur, wenn kein anderes Programm sie
    braucht), unter Linux `loginctl disable-linger`, und uv selbst (Anleitung auf <https://docs.astral.sh/uv/>).
-6. Schlüssel und Zugriffe widerrufen, wenn du sie nicht mehr brauchst (siehe [Datensicherung](#10-datensicherung)).
+6. Schlüssel und Zugriffe widerrufen, wenn du sie nicht mehr brauchst (siehe [Datensicherung](#11-datensicherung)).
 
 ---
 
-## 14. Rechtliches
+## 15. Rechtliches
 
 Poste nur Clips, für die du die Rechte oder die Erlaubnis des Creators hast. Viele Streamer freuen sich über Clipper,
 manche bezahlen sogar über Clipping-Programme. Dieses Projekt steht in keiner Verbindung zu Rockstar Games, Take-Two
 oder den gezeigten Streamern.
 
 KI-Dubs tragen in der Beschreibung einen Hinweis, dass es sich um eine KI-Synchronisation handelt; beim Hochladen
-über das Dashboard wird bei Dubs zusätzlich YouTubes Kennzeichnung für veränderte/synthetische Inhalte gesetzt.
+über das Dashboard wird bei Dubs zusätzlich YouTubes Kennzeichnung für veränderte/synthetische Inhalte gesetzt. Bei
+Instagram setzt das Dashboard keine solche Kennzeichnung (ob und wie das über die Schnittstelle geht, ließ sich nicht
+prüfen) – kennzeichne Dubs dort bei Bedarf selbst in der Instagram-App.
 
 Der Clipper steht unter der Lizenz AGPL-3.0 (Datei `LICENSE`).
 
 ---
 
-## 15. Alle Befehle auf einen Blick
+## 16. Alle Befehle auf einen Blick
 
 Alle im Clipper-Ordner (`cd ~/clipping-gta-6`):
 
@@ -722,7 +894,7 @@ Alle im Clipper-Ordner (`cd ~/clipping-gta-6`):
 | `./start.sh --no-browser` | ohne den Browser zu öffnen |
 | `./start.sh --stimmen` / `--ohne-stimmen` | Stimmen-Trennung (Demucs) installieren / entfernen |
 | `uv run python -m automate doctor` | Systemcheck im Terminal |
-| `uv run python -m automate reset-login` | Login zurücksetzen (Passwort/2FA vergessen); zeigt einen neuen Einrichtungs-Code. Mit `--wipe-keys` auch alle API-Schlüssel löschen und YouTube trennen |
+| `uv run python -m automate reset-login` | Login zurücksetzen (Passwort/2FA vergessen); zeigt einen neuen Einrichtungs-Code. Mit `--wipe-keys` auch alle API-Schlüssel und App-IDs löschen und YouTube/Instagram trennen |
 | `uv run python -m automate import-yaml` | Creator, Streams und Einstellungen aus den Repo-Dateien erneut übernehmen (fügt nur Fehlendes hinzu) |
 | `uv run python -m automate.autostart install` / `status` / `restart` / `remove` | Autostart |
 | `uv run python -m clipper schedule remove` | alte `clipper schedule`-Zeitpläne entfernen |

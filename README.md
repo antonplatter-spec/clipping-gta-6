@@ -28,13 +28,13 @@ GTA Clipper turns GTA 6 streams and uploads into ready-to-post vertical Shorts. 
 
 ## Automatik: a local server instead of an agent session
 
-Prefer a dashboard to a chat? The `automate` package runs the clipper as a private server on your own PC, started with one command. A scheduler scans your creators and records live streams around the clock, workers run the clipper, and the **Claude API** (instead of Claude Code) makes the editorial calls: which moments, which hooks and titles. A web dashboard (German, login with password + 2FA) is where you enter the API keys, connect YouTube, manage sources and the schedule, approve or edit picks, preview every hook variant, copy titles or upload straight to YouTube, and watch API costs against a daily limit.
+Prefer a dashboard to a chat? The `automate` package runs the clipper as a private server on your own PC, started with one command. A scheduler scans your creators and records live streams around the clock, workers run the clipper, and the **Claude API** (instead of Claude Code) makes the editorial calls: which moments, which hooks and titles. A web dashboard (German, login with password + 2FA) is where you enter the API keys, connect YouTube and Instagram, manage sources and the schedule, approve or edit picks (with a still of each pick's layout, its caption, hook and sound settings, effects and music), upload your own sounds, preview every hook variant, copy titles or upload straight to YouTube or as an Instagram Reel, and watch API costs against a daily limit.
 
 ```bash
 ./start.sh   # installs Python and the packages with uv, then serves the dashboard on http://localhost:8765
 ```
 
-**Install guide (German): [docs/INSTALLATION.md](docs/INSTALLATION.md)**: Linux, macOS (Apple Silicon) and Windows via WSL2, first-run setup, YouTube connection, autostart, phone access on the home network, updates, backups and troubleshooting. The Claude Code / Codex workflow below works as before; just don't run its schedules (`clipper schedule`) next to the server.
+**Install guide (German): [docs/INSTALLATION.md](docs/INSTALLATION.md)**: Linux, macOS (Apple Silicon) and Windows via WSL2, first-run setup, YouTube and Instagram connection, autostart, phone access on the home network, updates, backups and troubleshooting. The Claude Code / Codex workflow below works as before; just don't run its schedules (`clipper schedule`) next to the server.
 
 ## Why this clipper
 
@@ -141,6 +141,8 @@ python3 -m clipper report "<markdown>"         # add a run report to exports/<pr
 python3 -m clipper schedule install --time 09:00   # CLI-only fallback scheduler
 python3 -m clipper render <id> --picks picks.json   # exports/<profile>/<date>/video N/<hook>.mp4
 python3 -m clipper render <id> --picks picks.json --top-hooks 1   # only the best-ranked hook (or CLIPPER_TOP_HOOKS=1 in .env)
+python3 -m clipper preview <id> --pick 1 [--at 4.5]   # one still as it will render (frame + hook + caption) + where they sit and why (JSON)
+python3 -m clipper.sfx                         # synthesize the riser/impact/braam/... sounds in assets/music again (CC0, identical files)
 python3 -m clipper simulate picks.json          # rank hook variants with a simulated swipe test
 python3 -m clipper check picks.json --job <id>  # research rules + fail picks reusing exported footage
 python3 -m clipper find "moment of truth"       # one line across every stream of the last 6 h (multi-streamer edits)

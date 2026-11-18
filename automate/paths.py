@@ -15,11 +15,12 @@ dir per test case (the store reopens its connection when `db_path()` changes).
     exports_dir()           $AUTOMATE_EXPORTS_DIR or ROOT/exports
     repo_profiles_dir()     ROOT/profiles (tracked; read-only at runtime)
     repo_watchlist()        ROOT/watchlist.yaml (tracked; read-only at runtime)
-    music_dir()             ROOT/assets/music; music_local_dir() = its gitignored local/ folder
+    music_dir()             $AUTOMATE_MUSIC_DIR or ROOT/assets/music; music_local_dir() = its gitignored local/
+                            folder (what the API serves sounds from; the bridge's clipper.music uses its own MUSIC)
     research_dir()          ROOT/research
 
-AUTOMATE_JOBS_DIR / AUTOMATE_EXPORTS_DIR exist for tests of automate's own code: the clipper subprocesses always
-use ROOT/jobs and ROOT/exports, so never set them on a real install.
+AUTOMATE_JOBS_DIR / AUTOMATE_EXPORTS_DIR / AUTOMATE_MUSIC_DIR exist for tests of automate's own code: the clipper
+subprocesses always use ROOT/jobs, ROOT/exports and ROOT/assets/music, so never set them on a real install.
 """
 import os
 from pathlib import Path
@@ -77,7 +78,7 @@ def repo_watchlist():
 
 
 def music_dir():
-    return ROOT / "assets" / "music"
+    return _env_dir("AUTOMATE_MUSIC_DIR", ROOT / "assets" / "music")
 
 
 def music_local_dir():

@@ -20,7 +20,7 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-from . import captions, config, render, speakers, transcribe
+from . import captions, config, placement, render, speakers, transcribe
 
 FISH_URL = "https://api.fish.audio/v1/tts"
 MAX_SPEED = 1.35  # faster than this sounds rushed (VideoLingo and SoniTranslate cap atempo about here)
@@ -478,10 +478,13 @@ def render_dub(job, pick_n, lang, tr, cfg):
                         "[0:a][g]amix=inputs=2:duration=first:normalize=0", str(bed)], check=True)
         cwords = caption_words(lines, placements, spks)
         layout = pick.get("layout") or {"type": "fit"}
+        plan = render.clip_plan(dpick, job, meta, cfg, hooks, dur)  # placed like the original, for these hooks
         caps = captions.write_overlay(cwords, 0.0, dur, tmp / "caps", layout.get("type", "fit"),
-                                      pick.get("caption_style") or cfg.get("caption_style", "bold"))
+                                      pick.get("caption_style") or cfg.get("caption_style", "bold"),
+                                      plan=plan["captions"])
         prep = {"captions": caps, "bed": bed, "vo": None, "layout": layout, "speakers": len(set(spks)),
-                "transcript": f"translation ({lang}) timed to the source", "voices_separated": True, "words": cwords}
+                "transcript": f"translation ({lang}) timed to the source", "voices_separated": True, "words": cwords,
+                "plan": plan}
         folder = out_dir / f"video {n}"
         folder.mkdir()
         taken, variants = set(), []
@@ -490,7 +493,7 @@ def render_dub(job, pick_n, lang, tr, cfg):
             print(f"[dub]   {mp4.relative_to(out_dir)}", flush=True)
             render.encode_variant(job, dpick, prep, hook, cfg, mp4, tmp)
             variants.append({"file": str(mp4), "hook": hook, "check": render.probe(mp4)})
-    entries = render.upload_manifest(dpick, meta, cfg, variants, titles)
+    entries = render.upload_manifest(dpick, meta, cfg, variants, titles, style=placement.summary(plan))
     entries, old, new = finish_manifest(entries, lang, meta["channel"], tr.get("credit") or CREDIT.get(lang, "Clip:"),
                                         tr.get("disclosure") or DISCLOSURE.get(lang, DISCLOSURE["en"]))
     (folder / "upload.json").write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")

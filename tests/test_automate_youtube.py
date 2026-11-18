@@ -229,6 +229,18 @@ class OAuthTests(YoutubeCase):
         _, q = self.connect(client)
         self.assertIn("abgelaufen oder wurde schon benutzt", self.callback(f"code=bad&state={q['state']}").text)
 
+    def test_a_state_is_good_for_its_own_platform_only(self):
+        client = self.login()
+        ig_state = social.new_state(security.hash_token(client.cookies.get("automate_session")),
+                                    account_id=None, return_origin="http://127.0.0.1:8765",
+                                    redirect_uri="https://clips.example.de/api/social/instagram/callback",
+                                    platform="instagram")
+        r = self.callback(f"code=good-code&state={ig_state}")  # Instagram's state at YouTube's callback
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("abgelaufen oder wurde schon benutzt", r.text)
+        self.assertIsNone(social.take_state(ig_state, platform="instagram"))  # and it is used up
+        self.assertFalse(any(c[1] == youtube.TOKEN_URL for c in self.google.calls))
+
     def test_reconnecting_an_account_and_a_missing_upload_scope(self):
         client = self.login()
         aid = store.add_account("youtube", "Zweitkanal")
