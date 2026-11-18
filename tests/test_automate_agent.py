@@ -297,7 +297,10 @@ class PromptTests(TempData):
         brief = a[0]["text"]
         for must in ("submit_picks", "no_clip_reason", "grep_transcript", "view_frame", "grid=true", "find_line",
                      "simulate", "click trigger", "60 seconds", "three words", "German", "curiosity gap",
-                     "End on the result", "caption_fixes", "Never reuse footage", "Profile notes: gta6", "GTA VI"):
+                     "End on the result", "caption_fixes", "Never reuse footage", "Profile notes: gta6", "GTA VI",
+                     # the owner's feedback and how to act on it with the tools
+                     "covered the action", "epic moments had no sound", "preview", "caption_position", "hook_seconds",
+                     "`riser` and an `impact` on the same `t`", "sound_level", "`\"fx\": []`", "`\"music\": []`"):
             self.assertIn(must, brief)
 
     def test_owner_instructions_go_after_the_breakpoint_and_the_override_replaces_the_research(self):
@@ -319,8 +322,8 @@ class PromptTests(TempData):
         self.assertNotIn("GTA VI", notes)
         self.assertIn("trever -> Trevor", prompts.profile_notes("gta6"))
 
-    def test_tools_are_the_six_with_strict_only_on_the_small_read_only_ones(self):
-        self.assertEqual(T.TOOL_NAMES, ("grep_transcript", "view_frame", "find_line", "check", "simulate",
+    def test_tools_are_the_seven_with_strict_only_on_the_small_read_only_ones(self):
+        self.assertEqual(T.TOOL_NAMES, ("grep_transcript", "view_frame", "find_line", "preview", "check", "simulate",
                                         "submit_picks"))
         strict = [t["name"] for t in T.TOOLS if t.get("strict")]
         self.assertEqual(strict, ["grep_transcript", "view_frame", "find_line"])
@@ -397,10 +400,21 @@ class ValidationTests(TempData):
             (pick(music=[{"s": 12, "e": 15, "mood": "happy"}]), "mood must be one of"),
             (pick(labels=[{"s": 15, "e": 12, "text": "*X*"}]), "s < e"),
             (pick(caption_fixes={"swerver": 3}), "caption_fixes"),
+            (pick(caption_position="middle"), "caption_position 'middle' isn't one of: auto, high, seam"),
+            (pick(caption_size=2), "caption_size 2 isn't one of"),
+            (pick(hook_seconds=45), "a number of seconds 1-30"),
+            (pick(hook_seconds=True), "hook_seconds True"),
+            (pick(sound_level="loud"), "sound_level 'loud'"),
+            (pick(caption_look="comic-word"), "caption_look 'comic-word' is a comic look but caption_style is 'boxed'"),
         ]
         for p, want in cases[:3] + cases[4:]:
             with self.subTest(want=want):
                 self.assertIn(want, "\n".join(self.errors([p])))
+        styled = pick(caption_position="high", caption_size="small", caption_look="boxed-word", hook_size="small",
+                      hook_seconds=4, sound_level="strong",
+                      fx=[{"t": 29.5, "type": "hit", "sound": "riser"}, {"t": 29.5, "type": "hit", "sound": "impact"}])
+        self.assertEqual(self.errors([styled]), [])
+        self.assertEqual(self.errors([pick(hook_seconds="whole", caption_look="classic")]), [])
         long = pick(segments=[{"start": 0, "end": 35}, {"start": 36, "end": 59}])
         del long["start"], long["end"]
         self.assertEqual(self.errors([long]), [])  # 58 s: under the cap
@@ -470,7 +484,8 @@ class LoopTests(FakeTools):
         content = first["messages"][0]["content"]
         facts = content[0]["text"]
         for want in ("at most 3", "recommends 2", "Voiceover: auto", "moods with an approved track: funny",
-                     "hit sounds: boom", "40 in total", "46 s of video", "Fix rounds: 3 rejected"):
+                     "hit sounds by role", "impact: boom", "40 in total", "46 s of video", "Fix rounds: 3 rejected",
+                     "caption_position auto", "sound_level normal"):
             self.assertIn(want, facts)
         self.assertIn("#1 strong · 10.0-31.0 s (21 s)", content[1]["text"])
         self.assertIn("S1 scenario", content[1]["text"])
@@ -885,6 +900,28 @@ class ToolTests(TempData):
         self.assertIn("past the end", T.run_tool(ctx, "view_frame", {"seconds": 90}).content)
         (self.dir / "source.mp4").unlink()
         self.assertIn("gone", T.run_tool(ctx, "view_frame", {"seconds": 5}).content)
+
+    @unittest.skipUnless(FFMPEG, "needs ffmpeg")
+    def test_preview_shows_a_draft_as_it_will_render(self):
+        ctx = self.ctx()
+        draft = {k: v for k, v in pick(caption_position="high").items() if k not in ("why", "click_trigger")}
+        out = T.run_tool(ctx, "preview", {"pick": draft, "at": 1.5, "hook": 2})
+        self.assertFalse(out.is_error, out.content)
+        text = out.content[0]["text"]
+        self.assertIn("Preview at 1.5 s of the finished clip (540x960 of the 1080x1920 frame)", text)
+        self.assertIn("captions: position high (pick), size small", text)
+        self.assertIn("Untertitel: oben im Spielbild", text)
+        self.assertEqual(out.content[1]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(ctx.views, 1)  # an image: it counts toward the frame budget
+        self.assertEqual(sorted(p.name for p in ctx.scratch.iterdir()), ["preview.picks.json"])
+        self.assertIn("Format problems", T.run_tool(ctx, "preview", {"pick": dict(draft, sound_level="loud")}).content)
+        self.assertIn("hook must be 1-3", T.run_tool(ctx, "preview", {"pick": draft, "hook": 4}).content)
+        self.assertIn("at must be", T.run_tool(ctx, "preview", {"pick": draft, "at": -1}).content)
+        ctx.views = T.MAX_VIEW_CALLS
+        self.assertIn("image limit", T.run_tool(ctx, "preview", {"pick": draft}).content)
+        ctx.views = 0
+        (self.dir / "source.mp4").unlink()
+        self.assertIn("is gone", T.run_tool(ctx, "preview", {"pick": draft}).content)
 
     def test_find_line_formats_hits_from_other_streams(self):
         ctx = self.ctx()

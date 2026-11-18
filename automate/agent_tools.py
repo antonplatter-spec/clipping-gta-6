@@ -3,7 +3,7 @@
     TOOLS                                   the tool definitions (constant and in a fixed order: they open the cached
                                             prompt prefix, so they never change between requests or jobs)
     JobContext.load(job_row, ...)           everything a tool needs about the job (dir, time base, prefs, limits)
-    run_tool(ctx, name, input) -> ToolResult     grep_transcript, view_frame, find_line, check, simulate
+    run_tool(ctx, name, input) -> ToolResult     grep_transcript, view_frame, find_line, preview, check, simulate
     submit(ctx, input, round_no=, max_rounds=) -> Submission | ToolResult   submit_picks: validation + `clipper check`
                                             (ToolError when the check itself can't run: the caller decides)
     validate_picks(ctx, picks, draft=False) -> (clean, reasons, triggers, errors)
@@ -11,9 +11,15 @@
     sheet_image(path) / image_block(path, max_side)   contact sheets and frames as downscaled base64 image blocks
     candidates(ctx) / music_moods(ctx)       facts for the first message
 
-Validation beyond `clipper check`: types and enums of clip.md step 7, start < end, the 60 s cap, hooks paired with
-titles, `why` + a named `click_trigger` per pick, max_picks, the voiceover preference, no footage shared between the
-picks of one submission (> 3 s), and no hook or title opening with the same three words as another video's.
+Validation beyond `clipper check`: types and enums of clip.md step 7 (incl. the caption/hook/sound keys of
+automate.style: caption_position, caption_size, caption_look, hook_size, hook_seconds, sound_level), start < end, the
+60 s cap, hooks paired with titles, `why` + a named `click_trigger` per pick, max_picks, the voiceover preference, no
+footage shared between the picks of one submission (> 3 s), and no hook or title opening with the same three words as
+another video's. A hit's `sound` (a role or a library id) is checked by `clipper check` against the music library.
+
+`preview` draws one composited still of a draft pick (`clipper preview`: the frame with the layout, hook banner and
+caption exactly as the render places them) so Claude can see where captions and hook land before submitting; it
+shares the per-job image budget with view_frame.
 
 Tools run as subprocesses (`runtime.run_clipper` / `runtime.run_bridge`), never by importing clipper here. Results
 are compact and bounded (match caps, window caps, truncation notes, downscaled images, a frame budget per job) so a
@@ -28,7 +34,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import paths, runtime, store
+from . import paths, runtime, store, style
 
 CLIP_TYPES = ("reaction", "comedy", "news", "gameplay", "showcase", "scenario")
 HOOK_STYLES = ("bold", "box", "label", "none")
@@ -57,10 +63,13 @@ MAX_VIEW_CALLS = 24  # view_frame calls per job (each adds ~1-1.5k image tokens 
 FRAME_SIDE = 1280
 SHEET_SIDE = 1568
 JPEG_QUALITY = 82
-TIMEOUTS = {"transcript": 120, "frame": 120, "find": 120, "check": 300, "rank": 600, "ffprobe": 30, "music": 60}
+PREVIEW_SIDE = 960  # a 540x960 still: about 700 image tokens
+TIMEOUTS = {"transcript": 120, "frame": 120, "find": 120, "check": 300, "rank": 600, "ffprobe": 30, "music": 60,
+            "preview": 180}
 
 PICK_KEYS = ("start", "end", "segments", "clip_type", "layout", "hook_style", "caption_style", "hooks", "titles",
-             "description", "hashtags", "voiceover", "labels", "caption_fixes", "fx", "music", "why", "click_trigger")
+             "description", "hashtags", "voiceover", "labels", "caption_fixes", "fx", "music", *style.KEYS, "why",
+             "click_trigger")
 NOTE_KEYS = ("why", "click_trigger")  # ours, not clipper's: moved out of the pick into Selection.reasons/click_triggers
 
 
@@ -121,10 +130,24 @@ PICK_PROPS = {
     "labels": {"type": "array", "items": _obj({"s": NUM, "e": NUM, "text": STR}, ["s", "e", "text"])},
     "caption_fixes": {"type": "object", "additionalProperties": STR,
                       "description": "misheard word -> correct spelling (whole words, any case)"},
-    "fx": {"type": "array", "items": _obj({"t": NUM, "type": {"type": "string", "enum": list(FX_TYPES)},
-                                          "color": STR, "sound": STR}, ["t", "type"])},
-    "music": {"type": "array", "items": _obj({"s": NUM, "e": NUM, "mood": {"type": "string", "enum": list(MOODS)}},
-                                             ["s", "e", "mood"])},
+    "fx": {"type": "array", "description": "edit beats; leave out to let the render score the clip itself, [] for none",
+           "items": _obj({"t": NUM, "type": {"type": "string", "enum": list(FX_TYPES)},
+                          "color": {"type": "string", "description": "flash: white, red, orange, lime or #RRGGBB"},
+                          "sound": {"type": "string", "description": "hit: a role (impact, riser, whoosh, tension) or "
+                                                                     "a hit sound id from the job facts"}},
+                         ["t", "type"])},
+    "music": {"type": "array", "description": "music windows; [] = no added audio at all (also no automatic sound)",
+              "items": _obj({"s": NUM, "e": NUM, "mood": {"type": "string", "enum": list(MOODS)}}, ["s", "e", "mood"])},
+    "caption_position": {"type": "string", "enum": list(style.CHOICES["caption_position"]),
+                         "description": "leave out (= auto) unless a preview shows captions on the action"},
+    "caption_size": {"type": "string", "enum": list(style.CHOICES["caption_size"])},
+    "caption_look": {"type": "string", "enum": list(style.CHOICES["caption_look"]),
+                     "description": "auto, classic, or a look of the pick's caption_style family"},
+    "hook_size": {"type": "string", "enum": list(style.CHOICES["hook_size"])},
+    "hook_seconds": {"anyOf": [{"type": "string", "enum": ["auto", "whole"]}, {"type": "number"}],
+                     "description": "auto, whole, or seconds (1-30) the hook banner shows before it fades"},
+    "sound_level": {"type": "string", "enum": list(style.CHOICES["sound_level"]),
+                    "description": "automatic sound for a pick without fx"},
     "why": {"type": "string", "description": "German: why it works and what you decided"},
     "click_trigger": {"type": "string", "description": "trigger name, a colon, then in German what it is here"},
 }
@@ -176,6 +199,20 @@ TOOLS = [
          "with \"job\": \"<job>\"; hits marked footage deleted can't be used."),
      "input_schema": _obj({"pattern": {"type": "string", "description": "case-insensitive regex"},
                            "hours": {"type": "number", "description": "how far back (default 6)"}}, ["pattern"])},
+    {"name": "preview",
+     "description": (
+         "See one draft pick as it will render: a single 9:16 still of the finished Short at one moment (default: "
+         "the first caption while the hook shows), with the layout (the facecam crop of a split), the hook banner and "
+         "the caption on screen then, placed exactly as the renderer will place them, plus a line saying where "
+         "captions and hook went and why. Use it to check a split layout's facecam crop and that captions and hook "
+         "sit off the action, especially before setting caption_position or caption_size yourself; at moves the "
+         "still to another second of the finished clip (0 = its first frame), hook picks which hook variant (1 = "
+         "first). It costs an image like view_frame and counts toward the same limit, so preview a pick once, not "
+         "every pick. why and click_trigger may be left out."),
+     "input_schema": _obj({"pick": DRAFT_PICK,
+                           "at": {"type": "number", "description": "seconds into the finished clip"},
+                           "hook": {"type": "integer", "description": "which hook variant to draw (1 = first)"}},
+                          ["pick"])},
     {"name": "check",
      "description": (
          "Dry-run the quality gate on a draft without submitting: the same format validation and `clipper check` "
@@ -664,6 +701,16 @@ def _check_pick(ctx, pick, n, draft, errs):
                     errs.append(f"{v} fx[{i}]: color only goes on a flash")
                 elif "sound" in f and (f["type"] != "hit" or not isinstance(f["sound"], str)):
                     errs.append(f"{v} fx[{i}]: sound only goes on a hit")
+    for key in style.KEYS:
+        if key in pick and not style.valid(key, pick[key]):
+            allowed = (f"auto, whole or a number of seconds 1-{style.HOOK_SECONDS_MAX}" if key == "hook_seconds"
+                       else ", ".join(style.CHOICES[key]))
+            errs.append(f"{v}: {key} {pick[key]!r} isn't one of: {allowed} (leave the key out for auto)")
+    fam = style.look_mismatch(pick.get("caption_look"), pick.get("caption_style"))
+    if fam:
+        errs.append(f"{v}: caption_look '{pick['caption_look']}' is a {fam} look but caption_style is "
+                    f"'{pick['caption_style']}': use auto, classic or one of "
+                    f"{', '.join(style.family_looks(pick['caption_style']))}")
     if not draft:
         if not (isinstance(pick.get("why"), str) and pick["why"].strip()):
             errs.append(f"{v}: why is required (German: why this moment works and what you decided)")
@@ -750,6 +797,81 @@ def check(ctx, inp):
     return ToolResult(f"{verdict}\nreport: {_report_text(report)}")
 
 
+def _missing_sources(ctx, pick):
+    """The jobs whose source.mp4 a pick needs and that are gone."""
+    jobs = {s.get("job") or ctx.clipper_job for s in pick.get("segments") or []} or {ctx.clipper_job}
+    gone = []
+    for j in sorted(jobs):
+        try:
+            d = ctx.dir if j == ctx.clipper_job else job_dir(j)
+        except ValueError:
+            gone.append(j)
+            continue
+        if not (d / "source.mp4").exists():
+            gone.append(j)
+    return gone
+
+
+def preview(ctx, inp):
+    pick = inp.get("pick")
+    errs = []
+    if not _check_pick(ctx, pick, 1, True, errs):
+        return ToolResult("Format problems (no preview drawn):\n- " + "\n- ".join(e.replace("video 1", "the pick", 1)
+                                                                               for e in errs), is_error=True)
+    if ctx.views >= MAX_VIEW_CALLS:
+        raise ToolError(f"image limit reached ({MAX_VIEW_CALLS} frames and previews per job): decide with what you "
+                        "have")
+    at, hook = inp.get("at"), inp.get("hook", 1)
+    if at is not None and (not _num(at) or at < 0):
+        raise ToolError("at must be seconds into the finished clip (0 or more)")
+    if not isinstance(hook, int) or isinstance(hook, bool) or not 1 <= hook <= len(pick["hooks"]):
+        raise ToolError(f"hook must be 1-{len(pick['hooks'])} (which of the pick's hooks to draw)")
+    gone = _missing_sources(ctx, pick)
+    if gone:
+        raise ToolError(f"the video of job {gone[0]} is gone (deleted by cleanup): no preview possible")
+    ctx.scratch.mkdir(parents=True, exist_ok=True)
+    picks_file, png = ctx.scratch / "preview.picks.json", ctx.scratch / "preview.png"
+    clean = {k: v for k, v in pick.items() if k not in NOTE_KEYS}
+    picks_file.write_text(json.dumps([clean], ensure_ascii=False), encoding="utf-8")
+    args = ["preview", "--picks", str(picks_file), "--pick", "1", "--hook", str(hook), "--out", str(png)]
+    if at is not None:
+        args += ["--at", f"{float(at):.2f}"]
+    res = _clipper(ctx, args + ["--", str(ctx.dir)], "preview")
+    try:
+        out = _trailing_json(res.stdout) if res.returncode == 0 else None
+    except ValueError:
+        out = None
+    if not out or not png.exists():
+        raise ToolError("the preview couldn't be drawn: " + (res.stderr.strip().splitlines() or ["?"])[-1][:300])
+    block, (w, h) = image_block(png, PREVIEW_SIDE)
+    png.unlink(missing_ok=True)
+    ctx.views += 1
+    pl = out.get("placement") or {}
+    cap, hk = pl.get("captions") or {}, pl.get("hook") or {}
+    hook_text = ("no banner: this clip is in the no-hook A/B arm" if out.get("no_hook_arm") else
+                 f"hook \"{out.get('hook')}\" {'shown' if out.get('hook_visible') else 'already faded out'}")
+    secs = hk.get("seconds")
+    lines = [f"Preview at {out.get('at')} s of the finished clip ({w}x{h} of the 1080x1920 frame) · {hook_text} · "
+             f"caption on screen: \"{out.get('caption') or '(none)'}\"",
+             f"captions: position {cap.get('position')} ({cap.get('reason')}), size {cap.get('size')}, look "
+             f"{cap.get('look')} · hook banner: size {hk.get('size')}, "
+             + ("the whole clip" if secs is None else f"shown for {secs:g} s, then fades"),
+             f"(German summary for the owner: {pl.get('text_de')})"]
+    return ToolResult([{"type": "text", "text": "\n".join(lines)}, block])
+
+
+def _trailing_json(text):
+    """The JSON object a clipper command prints last (warnings may come before it)."""
+    lines = (text or "").splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("{"):
+            try:
+                return json.loads("\n".join(lines[i:]))
+            except ValueError:
+                continue
+    raise ValueError("no JSON")
+
+
 def simulate(ctx, inp):
     picks = inp.get("picks")
     if not (isinstance(picks, list) and picks and all(isinstance(p, dict) for p in picks)):
@@ -806,8 +928,8 @@ def submit(ctx, inp, *, round_no, max_rounds):
     return Submission(clean, reasons, triggers, None, report)
 
 
-READ_TOOLS = {"grep_transcript": grep_transcript, "view_frame": view_frame, "find_line": find_line, "check": check,
-              "simulate": simulate}
+READ_TOOLS = {"grep_transcript": grep_transcript, "view_frame": view_frame, "find_line": find_line, "preview": preview,
+              "check": check, "simulate": simulate}
 
 
 def resolve_name(name):
@@ -839,7 +961,8 @@ def candidates(ctx):
 
 
 def music_moods(ctx):
-    """(moods with an approved music track, hit sound ids) or None when the library can't be read."""
+    """(moods with an approved music track, {role: [hit sound ids]}) or None when the library can't be read. Hits
+    without a role (an older library) count as impacts, as clipper.music.role does."""
     try:
         tracks = runtime.run_bridge("music_library", {}, ctx.profile, timeout=TIMEOUTS["music"],
                                     cancel=ctx.cancel).get("tracks") or []
@@ -848,6 +971,10 @@ def music_moods(ctx):
             raise ToolCanceled() from None
         return None
     usable = [t for t in tracks if t.get("usable")]
+    hits = {}
+    for t in sorted((t for t in usable if t.get("kind") == "hit" and t.get("id")), key=lambda t: str(t["id"])):
+        role = t.get("role") if t.get("role") in style.SOUND_ROLES else "impact"
+        hits.setdefault(role, []).append(str(t["id"]))
     return (sorted({t["mood"] for t in usable if t.get("kind") == "music" and t.get("mood")}),
-            sorted({t["id"] for t in usable if t.get("kind") == "hit" and t.get("id")}))
+            {r: hits[r] for r in style.SOUND_ROLES if r in hits})
 

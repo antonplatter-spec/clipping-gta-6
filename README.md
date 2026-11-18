@@ -28,7 +28,7 @@ GTA Clipper turns GTA 6 streams and uploads into ready-to-post vertical Shorts. 
 
 ## Automatik: a local server instead of an agent session
 
-Prefer a dashboard to a chat? The `automate` package runs the clipper as a private server on your own PC, started with one command. A scheduler scans your creators and records live streams around the clock, workers run the clipper, and the **Claude API** (instead of Claude Code) makes the editorial calls: which moments, which hooks and titles. A web dashboard (German, login with password + 2FA) is where you enter the API keys, connect YouTube and Instagram, manage sources and the schedule, approve or edit picks, preview every hook variant, copy titles or upload straight to YouTube or as an Instagram Reel, and watch API costs against a daily limit.
+Prefer a dashboard to a chat? The `automate` package runs the clipper as a private server on your own PC, started with one command. A scheduler scans your creators and records live streams around the clock, workers run the clipper, and the **Claude API** (instead of Claude Code) makes the editorial calls: which moments, which hooks and titles. A web dashboard (German, login with password + 2FA) is where you enter the API keys, connect YouTube and Instagram, manage sources and the schedule, approve or edit picks (with a still of each pick's layout, its caption, hook and sound settings, effects and music), upload your own sounds, preview every hook variant, copy titles or upload straight to YouTube or as an Instagram Reel, and watch API costs against a daily limit.
 
 ```bash
 ./start.sh   # installs Python and the packages with uv, then serves the dashboard on http://localhost:8765

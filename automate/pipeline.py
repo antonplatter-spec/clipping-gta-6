@@ -45,6 +45,8 @@ Public (API):
     scan_running(profile=None) -> bool
     approve_pick(pick_id) -> render job id ; reject_pick(pick_id, reason=None) -> pick row
     update_pick_data(pick_id, changes) -> (pick row, check_report)       raises PickCheckFailed on fails
+                                             changes: EDITABLE keys; fx, music and the caption/hook/sound keys
+                                             (style.KEYS) take null = drop the key (automatic / Einstellungen)
     enqueue_dub(video_id, lang) -> job id
     enqueue_upload(variant_id, account_id, options, force=False) -> job id   options: the platform's (YouTube:
                                              {"privacy"} or the privacy string; Instagram: {"share_to_feed"});
@@ -74,7 +76,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import costs, paths, runtime, store
+from . import costs, paths, runtime, store, style
 
 log = logging.getLogger("automate.pipeline")
 
@@ -107,6 +109,11 @@ T_LIVE_DONE, T_CLEANUP, T_WATCH = 300, 1800, 3600
 KIND_DE = {"source": "Quelle", "live_chunk": "Live-Stück", "render": "Rendern", "dub": "Synchronisation",
            "upload": "Upload"}
 CLIP_TYPES = ("reaction", "comedy", "news", "gameplay", "showcase", "scenario")
+# the report sections clipper.hooks.has_fails counts as fails (besides hook/title fails); `style` = the caption, hook
+# and sound keys (and music moods)
+FAIL_SECTIONS = ("variety", "length", "labels", "footage", "fx", "style")
+MAX_FX, MAX_MUSIC = 30, 10
+MOOD_DE = {"suspense": "Spannung", "sneaky": "Schleichen", "epic": "Episch", "sad": "Traurig", "funny": "Lustig"}
 HOOK_STYLES = ("bold", "box", "label", "none")
 CAPTION_STYLES = ("boxed", "bold", "comic")
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")
@@ -334,7 +341,7 @@ def _report_fails(entry):
     entry = entry or {}
     if any(v.get("fails") for k in ("hooks", "titles") for v in (entry.get(k) or {}).values()):
         return True
-    return any(k in entry for k in ("variety", "length", "labels", "footage", "fx"))
+    return any(k in entry for k in FAIL_SECTIONS)
 
 
 def _fail_summary(report):
@@ -345,7 +352,7 @@ def _fail_summary(report):
         for kind in ("hooks", "titles"):
             for text, v in (e.get(kind) or {}).items():
                 out += [f"„{text}“: {f}" for f in v.get("fails") or []]
-        for k in ("variety", "length", "labels", "footage", "fx"):
+        for k in FAIL_SECTIONS:
             if k in e:
                 v = e[k]
                 out.append(f"{k}: {'; '.join(map(str, v)) if isinstance(v, list) else v}")
@@ -707,6 +714,8 @@ def _render_progress(n_hooks):
         if "no-hook arm" in line:
             state["total"] = 1
             return f"Rendere Video {n}: Variante ohne Hook (A/B-Test) …"
+        if "Untertitel:" in line:  # clipper prints the placement it chose (placement.plan's text_de)
+            return f"Rendere Video {n}: Untertitel und Hook platziert …"
         return None
     return parse
 
@@ -1400,6 +1409,11 @@ def _finish_with_video(run, job, pick, folder, lang):
                          result={**(job.get("result") or {}), "video_id": vid, "folder": paths.rel(folder)})
     run.event(f"{paths.rel(folder)} gespeichert ({n} Variante(n))"
               + (f"; Synchronisation eingereiht: {', '.join(dubs)}" if dubs else ""))
+    first = next(iter(_read_json(folder / "upload.json") or []), None)
+    for key in ("placement", "sound"):  # what the render decided, in clipper's own German sentence
+        text = ((first or {}).get(key) or {}).get("text_de") if isinstance(first, dict) else None
+        if isinstance(text, str) and text:
+            run.event(f"{folder.name} – {text}")
     for key in ("picks_file", "translation_file"):
         f = (job.get("params") or {}).get(key)
         if f:
@@ -1869,11 +1883,65 @@ def reject_pick(pick_id, reason=None):
     return store.get_pick(pick_id)
 
 
-def _edit_errors(data, changes):
-    """{field: German message} for a PATCH body of /api/picks/{id}."""
-    allowed = {"hooks", "titles", "description", "hashtags", "voiceover", "start", "end", "clip_type", "hook_style",
-               "caption_style"}
-    errs = {k: "Dieses Feld lässt sich nicht bearbeiten" for k in changes if k not in allowed}
+EDITABLE = ("hooks", "titles", "description", "hashtags", "voiceover", "start", "end", "clip_type", "hook_style",
+            "caption_style", "fx", "music", *style.KEYS)
+NULLABLE = ("fx", "music", *style.KEYS)  # null removes the key: automatic / the default from Einstellungen
+
+
+def _clip_window(data, changes):
+    """(lo, hi) of the pick's fx/music time base: source seconds of a single clip, clip seconds of a story cut."""
+    segs = data.get("segments")
+    if segs:
+        return 0.0, sum(float(x["end"]) - float(x["start"]) for x in segs)
+    return float(changes.get("start", data.get("start", 0))), float(changes.get("end", data.get("end", 0)))
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _fx_error(items, lo, hi, sound_ids):
+    if not isinstance(items, list) or len(items) > MAX_FX:
+        return f"Liste mit höchstens {MAX_FX} Effekten (leer = keine Effekte, null = automatisch)"
+    for i, f in enumerate(items, 1):
+        if not isinstance(f, dict) or not _num(f.get("t")) or f.get("type") not in style.FX_TYPES:
+            return f"Effekt {i}: braucht eine Zeit und eine Art (Blitz, Zoom oder Sound)"
+        extra = set(f) - {"t", "type", "color", "sound"}
+        if extra:
+            return f"Effekt {i}: unbekannte Angaben ({', '.join(sorted(extra))})"
+        if not lo - 0.001 <= f["t"] < hi:
+            return f"Effekt {i} liegt außerhalb des Clips"
+        if "color" in f and f["type"] != "flash":
+            return f"Effekt {i}: eine Farbe gibt es nur beim Blitz"
+        if "color" in f and not style.valid_colour(f["color"]):
+            return f"Effekt {i}: unbekannte Farbe (white, red, orange, lime oder #RRGGBB)"
+        if "sound" in f and f["type"] != "hit":
+            return f"Effekt {i}: einen Sound gibt es nur bei der Art Sound"
+        if "sound" in f and not (isinstance(f["sound"], str) and (f["sound"] in style.SOUND_ROLES
+                                                                  or sound_ids is None or f["sound"] in sound_ids)):
+            return f"Effekt {i}: den Sound „{f['sound']}“ gibt es nicht (mehr) in der Bibliothek"
+    return None
+
+
+def _music_error(items, lo, hi):
+    if not isinstance(items, list) or len(items) > MAX_MUSIC:
+        return f"Liste mit höchstens {MAX_MUSIC} Musik-Abschnitten (leer = keine Musik, null = automatisch)"
+    for i, m in enumerate(items, 1):
+        if not isinstance(m, dict) or set(m) != {"s", "e", "mood"} or not (_num(m["s"]) and _num(m["e"])):
+            return f"Musik {i}: braucht Anfang, Ende und Stimmung"
+        if m["mood"] not in MOOD_DE:
+            return f"Musik {i}: Stimmung muss eins von {', '.join(MOOD_DE.values())} sein"
+        if m["e"] - m["s"] < 1:
+            return f"Musik {i}: das Ende muss mindestens 1 s nach dem Anfang liegen"
+        if m["s"] < lo - 0.001 or m["e"] > hi + 0.001:
+            return f"Musik {i} liegt außerhalb des Clips"
+    return None
+
+
+def _edit_errors(data, changes, sound_ids=None):
+    """{field: German message} for a PATCH body of /api/picks/{id}. `sound_ids`: the hit sounds of the music
+    library (None: not checked here; `clipper check` checks them anyway)."""
+    errs = {k: "Dieses Feld lässt sich nicht bearbeiten" for k in changes if k not in EDITABLE}
 
     def strings(key, lo, hi):
         v = changes[key]
@@ -1909,7 +1977,38 @@ def _edit_errors(data, changes):
             errs["end"] = "Ende muss nach dem Start liegen"
         elif e - s > 60:
             errs["end"] = "Höchstens 60 Sekunden"
+    for key in style.KEYS:
+        if changes.get(key) is not None and not style.valid(key, changes[key]):
+            errs[key] = f"{style.KEY_DE[key]}: eins von {style.allowed_de(key)}"
+    look = changes["caption_look"] if "caption_look" in changes else data.get("caption_look")
+    cap = changes.get("caption_style", data.get("caption_style"))
+    if "caption_look" not in errs and style.look_mismatch(look, cap):
+        errs["caption_look"] = (f"Der Look „{look}“ gehört zum Untertitel-Stil „{style.LOOKS[look]}“, nicht "
+                                f"zu „{cap}“: wähle einen Look dieses Stils, „Klassisch“ oder „Automatisch“")
+    try:
+        lo, hi = _clip_window(data, changes)
+    except (KeyError, TypeError, ValueError):
+        lo, hi = 0.0, float("inf")
+    checks = (("fx", lambda v: _fx_error(v, lo, hi, sound_ids)), ("music", lambda v: _music_error(v, lo, hi)))
+    for key, check in checks:
+        if changes.get(key) is not None and not {"start", "end"} & set(errs):
+            msg = check(changes[key])
+            if msg:
+                errs[key] = msg
     return errs
+
+
+def _hit_sound_ids(changes, profile):
+    """The library's hit sound ids when the edit names a sound that isn't a role, else None (no lookup)."""
+    named = [f.get("sound") for f in changes.get("fx") or [] if isinstance(f, dict) and f.get("sound")]
+    if not any(isinstance(x, str) and x not in style.SOUND_ROLES for x in named):
+        return None
+    try:
+        tracks = runtime.run_bridge("music_library", {}, profile, timeout=T_CHECK).get("tracks") or []
+    except runtime.BridgeError as e:
+        log.warning("music library for a pick edit: %s", e.message)
+        return None
+    return {t.get("id") for t in tracks if t.get("kind") == "hit"}
 
 
 def update_pick_data(pick_id, changes):
@@ -1922,13 +2021,13 @@ def update_pick_data(pick_id, changes):
         raise PipelineError(f"Nur offene Clips lassen sich bearbeiten (Status: {pick['status']}).", "not_proposed",
                             409)
     base = pick["data"] or {}
-    errs = _edit_errors(base, changes)
+    errs = _edit_errors(base, changes, _hit_sound_ids(changes, pick["profile"]))
     if errs:
         raise PipelineError("Bitte prüfe die Eingaben.", "invalid", 422, errs)
     new = dict(base)
     for k, v in changes.items():
-        if k == "voiceover" and not (v or "").strip():
-            new.pop("voiceover", None)
+        if k == "voiceover" and not (v or "").strip() or k in NULLABLE and v is None:
+            new.pop(k, None)
         else:
             new[k] = [x.strip() for x in v] if k in ("hooks", "titles") else v
     job = store.get_job(pick["job_id"])

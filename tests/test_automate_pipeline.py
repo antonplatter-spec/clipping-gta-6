@@ -214,6 +214,76 @@ class LifecycleTests(Helpers):
             pipeline.update_pick_data(pick["id"], {"description": "x"})
         self.assertEqual(e.exception.status, 409)
 
+    def test_edit_sets_and_clears_the_caption_hook_and_sound_keys(self):
+        jid = self.gated()
+        pick = self.picks(jid)[0]
+        start, end = pick["data"]["start"], pick["data"]["end"]
+        beat = start + 12.0
+        fx = [{"t": beat, "type": "hit", "sound": "riser"}, {"t": beat, "type": "hit", "sound": "my-riser"},
+              {"t": beat, "type": "flash", "color": "white"}]
+        changes = {"caption_position": "high", "caption_size": "small", "caption_look": "boxed-word",
+                   "hook_size": "small", "hook_seconds": 4, "sound_level": "strong", "fx": fx,
+                   "music": [{"s": start + 2, "e": start + 9, "mood": "suspense"}]}
+        row, _ = pipeline.update_pick_data(pick["id"], changes)
+        for k, v in changes.items():
+            self.assertEqual(row["data"][k], v)
+        self.assertEqual(json.loads((paths.jobs_dir() / "AAAAAAAAAAA" / "picks.json").read_text())[0]["fx"], fx)
+        checked = [p for op, p in self.clip.bridge_calls if op == "check"][-1]["picks"][0]
+        self.assertEqual(checked["hook_seconds"], 4)  # the gate saw exactly what is stored
+        # null drops a key (automatic / the default from Einstellungen); [] stays: "none on purpose"
+        row, _ = pipeline.update_pick_data(pick["id"], {"caption_position": None, "fx": None, "music": [],
+                                                        "hook_seconds": "whole"})
+        self.assertNotIn("caption_position", row["data"])
+        self.assertNotIn("fx", row["data"])
+        self.assertEqual((row["data"]["music"], row["data"]["hook_seconds"]), ([], "whole"))
+        self.assertEqual(row["data"]["caption_look"], "boxed-word")
+        bad = {
+            "caption_position": ("middle", "Untertitel-Position: eins von auto, high, seam, low, classic"),
+            "hook_seconds": (45, "1–30 Sekunden"),
+            "sound_level": ("loud", "Sound-Stärke"),
+            "caption_look": ("comic-word", "gehört zum Untertitel-Stil „comic“, nicht zu „boxed“"),
+            "fx": ([{"t": end + 5, "type": "hit"}], "Effekt 1 liegt außerhalb des Clips"),
+            "music": ([{"s": start, "e": start + 0.5, "mood": "epic"}], "mindestens 1 s"),
+        }
+        for key, (value, want) in bad.items():
+            with self.subTest(key=key), self.assertRaises(pipeline.PipelineError) as e:
+                pipeline.update_pick_data(pick["id"], {key: value})
+            self.assertIn(want, e.exception.fields[key])
+        for value, want in (([{"t": beat, "type": "zoom", "color": "red"}], "nur beim Blitz"),
+                            ([{"t": beat, "type": "flash", "color": "pink"}], "unbekannte Farbe"),
+                            ([{"t": beat, "type": "hit", "sound": "nope"}], "„nope“ gibt es nicht"),
+                            ([{"t": beat, "type": "hit", "volume": 3}], "unbekannte Angaben (volume)"),
+                            ([{"type": "hit"}], "braucht eine Zeit"),
+                            ([{"t": beat, "type": "hit"}] * 31, "höchstens 30")):
+            with self.subTest(fx=value[0]), self.assertRaises(pipeline.PipelineError) as e:
+                pipeline.update_pick_data(pick["id"], {"fx": value})
+            self.assertIn(want, e.exception.fields["fx"])
+        with self.assertRaises(pipeline.PipelineError) as e:  # a new caption_style must fit the stored look
+            pipeline.update_pick_data(pick["id"], {"caption_style": "comic"})
+        self.assertIn("caption_look", e.exception.fields)
+        row, _ = pipeline.update_pick_data(pick["id"], {"caption_style": "comic", "caption_look": None})
+        self.assertNotIn("caption_look", row["data"])
+
+    def test_the_render_log_says_where_captions_went_and_what_sound_was_added(self):
+        jid, pick, video = self.rendered_video()
+        render = store.list_jobs(kind="render")[0][0]
+        events = [e for e in store.job_events(render["id"]) if e["level"] == "info"]
+        self.assertTrue(any(e["message"].startswith("video 1 – Untertitel: oben im Spielbild") for e in events))
+        self.assertTrue(any(e["message"] == "video 1 – Sound: normal – Riser + Impact bei 9,5 s (Lautstärkesprung "
+                                           "+14 dB)" for e in events))
+        raw = [e["message"] for e in store.job_events(render["id"])]
+        self.assertTrue(any(m.startswith("[render] video 1: Untertitel:") for m in raw))  # clipper's own line
+
+    def test_style_fails_of_clipper_check_block_approval_with_a_readable_summary(self):
+        jid = self.gated()
+        pick = self.picks(jid)[0]
+        report = {"style": ["caption_position 'middle' isn't one of: auto, high, seam, low, classic"]}
+        store.update_pick(pick["id"], check_report=report)
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.approve_pick(pick["id"])
+        self.assertEqual(e.exception.status, 422)
+        self.assertIn("style: caption_position 'middle'", str(e.exception))
+
     def test_approve_refuses_a_pick_with_fails(self):
         jid = self.gated()
         pick = self.picks(jid)[0]

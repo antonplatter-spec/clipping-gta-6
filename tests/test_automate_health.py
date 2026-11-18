@@ -65,8 +65,10 @@ class SystemReportTests(PipelineCase):
         store.add_stream("gta-rp", "other", "https://www.twitch.tv/other")  # profile off: not counted
         store.add_account("youtube", "Main", connected=True)
         r = health.readiness()
-        self.assertEqual(r, {"anthropic_key": True, "fish_key": False, "youtube_connected": True, "tools_ok": True,
-                             "sources": 2, "automation": False})
+        self.assertEqual(r, {"anthropic_key": True, "fish_key": False, "youtube_connected": True,
+                             "instagram_connected": False, "tools_ok": True, "sources": 2, "automation": False})
+        store.add_account("instagram", "@clips", connected=True)
+        self.assertTrue(health.readiness()["instagram_connected"])
         self.clip.system["which"]["ffmpeg"] = False
         health.system_report(refresh=True)
         self.assertFalse(health.readiness()["tools_ok"])

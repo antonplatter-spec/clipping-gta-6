@@ -17,7 +17,8 @@ Types: "boolean"; "integer" (with `auto`: the string "auto" too); "number" (int 
 "string_list" (choices are suggestions; dub.auto_languages takes language codes like "es", "pt-BR"); "text"
 (multi-line; `nullable`: blank means null = "use the repo file"); "string" (ui.default_profile: a folder in
 profiles/); "json" (claude.prices: {model: {input, output, cache_read, cache_write}} USD per 1M tokens;
-watchlist.overrides: a mapping merged over watchlist.yaml).
+watchlist.overrides: a mapping merged over watchlist.yaml; the caption/hook/sound defaults in it, which the dashboard
+edits under Einstellungen → Untertitel & Sound, are checked by style.config_errors).
 """
 import copy
 import re
@@ -25,7 +26,7 @@ from dataclasses import dataclass
 
 import yaml
 
-from . import paths
+from . import paths, style
 
 
 class SettingsError(ValueError):
@@ -385,6 +386,9 @@ def validate_overrides(overrides, base=None, what="der Datei"):
             raise ValueError("jeder Schlüssel muss ein Name sein")
         if isinstance(base.get(k), dict) and not isinstance(v, dict):
             raise ValueError(f"„{k}“ ist in {what} eine Gruppe von Werten; hier muss auch eine Gruppe stehen")
+    bad = style.config_errors(overrides)
+    if bad:
+        raise ValueError(" ".join(bad.values()))
     try:
         yaml.safe_dump(overrides)
     except yaml.YAMLError as e:

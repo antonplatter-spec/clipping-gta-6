@@ -46,6 +46,9 @@
 //     platform's `options`); GET /api/social/platforms lists the platforms and their option fields, Account gains
 //     `can_upload` and `connection`, and the Instagram connection has its own routes (section "Upload platforms and
 //     Instagram" at the end of this file).
+// 14. Round 2, captions and sound: PickData gains the caption/hook/sound keys (PATCH takes them, null = back to the
+//     default from Einstellungen); GET /api/picks/{id}/preview draws a layout still; Video gains `made`; the music
+//     library lists roles, lengths and own sounds, which can be uploaded (raw body), listened to and deleted.
 //
 // Decided here where §7 is silent (the backend implements exactly these; details at each function):
 //  - POST /api/login → State. Wrong credentials → 401 `invalid_credentials` (the client does not redirect on it).
@@ -130,16 +133,18 @@ function handleUnauthorized() {
  * The one place that talks to the server.
  * @param {string} method
  * @param {string} path path below /api, e.g. "/jobs/3"
- * @param {{body?: any, params?: Object, signal?: AbortSignal, redirect401?: boolean}} [opts]
+ * @param {{body?: any, params?: Object, signal?: AbortSignal, redirect401?: boolean, raw?: Blob, rawType?: string}} [opts]
+ *   `raw`: send this Blob/File as the body instead of JSON (with `rawType` as its Content-Type)
  */
-export async function request(method, path, { body, params, signal, redirect401 = true } = {}) {
+export async function request(method, path, { body, params, signal, redirect401 = true, raw, rawType } = {}) {
   const headers = { 'X-Requested-With': 'automate', Accept: 'application/json' };
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (raw !== undefined) headers['Content-Type'] = rawType || 'application/octet-stream';
+  else if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res;
   try {
     res = await fetch(BASE + path + query(params), {
       method, headers, signal, credentials: 'same-origin', cache: 'no-store',
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
     if (e && e.name === 'AbortError') throw e;
@@ -298,8 +303,9 @@ export const confirmTotp = (body) => request('POST', '/account/totp/confirm', { 
  * @property {number} videos_today
  * @property {{disk_free_gb: number|null, tools_ok: boolean, missing: string[]}} system
  * @property {Job[]} recent_jobs        newest first, about 8
- * @property {{anthropic_key: boolean, fish_key: boolean, youtube_connected: boolean, tools_ok: boolean,
- *   sources: number}} ready           ADDITION: sources = active (non-paused) creators + streams of enabled profiles
+ * @property {{anthropic_key: boolean, fish_key: boolean, youtube_connected: boolean, instagram_connected: boolean,
+ *   tools_ok: boolean, sources: number}} ready  ADDITION: sources = active (non-paused) creators + streams of
+ *   enabled profiles; instagram_connected (round 2) = an Instagram account with a stored token
  */
 
 /**
@@ -430,15 +436,24 @@ export const scanNow = (body = {}) => request('POST', '/scan', { body });
  * @property {string[]} [hashtags]
  * @property {string} [voiceover]
  * @property {Array<{s: number, e: number, text: string}>} [labels]
- * @property {Array<{t: number, type: "flash"|"zoom"|"hit", sound?: string, color?: string}>} [fx]
- * @property {Array<{s: number, e: number, mood: string}>} [music]
+ * @property {Array<{t: number, type: "flash"|"zoom"|"hit", sound?: string, color?: string}>} [fx]  edit beats in
+ *   the pick's time base (source seconds of a single clip, clip seconds of a story cut); missing = the render scores
+ *   the clip itself (zooms, sound on its epic beats up to sound_level), [] = no effects. A hit's `sound` is a role
+ *   (impact | riser | whoosh | tension; a riser ENDS on t) or a library sound id.
+ * @property {Array<{s: number, e: number, mood: string}>} [music]  missing = automatic; [] = no added audio at all
  * @property {Object<string,string>} [caption_fixes]
+ * @property {"auto"|"high"|"seam"|"low"|"classic"} [caption_position]  missing = the default from Einstellungen
+ * @property {"auto"|"small"|"medium"|"large"} [caption_size]
+ * @property {string} [caption_look]  "auto" | "classic" | a look of the caption_style's family (labels.LOOKS)
+ * @property {"auto"|"small"|"medium"|"large"} [hook_size]
+ * @property {"auto"|"whole"|number} [hook_seconds]  number = 1-30 seconds, then a short fade
+ * @property {"off"|"subtle"|"normal"|"strong"} [sound_level]  automatic sound for a pick without fx
  */
 
 /**
  * `clipper check` result for ONE pick: the value `hooks.check_picks` (+ footage check) produces under "video N".
- * Fails (block approval): hooks/titles `fails`, and the keys variety, length, labels, fx, footage (as in
- * `clipper.hooks.has_fails`). Notes (judgment calls): hooks/titles `notes`, pairing, playbook, clip_type, edit.
+ * Fails (block approval): hooks/titles `fails`, and the keys variety, length, labels, fx, footage, style (as in
+ * `clipper.hooks.has_fails`; style = a caption, hook or sound key or a music mood the renderer doesn't know). Notes (judgment calls): hooks/titles `notes`, pairing, playbook, clip_type, edit.
  * Messages are clipper's own (English). `{}` = clean.
  * @typedef {Object} CheckReport
  * @property {Object<string, {fails: string[], notes?: string[]}>} [hooks]   keyed by hook text
@@ -452,6 +467,7 @@ export const scanNow = (body = {}) => request('POST', '/scan', { body });
  * @property {string[]} [edit]
  * @property {string} [variety]
  * @property {string[]} [footage]
+ * @property {string[]} [style]
  */
 
 /**
@@ -505,12 +521,46 @@ export const getPick = (id) => request('GET', `/picks/${id}`);
  * `simulate_report` matches the new hook texts) and saves only when there are no fails.
  * Fails → 422 `{code: "check_failed", message, check_report}` and nothing is saved.
  * `voiceover: ""` or null removes the voiceover. Not proposed → 409.
+ * The caption/hook/sound keys, `fx` and `music` (PickData) take their value, or null = drop the key (back to the
+ * default from Einstellungen / the render's automatic choice); `[]` for fx or music = none on purpose. Invalid
+ * values → 422 with German `fields` (e.g. "Effekt 2 liegt außerhalb des Clips").
  * @param {number} id
  * @param {{hooks?: string[], titles?: string[], description?: string, hashtags?: string[], voiceover?: string|null,
- *   start?: number, end?: number, clip_type?: ClipType, hook_style?: string, caption_style?: string}} changes
+ *   start?: number, end?: number, clip_type?: ClipType, hook_style?: string, caption_style?: string,
+ *   caption_position?: string|null, caption_size?: string|null, caption_look?: string|null, hook_size?: string|null,
+ *   hook_seconds?: string|number|null, sound_level?: string|null, fx?: Object[]|null, music?: Object[]|null}} changes
  * @returns {Promise<{pick: Pick, check_report: CheckReport}>}
  */
 export const updatePick = (id, changes) => request('PATCH', `/picks/${id}`, { body: changes });
+
+/**
+ * One composited still of the saved pick as it will render (`clipper preview`: layout, hook banner, caption on screen).
+ * Drawn on the server, cached per pick content + time + hook (an edit gives a new `key`), at most two at once.
+ * Always 200: `ok: false` with `reason` source_gone (the source video is deleted) | busy (try again shortly) | failed,
+ * and a German `message`.
+ * @typedef {Object} PreviewResult
+ * @property {boolean} ok
+ * @property {string} [key]
+ * @property {string} [image]      URL of the PNG (1080x1920), session cookie only (for <img>)
+ * @property {number} [at]         seconds into the finished clip
+ * @property {string|null} [hook]  the hook drawn (null: none, e.g. the no-hook A/B arm)
+ * @property {boolean} [hook_visible]
+ * @property {boolean} [no_hook_arm]  this clip posts without a banner (A/B test)
+ * @property {string} [caption]    the caption on screen then
+ * @property {{text_de: string, captions: Object, hook: Object, layout: string}} [placement]
+ * @property {boolean} [cached]
+ * @property {"source_gone"|"busy"|"failed"} [reason]
+ * @property {string} [message]
+ */
+
+/**
+ * GET /api/picks/{id}/preview
+ * @param {number} id
+ * @param {{at?: number|null, hook?: number}} [params]  at: seconds into the finished clip (omit: the first caption
+ *   while the hook shows); hook: which hook variant (1 = first)
+ * @returns {Promise<PreviewResult>}
+ */
+export const getPickPreview = (id, params = {}) => request('GET', `/picks/${id}/preview`, { params });
 
 /**
  * POST /api/picks/{id}/approve — queues the render job. Pick with hook/title fails → 422; not proposed → 409.
@@ -597,6 +647,9 @@ export const sheetUrl = (jobId, name) => `${BASE}/jobs/${jobId}/sheets/${encodeU
  * @property {number|null} job_id
  * @property {number|null} pick_id
  * @property {Variant[]} variants  by rank
+ * @property {{placement: string|null, sound: string|null, sound_level: string|null,
+ *   sound_layers: Array<{id: string, role: string, start: number, end: number}>}|null} made
+ *   what the render decided (clipper's German sentences from upload.json); null for older renders and dubs
  */
 
 /**
@@ -842,10 +895,17 @@ export const putResearch = (body) => request('PUT', '/research', { body });
  * @property {string} file
  * @property {"music"|"hit"} kind
  * @property {string} mood       suspense | sneaky | epic | sad | funny | any
+ * @property {"impact"|"riser"|"whoosh"|"tension"|null} role  sound effects only (null for music)
+ * @property {string[]} tags     what the automatic sound asks for (big, boom, sub, braam, swell, short)
+ * @property {number|null} length  seconds
+ * @property {number|null} beat_at  seconds into the file where its beat is (when the library says)
  * @property {boolean} claimable can get a Content-ID claim
  * @property {boolean} approved
  * @property {boolean} usable    approved and file present (and not blocked as claimable)
  * @property {boolean} local     defined in assets/music/local/library.yaml
+ * @property {"own"|"built-in"} source  own = uploaded (or added by hand) in assets/music/local/
+ * @property {string|null} title  the original file name of an own sound
+ * @property {boolean} exists
  */
 
 /**
@@ -856,6 +916,25 @@ export const getAssets = () => request('GET', '/assets');
 
 /** PATCH /api/assets/music/{id} @param {string} id @param {{approved: boolean}} body @returns {Promise<MusicTrack>} */
 export const updateMusic = (id, body) => request('PATCH', `/assets/music/${encodeURIComponent(id)}`, { body });
+
+/** URL of a library sound (GET /api/assets/music/{id}/file, Range support) for <audio>. */
+export const soundFileUrl = (id) => `${BASE}/assets/music/${encodeURIComponent(id)}/file`;
+
+/**
+ * POST /api/assets/music — upload an own sound effect or music track (the file itself is the body; at most 25 MB;
+ * WAV, MP3, M4A or OGG). The server checks that it really is audio of a sane length and files it under a name it
+ * chooses. Problems → 422 with `fields.file` (German), too big → 413.
+ * @param {File|Blob} file
+ * @param {{name: string, kind: "hit"|"music", role?: string, mood?: string, claimable: boolean, approved: boolean}} meta
+ * @returns {Promise<MusicTrack>}
+ */
+export const uploadSound = (file, meta) => request('POST', '/assets/music', {
+  raw: file, rawType: file.type || 'application/octet-stream',
+  params: { ...meta, claimable: meta.claimable ? 1 : 0, approved: meta.approved ? 1 : 0 },
+});
+
+/** DELETE /api/assets/music/{id} — own sounds only (a built-in one → 409 not_removable). @returns {Promise<Ok>} */
+export const deleteSound = (id) => request('DELETE', `/assets/music/${encodeURIComponent(id)}`);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Costs and API keys

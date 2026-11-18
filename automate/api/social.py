@@ -18,7 +18,7 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import HTMLResponse
 
 from .. import instagram, settings, social, store, youtube
-from .common import ApiError, Form, conflict, invalid, mapped, not_found, public
+from .common import IG_ERROR_STATUS, ApiError, Form, conflict, invalid, mapped, not_found, public
 
 log = logging.getLogger("automate.api")
 router = APIRouter()
@@ -196,10 +196,6 @@ def callback(request: Request, code: str | None = None, state: str | None = None
 
 # ---------------------------------------------------------------- Instagram
 
-IG_ERROR_STATUS = {"not_found": 404, "not_connected": 409, "instagram_app_missing": 409, "invalid": 422,
-                   "instagram_token_format": 422, "instagram_token_invalid": 422, "instagram_not_professional": 422,
-                   "instagram_no_account": 422, "instagram_permission": 422, "instagram_wrong_account": 422,
-                   "instagram_disconnected": 409, "session_expired": 401}
 IG_FIELD_ERRORS = ("instagram_token_format", "instagram_token_invalid", "instagram_not_professional",
                    "instagram_no_account", "instagram_permission", "instagram_wrong_account")
 APP_FIELDS = {"app_id": "instagram_app_id", "app_secret": "instagram_app_secret", "meta_app_id": "meta_app_id",

@@ -3,7 +3,13 @@
 
 Variant files are served only when the DB knows them and they resolve (symlinks included) to a regular .mp4 file
 below paths.exports_dir().
+
+Video.made: what the render decided, from the folder's upload.json (clipper writes it into every entry): the caption
+and hook placement and the added sound, each as clipper's German sentence, plus the sound layers (id, role, start,
+end in clip seconds); null for a video rendered before the renderer wrote them (and for dubs).
 """
+import json
+import os
 import re
 
 from fastapi import APIRouter, Body, Query, Request
@@ -26,9 +32,52 @@ def variant_out(v):
     return out
 
 
+_manifests = {}
+
+
+def _manifest(folder):
+    """The first upload.json entry of an export folder inside exports/ (cached by mtime), else None."""
+    if not folder:
+        return None
+    f = paths.from_rel(folder) / "upload.json"
+    try:
+        real, root = os.path.realpath(f), os.path.realpath(paths.exports_dir())
+        if os.path.commonpath([real, root]) != root:
+            return None
+        mtime = os.stat(real).st_mtime_ns
+    except (OSError, ValueError):
+        return None
+    hit = _manifests.get(real)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(real, encoding="utf-8") as fh:
+            entries = json.load(fh)
+        first = entries[0] if isinstance(entries, list) and entries and isinstance(entries[0], dict) else None
+    except (OSError, ValueError):
+        first = None
+    if len(_manifests) > 500:
+        _manifests.clear()
+    _manifests[real] = (mtime, first)
+    return first
+
+
+def made(v):
+    first = _manifest(v.get("folder"))
+    place = (first or {}).get("placement") if isinstance((first or {}).get("placement"), dict) else None
+    snd = (first or {}).get("sound") if isinstance((first or {}).get("sound"), dict) else None
+    if not place and not snd:
+        return None
+    layers = [{k: x.get(k) for k in ("id", "role", "start", "end")} for x in (snd or {}).get("layers") or []
+              if isinstance(x, dict)]
+    return {"placement": (place or {}).get("text_de"), "sound": (snd or {}).get("text_de"), "sound_layers": layers,
+            "sound_level": (snd or {}).get("level")}
+
+
 def video_out(v):
     out = {k: v.get(k) for k in VIDEO_KEYS}
     out["variants"] = [variant_out(x) for x in v.get("variants") or []]
+    out["made"] = made(v)
     return out
 
 

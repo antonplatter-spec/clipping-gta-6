@@ -233,7 +233,15 @@ class PrepareClipTests(unittest.TestCase):
         self.assertIn(layers[1][0], ("noise-riser", "reverse-swell"))
         self.assertAlmostEqual(layers[1][2], 12.0)
         self.assertEqual(prep["sound"]["beats"], [])
-        self.assertIn("wie im Clip festgelegt", prep["sound"]["text_de"])
+        self.assertIn("wie im Clip festgelegt (2 Sound-Effekte)", prep["sound"]["text_de"])
+
+    def test_own_hits_still_play_and_are_named_with_music_none(self):
+        # "music": [] drops music and the automatic sound, not the pick's own hits: the sentence must say so
+        prep = self.prep({"payoff_at": 9.5, "music": [], "fx": [{"t": 9.5, "type": "hit", "sound": "impact"}]})
+        self.assertEqual(len(prep["sound"]["layers"]), 1)
+        self.assertEqual(prep["sound"]["text_de"], "Sound: wie im Clip festgelegt (1 Sound-Effekt)")
+        flash_only = self.prep({"payoff_at": 9.5, "fx": [{"t": 9.5, "type": "flash"}]})
+        self.assertEqual(flash_only["sound"]["text_de"], "Sound: keine Sound-Effekte (im Clip so festgelegt)")
 
 
 class ShippedSoundTests(unittest.TestCase):

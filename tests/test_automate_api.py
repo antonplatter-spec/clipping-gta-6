@@ -399,16 +399,25 @@ class AuthFlowTests(ApiCase):
         r = fresh.post("/api/setup", json={"username": "neu", "password": PASSWORD, "token": code})
         self.assertEqual(r.status_code, 200)
 
-    def test_reset_login_can_also_wipe_the_keys_and_youtube(self):
+    def test_reset_login_can_also_wipe_the_keys_youtube_and_instagram(self):
+        from io import StringIO
         from automate import __main__ as cli
         self.client()
         store.set_secret("anthropic_api_key", "sk-ant-api03-kept-key-0123456789")
+        store.set_secret("meta_app_id", "555566667777888")
         aid = store.add_account("youtube", "Kanal", connected=True, credentials={"refresh_token": "1//x"})
-        with mock.patch("sys.stdout"), mock.patch("automate.youtube.revoke", return_value=True) as revoke:
+        ig = store.add_account("instagram", "@clips", connected=True, credentials={"access_token": "IGAAx"})
+        out = StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("automate.youtube.revoke", return_value=True) as revoke:
             self.assertEqual(cli.reset_login(["--yes", "--wipe-keys"]), 0)
+        for words in ("Instagram- und Meta-App-ID", "YouTube- und Instagram-Konten werden GELÖSCHT",
+                      "YouTube und Instagram getrennt"):
+            self.assertIn(words, out.getvalue())
         self.assertFalse(store.secret_info("anthropic_api_key")["set"])
-        a = store.get_account(aid, with_credentials=True)
-        self.assertEqual((a["connected"], a["credentials"]), (False, None))
+        self.assertFalse(store.secret_info("meta_app_id")["set"])
+        for account in (aid, ig):
+            a = store.get_account(account, with_credentials=True)
+            self.assertEqual((a["connected"], a["credentials"]), (False, None))
         revoke.assert_called_once()
 
     def test_env_keys_are_imported_only_once_the_login_is_set_up(self):
@@ -762,7 +771,7 @@ class OverviewJobTests(ApiCase):
         self.assertEqual(d["live"]["streams"][0]["recording"], True)
         self.assertEqual(len(d["live"]["streams"]), 1)
         self.assertEqual(d["ready"], {"anthropic_key": True, "fish_key": False, "youtube_connected": True,
-                                      "tools_ok": True, "sources": 2})
+                                      "instagram_connected": False, "tools_ok": True, "sources": 2})
         self.assertEqual(d["automation"]["next_scan_at"], 1900000000.0)
         self.assertEqual([a["key"] for a in d["alerts"]], ["disk.low"])
         self.assertEqual(len(d["recent_jobs"]), 5)

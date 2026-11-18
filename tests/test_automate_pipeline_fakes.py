@@ -20,6 +20,18 @@ from automate.runtime import ProcResult
 KEY = "sk-ant-test-0123456789abcdef"
 
 
+# what clipper's render writes about the clip's caption/hook placement and its added sound (placement.summary and
+# render.sound_summary, shortened)
+PLACEMENT = {"layout": "split", "captions": {"position": "high", "size": "small", "look": "boxed-word"},
+             "hook": {"size": "small", "seconds": 3.0},
+             "text_de": "Untertitel: oben im Spielbild, klein – ruhigster Bereich · Look: Bebas auf Schwarz, ein Wort "
+                        "· Hook: auf der Naht, klein, 3 s, dann ausblenden – Reaktion: das Gesicht ist der Hook"}
+SOUND = {"level": "normal", "auto": True, "beats": [{"t": 9.5, "why": "jump", "roles": ["riser", "impact"]}],
+         "layers": [{"id": "noise-riser", "role": "riser", "start": 7.5, "end": 9.5, "gain_db": -1.0},
+                    {"id": "cinematic-impact", "role": "impact", "start": 9.5, "end": 11.7, "gain_db": 2.0}],
+         "text_de": "Sound: normal – Riser + Impact bei 9,5 s (Lautstärkesprung +14 dB)"}
+
+
 def make_pick(n, start=10.0):
     s = start + 40 * n
     return {"start": s, "end": s + 20, "clip_type": "reaction", "hook_style": "box", "caption_style": "boxed",
@@ -153,7 +165,8 @@ class FakeClipper:
                             "hashtags": pick.get("hashtags") or [], "duration": 20.0, "predicted": 1.3 - i / 10,
                             "source": "https://www.youtube.com/watch?v=x&t=10s",
                             "sources": ["https://www.youtube.com/watch?v=x&t=10s"],
-                            **({"lang": lang} if lang else {}), **({"footage": footage} if footage else {})})
+                            **({"lang": lang} if lang else {}), **({"footage": footage} if footage else {}),
+                            **({} if lang else {"placement": dict(PLACEMENT), "sound": dict(SOUND)})})
         (folder / "upload.json").write_text(json.dumps(entries))
         return entries
 
@@ -171,6 +184,7 @@ class FakeClipper:
                 n = max([int(p.name.split()[1]) for p in out.glob("video *")], default=0) + 1
                 folder = out / f"video {n}"
                 folder.mkdir()
+            emit(f"[render] video {n}: {PLACEMENT['text_de']}")
             emit(f"[render] video {n} (1 of 1): separating voices + diarizing ...")
             for h in pick["hooks"]:
                 emit(f"[render]   video {n}/{h}.mp4")
@@ -249,6 +263,10 @@ class FakeClipper:
                     report.setdefault(f"video {n}", {})["footage"] = hits
                     fails = True
             return {"report": report, "fails": fails}
+        if op == "music_library":
+            return {"tracks": [{"id": "boom", "kind": "hit", "role": "impact", "usable": True},
+                               {"id": "my-riser", "kind": "hit", "role": "riser", "usable": True},
+                               {"id": "quirky", "kind": "music", "mood": "funny", "usable": True}]}
         if op == "verify_videos":
             bad = (self.bad_videos.pop(0) if self.bad_videos else None) or []
             return {"videos": [{"file": f, "ok": Path(f).name not in bad, "width": 1080, "height": 1920,
@@ -465,7 +483,10 @@ class PipelineCase(unittest.TestCase):
                         mock.patch.dict(health._sys_cache, {"at": 0.0, "data": None}),
                         mock.patch.dict(scheduler._hold, {"until": 0.0}),
                         mock.patch.object(scheduler, "recorders", lambda: []),  # never this machine's processes
-                        mock.patch.object(health, "_old_schedules", lambda: [])):
+                        mock.patch.object(health, "_old_schedules", lambda: []),
+                        # plenty of free disk whatever this machine has (a test of the wait patches disk_low itself)
+                        mock.patch("shutil.disk_usage", return_value=mock.Mock(total=1000e9, used=500e9,
+                                                                                free=500e9))):
             patcher.start()
             self.addCleanup(patcher.stop)
         from automate import pipeline

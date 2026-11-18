@@ -7,8 +7,8 @@ messages, lazy access to the modules other agents own, and the "something change
     Form(body)                    reads a JSON object field by field; .check() raises a 422 with every bad field
     optional(name) -> module|None automate.<name> or None when it can't be imported (pipeline, health, ...)
     need(name) -> module          automate.<name> or ApiError 503 (German) when it can't be imported
-    mapped()                      context manager: PipelineError / PickCheckFailed / YouTubeError / BridgeError /
-                                  agent errors -> ApiError (German message, fitting status)
+    mapped()                      context manager: PipelineError / PickCheckFailed / YouTubeError / InstagramError /
+                                  BridgeError / agent errors -> ApiError (German message, fitting status)
     changed(keys, overlay=True)   runtime.materialize() + pipeline.on_settings_changed(keys) (best effort)
     page(limit, offset)           validated pagination
 """
@@ -23,6 +23,12 @@ from .. import runtime
 log = logging.getLogger("automate.api")
 
 MAX_LIMIT = 200
+# InstagramError.code -> HTTP status (anything else: 502, Meta's side)
+IG_ERROR_STATUS = {"not_found": 404, "not_connected": 409, "instagram_app_missing": 409, "invalid": 422,
+                   "instagram_token_format": 422, "instagram_token_invalid": 422, "instagram_not_professional": 422,
+                   "instagram_no_account": 422, "instagram_permission": 422, "instagram_wrong_account": 422,
+                   "instagram_disconnected": 409, "instagram_token_missing": 409, "session_expired": 401,
+                   "instagram_rate_limit": 429, "instagram_publish_limit": 429}
 
 
 class ApiError(Exception):
@@ -220,6 +226,9 @@ def map_exception(e):
         code = getattr(e, "code", "youtube_error")
         status = {"not_found": 404, "not_connected": 409, "youtube_app_missing": 409, "invalid": 422}.get(code, 502)
         return ApiError(status, code, msg)
+    if "InstagramError" in names:
+        code = getattr(e, "code", None) or "instagram_error"
+        return ApiError(IG_ERROR_STATUS.get(code, 502), code, msg)
     if "BridgeError" in names:
         if getattr(e, "timed_out", False):
             return ApiError(504, "timeout", "Der Hilfsprozess hat zu lange gebraucht. Bitte erneut versuchen.")

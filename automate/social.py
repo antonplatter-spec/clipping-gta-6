@@ -9,6 +9,7 @@ module and those two: `public(account)` is the only shape the API returns.
     public(account) -> dict                     {id, platform, label, handle, profile, connected, external_id, notes,
                                                  can_upload, connection}   connection: non-secret token facts | None
     youtube_connected() -> bool                 any YouTube account with tokens
+    instagram_connected() -> bool               any Instagram account with a stored token
     youtube_app(redirect_uri) -> {client_id_set, client_secret_set, client_id_hint, redirect_uri, redirect_note}
     new_state(session_hash, *, account_id, return_origin, redirect_uri, platform="youtube") -> state
                                                 (random, single-use, STATE_TTL_S, bound to the session and platform)
@@ -80,6 +81,10 @@ def public(account):
 
 def youtube_connected():
     return any(a["connected"] and a.get("has_credentials") for a in store.list_accounts("youtube"))
+
+
+def instagram_connected():
+    return any(a["connected"] and a.get("has_credentials") for a in store.list_accounts("instagram"))
 
 
 def redirect_note(redirect_uri):

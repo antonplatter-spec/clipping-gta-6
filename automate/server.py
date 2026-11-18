@@ -16,7 +16,7 @@ Security, enforced in one pure ASGI middleware so it covers the API, the static 
     and Meta.
   - CSRF: POST/PUT/PATCH/DELETE under /api need `X-Requested-With: automate` (a cross-origin page can't set it
     without a CORS preflight, which this server never allows) -> else 403.
-  - Request bodies above MAX_BODY -> 413.
+  - Request bodies above MAX_BODY -> 413 (BIG_BODIES: the sound upload route may send up to its own limit).
   - Headers on every response: a CSP that fits the no-CDN dashboard (scripts/styles/fonts from 'self', images also
     data:/blob: for the QR code, no framing), X-Content-Type-Options, Referrer-Policy, X-Frame-Options,
     Cross-Origin-Opener/Resource-Policy, Permissions-Policy; `Cache-Control: no-store` on API responses unless the
@@ -51,6 +51,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__, db, settings
 from .api import build_router
 from .api.common import ApiError, map_exception
+from .api.config import MAX_SOUND_BYTES
 from .instagram import CALLBACK_PATH as INSTAGRAM_CALLBACK
 from .youtube import CALLBACK_PATH
 
@@ -58,6 +59,7 @@ log = logging.getLogger("automate.server")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 MAX_BODY = 4 * 1024 * 1024  # research.override may hold a long playbook
+BIG_BODIES = {("POST", "/api/assets/music"): MAX_SOUND_BYTES}  # routes that take a file as their body
 MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 SHUTDOWN_JOIN_S = 20
@@ -70,6 +72,14 @@ STATUS_MESSAGES = {400: "Die Anfrage war ungültig.", 401: "Bitte melde dich an.
                    404: "Nicht gefunden.", 405: "Diese Methode ist hier nicht erlaubt.",
                    413: f"Die Daten sind zu groß (höchstens {MAX_BODY // (1024 * 1024)} MB).",
                    429: "Zu viele Anfragen. Bitte warte kurz."}
+
+
+def body_limit(method, path):
+    return BIG_BODIES.get((method, path), MAX_BODY)
+
+
+def too_large(limit):
+    return f"Die Daten sind zu groß (höchstens {limit // (1024 * 1024)} MB)."
 
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("text/javascript", ".js")
@@ -233,9 +243,9 @@ class SecurityMiddleware:
             if method in MUTATING and headers.get("x-requested-with") != "automate":
                 return await self._reject(send, 403, "csrf", "Anfrage ohne Dashboard-Kennung (X-Requested-With) "
                                                              "abgelehnt.")
-        length = headers.get("content-length", "")
-        if length.isdigit() and int(length) > MAX_BODY:  # chunked bodies: RequestBodyLimitMiddleware -> http_error
-            return await self._reject(send, 413, "too_large", STATUS_MESSAGES[413])
+        length, limit = headers.get("content-length", ""), body_limit(method, path)
+        if length.isdigit() and int(length) > limit:  # chunked bodies: BodyLimitMiddleware -> http_error
+            return await self._reject(send, 413, "too_large", too_large(limit))
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
@@ -254,6 +264,19 @@ class SecurityMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+
+
+class BodyLimitMiddleware:
+    """Starlette's RequestBodyLimitMiddleware (it also counts chunked bodies) with the limit of the route."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        limit = body_limit(scope.get("method", "GET"), scope.get("path", ""))
+        await RequestBodyLimitMiddleware(self.app, max_body_size=limit)(scope, receive, send)
 
 
 # ---------------------------------------------------------------- errors
@@ -285,8 +308,10 @@ def _install_handlers(app):
     app.add_exception_handler(RequestValidationError, _validation_error)
 
     @app.exception_handler(StarletteHTTPException)
-    def http_error(request, exc):  # incl. RequestBodyLimitMiddleware's 413 for a chunked body over MAX_BODY
+    def http_error(request, exc):  # incl. RequestBodyLimitMiddleware's 413 for a chunked body over the limit
         msg = STATUS_MESSAGES.get(exc.status_code, f"Fehler {exc.status_code}.")
+        if exc.status_code == 413:
+            msg = too_large(body_limit(request.method, request.url.path))
         code = {404: "not_found", 413: "too_large"}.get(exc.status_code, f"http_{exc.status_code}")
         return _error(exc.status_code, code, msg, headers=getattr(exc, "headers", None))
 
@@ -380,7 +405,7 @@ def create_app(*, background=True, config=None):
     app.include_router(build_router())
     # the dashboard: only regular files inside automate/web (Starlette resolves symlinks and refuses escapes)
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
-    app.add_middleware(RequestBodyLimitMiddleware, max_body_size=MAX_BODY)
+    app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(SecurityMiddleware, config=config)
     return app
 

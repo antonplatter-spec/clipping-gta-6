@@ -34,3 +34,23 @@ export function loadProfiles(force = false) {
   return profilesCache.promise;
 }
 export function invalidateProfiles() { profilesCache = { at: 0, promise: null }; }
+
+/** The music library (sounds by role for the effects editor); cached for a minute, dropped after an upload/delete. */
+let soundsCache = { at: 0, promise: null };
+export function loadSounds(force = false) {
+  if (force || !soundsCache.promise || Date.now() - soundsCache.at > 60000) {
+    soundsCache = { at: Date.now(), promise: api.getAssets().then((d) => d.music || []).catch((e) => { soundsCache.at = 0; throw e; }) };
+  }
+  return soundsCache.promise;
+}
+export function invalidateSounds() { soundsCache = { at: 0, promise: null }; }
+
+/** The caption, hook and sound defaults from Einstellungen (watchlist.yaml + overrides), for "Standard (…)" labels. */
+let styleCache = { at: 0, promise: null };
+export function loadStyleDefaults(force = false) {
+  if (force || !styleCache.promise || Date.now() - styleCache.at > 60000) {
+    styleCache = { at: Date.now(), promise: api.getWatchlist().then((d) => d.effective || {}).catch((e) => { styleCache.at = 0; throw e; }) };
+  }
+  return styleCache.promise;
+}
+export function invalidateStyleDefaults() { styleCache = { at: 0, promise: null }; }

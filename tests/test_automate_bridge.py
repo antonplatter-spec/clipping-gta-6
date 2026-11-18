@@ -249,6 +249,64 @@ class OpTests(unittest.TestCase):
                 bridge.set_music({"id": "nope", "approved": True}, self.cfg)
         self.assertIn("own", (folder / "local" / "library.yaml").read_text())
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs ffmpeg")
+    def test_own_sounds_are_checked_filed_under_a_new_id_and_removed(self):
+        folder = self.root / "music"
+        folder.mkdir()
+        shutil.copy(music.MUSIC / "library.yaml", folder / "library.yaml")
+        shutil.copy(music.MUSIC / "boom.wav", folder / "boom.wav")
+        env = mock.patch.dict(os.environ, {"AUTOMATE_DATA_DIR": str(self.root / "data")})
+        env.start()
+        self.addCleanup(env.stop)
+        inbox = paths.tmp_dir() / "uploads"
+        inbox.mkdir(parents=True)
+        wav = inbox / "u1.upload"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=1.2",
+                        "-f", "wav", str(wav)], check=True)
+        text = inbox / "u2.upload"
+        text.write_text("just text")
+        add = functools.partial(bridge.add_sound, cfg=self.cfg)
+        with mock.patch.object(music, "MUSIC", folder):
+            out = add({"path": str(wav), "name": "../../My Boom!.wav", "kind": "hit", "role": "riser",
+                       "claimable": False, "approved": True})["track"]
+            self.assertEqual((out["id"], out["role"], out["source"], out["usable"], out["length"]),
+                             ("my-boom", "riser", "own", True, 1.2))
+            new_id = lambda name, role: add({"path": str(wav), "name": name, "kind": "hit", "role": role})["track"]["id"]
+            self.assertEqual(new_id("boom.wav", "impact"), "boom-2")  # never an existing id
+            self.assertEqual(new_id("riser.wav", "riser"), "riser-2")  # never a role name
+            entry = next(t for t in music.load_library() if t["id"] == "my-boom")
+            self.assertEqual((entry["kind"], entry["role"], entry["approved"], entry["local"]),
+                             ("hit", "riser", True, True))
+            self.assertIsNotNone(entry.get("peak_lufs"))
+            self.assertEqual(music.choose(music.load_library(), self.cfg, "hit", want="my-boom")["id"], "my-boom")
+            for payload, want in (({"path": str(text), "name": "a.wav"}, "keine lesbare Audiodatei"),
+                                  ({"path": str(wav), "name": "a.mp3"}, "keine echte MP3-Datei"),
+                                  ({"path": str(wav), "name": "a.wav", "kind": "music", "mood": "epic"},
+                                   "zwischen 3 und 600 Sekunden"),
+                                  ({"path": str(wav), "name": "a.exe"}, "Nur WAV"),
+                                  ({"path": str(wav), "name": "a.wav", "role": "bang"}, "Rolle")):
+                with self.subTest(want=want):
+                    self.assertIn(want, add({"kind": "hit", "role": "impact", **payload})["problem"])
+            for outside in (self.root / "elsewhere.wav", folder / "boom.wav"):
+                shutil.copy(wav, outside) if not outside.exists() else None
+                with self.assertRaises(ValueError):  # only uploads the API streamed into data/tmp/uploads
+                    add({"path": str(outside), "name": "x.wav", "kind": "hit", "role": "impact"})
+            link = inbox / "link.upload"
+            link.symlink_to(folder / "boom.wav")
+            with self.assertRaises(ValueError):
+                add({"path": str(link), "name": "x.wav", "kind": "hit", "role": "impact"})
+            self.assertEqual(sorted(p.name for p in (folder / "local").glob("*.wav")),
+                             ["boom-2.wav", "my-boom.wav", "riser-2.wav"])
+            self.assertIn("nur sperren", bridge.remove_sound({"id": "boom"}, self.cfg)["problem"])
+            self.assertEqual(bridge.remove_sound({"id": "my-boom"}, self.cfg), {"removed": "my-boom"})
+            self.assertFalse((folder / "local" / "my-boom.wav").exists())
+            self.assertNotIn("my-boom", {t["id"] for t in music.load_library()})
+            self.assertTrue((folder / "boom.wav").exists())
+            self.assertIn("gibt es nicht", bridge.remove_sound({"id": "my-boom"}, self.cfg)["problem"])
+            infos = {t["id"]: t for t in bridge.music_library({}, self.cfg)["tracks"]}
+            self.assertEqual((infos["boom"]["source"], infos["boom"]["tags"], infos["noise-riser"]["role"]),
+                             ("built-in", ["boom"], "riser"))
+
     def test_refs(self):
         self.assertEqual(bridge.resolve_stream({"ref": "kick:xqc"}, self.cfg),
                          {"url": "https://kick.com/xqc", "name": "xqc-kick"})

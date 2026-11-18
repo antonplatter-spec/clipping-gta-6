@@ -8,7 +8,7 @@ import re
 
 from fastapi import APIRouter, Body
 
-from .. import runtime, store
+from .. import runtime, store, style
 from .common import ApiError, Form, changed, conflict, invalid, mapped, not_found
 from .dashboard import live_status, with_live
 
@@ -106,7 +106,7 @@ def check_overrides(body, base):
         overrides = {}
     if not isinstance(overrides, dict):
         raise invalid({"overrides": "Muss eine Zuordnung Schlüssel → Wert sein."})
-    errors = _type_errors(overrides, base)
+    errors = {**_type_errors(overrides, base), **style.config_errors(overrides)}
     if errors:
         raise invalid(errors)
     return overrides

@@ -265,12 +265,14 @@ def sound_summary(pick, level, level_src, beats, layers):
     """What the render result and upload.json say about the clip's added sound."""
     placed = [{"id": str(t.get("id") or t.get("file")), "role": music.role(t) or k, "start": s,
                "end": round(s + l, 3), "gain_db": t.get("gain_db", 0.0)} for t, s, l, k in layers]
-    if pick.get("music") == []:
+    explicit = pick.get("fx") is not None
+    hits = sum(1 for f in pick.get("fx") or [] if isinstance(f, dict) and f.get("type") == "hit")
+    if explicit and hits:  # a pick's own hits play even with "music": [] (that only drops music and the auto sound)
+        text = f"Sound: wie im Clip festgelegt ({hits} Sound-Effekt{'e' if hits != 1 else ''})"
+    elif pick.get("music") == []:
         text = "Sound: kein zusätzlicher Ton (im Clip so festgelegt)"
-    elif pick.get("fx") == []:
-        text = "Sound: keine Effekte (im Clip so festgelegt)"
-    elif pick.get("fx") is not None:
-        text = f"Sound: wie im Clip festgelegt ({sum(1 for f in pick['fx'] if f.get('type') == 'hit')} Effekte)"
+    elif explicit:
+        text = "Sound: keine Sound-Effekte (im Clip so festgelegt)"
     else:
         text = sound.describe(level, beats)
     return {"level": level, "level_source": level_src,

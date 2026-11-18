@@ -8,7 +8,8 @@ service cached, and the health checks that raise and resolve dashboard alerts.
         asr_model (Parakeet only): whether the speech model is already in the Hugging Face cache; if not, the first
         analysis downloads it (~650 MB)
         tools come from clipper.setup.missing()/run(dry_run) through the bridge op `system_tools` (cached 10 min)
-    readiness() -> {anthropic_key, fish_key, youtube_connected, tools_ok, sources (number), automation}
+    readiness() -> {anthropic_key, fish_key, youtube_connected, instagram_connected, tools_ok, sources (number),
+                    automation}
     live_status() -> {streams: [{id, name, url, profile, platform, live, on_topic, recording, title, checked_at}],
                       recorders, checked_at}     (None fields = never checked; nothing here calls yt-dlp)
     check_all(now=None) -> [{key, action: "raised" | "resolved", level, message}]   (also recorded as a `health` run)
@@ -187,6 +188,7 @@ def readiness():
     return {"anthropic_key": bool(store.get_secret("anthropic_api_key")),
             "fish_key": bool(store.get_secret("fish_api_key")),
             "youtube_connected": any(a.get("connected") for a in store.list_accounts("youtube")),
+            "instagram_connected": any(a.get("connected") for a in store.list_accounts("instagram")),
             "tools_ok": all(t["ok"] for t in rep["tools"] if t.get("required")),
             "sources": sources, "automation": bool(store.get_setting("automation.enabled"))}
 

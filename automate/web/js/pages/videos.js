@@ -123,6 +123,7 @@ function VideoCard({ video, accounts, focus, onChanged, onArchived }) {
         <${Button} size="sm" variant="ghost" icon=${video.archived ? 'archive-restore' : 'archive'} busy=${busy} onClick=${archive}>${video.archived ? 'Wiederherstellen' : 'Archivieren'}<//>
       </div>
     </header>
+    <${Made} made=${video.made} />
     ${variants.length ? html`<div class="variants" role="list" aria-label="Hook-Varianten">
       ${variants.map((x) => html`<${VariantCard} key=${x.id} v=${x} accounts=${accounts} onPost=${() => setModal({ kind: 'post', v: x })}
         onUpload=${() => setModal({ kind: 'upload', v: x })} onChanged=${onChanged} />`)}
@@ -131,6 +132,18 @@ function VideoCard({ video, accounts, focus, onChanged, onArchived }) {
     ${modal && modal.kind === 'upload' && html`<${UploadModal} v=${modal.v} accounts=${accounts} onClose=${() => setModal(null)} onDone=${onChanged} />`}
     ${modal && modal.kind === 'dub' && html`<${DubModal} video=${video} onClose=${() => setModal(null)} />`}
   </article>`;
+}
+
+/** What the render decided for this video: caption and hook placement, added sound (clipper's own sentences). */
+function Made({ made }) {
+  if (!made || (!made.placement && !made.sound)) return null;
+  const place = (made.placement || '').split(' · ').filter(Boolean);
+  return html`<div class="made" aria-label="So wurde das Video gemacht">
+    ${place.map((t) => html`<div class="made-line"><${Icon} name=${t.startsWith('Hook') ? 'sparkles' : 'type'} size=${14} /><span>${t}</span></div>`)}
+    ${made.sound && html`<div class="made-line"><${Icon} name="music" size=${14} /><span>${made.sound}${(made.sound_layers || []).length
+      ? html` <span class="muted">(${made.sound_layers.map((l) => (l.role === 'riser' ? `${l.id} baut bis ${fmt.num1(l.end)} s auf`
+        : `${l.id} bei ${fmt.num1(l.start)} s`)).join(', ')})</span>` : ''}</span></div>`}
+  </div>`;
 }
 
 function VariantCard({ v, accounts, onPost, onUpload, onChanged }) {

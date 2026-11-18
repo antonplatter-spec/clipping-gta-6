@@ -358,12 +358,15 @@ wenn `nvidia-smi` vorhanden ist, sonst die CPU (langsamer, funktioniert aber). F
 
 - **Übersicht** – Status, *Bereit zum Start*-Liste, Alarme, die nächste Suche. **Jetzt nach neuen Videos suchen**
   startet eine Suche sofort; unter *Video-URL direkt clippen* gibst du ein einzelnes Video ein (**Clippen**).
-- **Freigabe** – Claudes Vorschläge: Hooks und Titel ansehen und ändern, dann **Freigeben → Render** oder
-  **Ablehnen**. Wenn alles ohne dich gerendert werden soll: *Einstellungen → Freigabe → Automatisch*. Dieselben
+- **Freigabe** – Claudes Vorschläge: Hooks und Titel ansehen und ändern, in der **Vorschau** sehen, wo Untertitel und
+  Hook im fertigen Video sitzen, Untertitel, Hook, Effekte und Musik anpassen (siehe
+  [Untertitel, Hook und Sound](#untertitel-hook-und-sound)), dann **Freigeben → Render** oder **Ablehnen**. Wenn alles ohne dich gerendert werden soll: *Einstellungen → Freigabe → Automatisch*. Dieselben
   Szenen werden nie zweimal gerendert: Nutzt ein Clip Szenen, die schon ein anderer (fertiger, freigegebener oder
   älterer offener) Clip nutzt, lässt er sich nicht freigeben, bis du einen der beiden ablehnst oder Start/Ende änderst.
   Stellt sich das erst beim Rendern heraus, kommt der Clip mit Begründung in die Freigabe zurück (und ein Alarm sagt es).
-- **Videos** – die fertigen Shorts, je Hook eine Variante. **Titel kopieren**, MP4 herunterladen,
+- **Videos** – die fertigen Shorts, je Hook eine Variante. Über den Varianten steht, wo der Render die Untertitel und
+  den Hook hingelegt hat und welcher Sound dazukam (z. B. *Untertitel: oben im Spielbild, klein – ruhigster Bereich*).
+  **Titel kopieren**, MP4 herunterladen,
   **Als gepostet markieren** oder **Hochladen** (auf ein verbundenes YouTube- oder Instagram-Konto). Ist die Variante
   auf dem gewählten Konto schon online, fragt das Dashboard vor einem zweiten Upload nach; das Abzeichen beim Video
   verlinkt das YouTube-Video bzw. den Reel.
@@ -371,6 +374,69 @@ wenn `nvidia-smi` vorhanden ist, sonst die CPU (langsamer, funktioniert aber). F
 - **Kosten & Schlüssel** – Claude-Kosten pro Tag in Euro, **Tageslimit** und **Höchstens pro Auswahl**,
   API-Schlüssel.
 - **Quellen**, **Einstellungen**, **Konten**, **System** – alles Weitere.
+
+### Untertitel, Hook und Sound
+
+Früher lagen die Untertitel groß mitten im Spielbild und der Hook stand den ganzen Clip über Gesicht und Spiel. Jetzt
+entscheidet der Render **pro Clip** anhand einiger Bilder aus dem Clip:
+
+- **Untertitel** kommen dorthin, wo sie am wenigsten vom Spiel verdecken – nie über das Gesicht des Streamers, die
+  Buttons und Leisten von YouTube, Instagram und TikTok oder den Bildrand –, und sind dort klein, wo sie auf dem Spiel
+  liegen. Der **Look** wechselt von Clip zu Clip (Schrift, Farbe des gerade gesprochenen Worts, Wörter pro Einblendung),
+  derselbe Clip bekommt aber immer denselben.
+- Der **Hook** ist bei Facecam-Clips klein und blendet nach ein paar Sekunden aus (Reaktion 3 s, Gameplay 4 s, Comedy
+  und Szenario 5 s); bei News und Showcase und bei Vollbild-Clips bleibt er stehen.
+- **Epische Momente bekommen Sound:** Hat ein Clip keine eigenen Effekte, findet der Render seine Höhepunkte (die Pointe
+  eines Story-Cuts, den lautesten Sprung, einen geschrienen Satz) und setzt dort einen **Riser** (baut auf und endet
+  genau auf dem Moment) und einen **Impact** (Einschlag), vor einem stillen Aufbau ein leises Spannungs-Bett –
+  sparsam, nie über Sprache gelegt, die Lautstärke des Videos bleibt wie immer.
+
+Claude kennt das alles auch: Es sieht sich bei Facecam-Clips eine Vorschau an und legt Position, Größe, Hook-Zeit und
+Effekte nur fest, wenn es einen Grund sieht; seine Begründung steht in der Freigabe.
+
+**Voreinstellungen ändern: *Einstellungen → Untertitel & Sound*.** Jede Auswahl erklärt in einem Satz, was sie tut:
+
+- *Untertitel:* **Position** (Automatisch · Oben · Naht · Unten · Klassisch), **Größe** (Automatisch · Klein · Mittel ·
+  Groß), **Look** (Automatisch · Klassisch · ein fester Look), **Looks, aus denen „Automatisch“ wählt** (Häkchen pro
+  Look), **Untertitel-Stil, wenn keiner gewählt ist** und **Schimpfwörter in Untertiteln maskieren**.
+- *Hook-Banner:* **Größe**, **Anzeigedauer** (Automatisch · Ganzer Clip · Feste Sekunden) und **Anteil ohne Hook
+  (A/B-Test)**.
+- *Sound auf epischen Momenten:* **Sound-Stärke** (Aus · Dezent · Normal · Stark).
+
+Danach **Speichern**; das gilt für alle Clips, die ab dann gerendert werden. **Den alten Look zurückholen:** In der
+Karte *Alter oder neuer Look* auf **Alten Look wiederherstellen** klicken und **Speichern** – dann sitzen Untertitel
+wieder groß an der alten Stelle, der Hook bleibt den ganzen Clip, und es kommt kein automatischer Sound dazu.
+**Alles wieder automatisch** stellt die neuen Standards wieder her.
+
+**Pro Clip in der Freigabe:** Links zeigt die **Vorschau** ein Standbild des fertigen Videos – das echte Spielbild mit
+Hook und dem Untertitel, der in diesem Moment läuft. Mit dem Regler **Zeitpunkt im Clip** oder den Knöpfen darunter
+(**Erster Untertitel**, *Hook blendet aus*, die Zeiten der Effekte) schaust du dir andere Momente an; bei mehreren
+Hooks wählst du unter **Hook**, welcher gezeigt wird. Ein Klick vergrößert das Bild. Ist das Quellvideo schon gelöscht,
+steht dort ein Hinweis statt des Bilds.
+
+- Unter **Untertitel, Hook & Sound** stellst du für diesen Clip Position, Größe, Look, Hook-Größe, Hook-Anzeigedauer
+  und Sound-Stärke ein. **Standard (…)** heißt: wie in den Einstellungen (in Klammern steht, was das gerade ist).
+- Unter **Effekte & Musik** gibt es je drei Möglichkeiten: **Automatisch** (der Render entscheidet selbst), **Keine**
+  (bewusst nichts) und **Eigene** (nur, was du in die Liste schreibst). Zeiten sind Sekunden im fertigen Clip.
+  **Epischer Moment bei …** legt einen Riser und einen Impact auf den Zeitpunkt, den die Vorschau gerade zeigt;
+  **Sound**, **Blitz** und **Zoom** fügen einzelne Effekte hinzu. Bei einem Sound wählst du eine Rolle (**Impact**,
+  **Riser**, **Whoosh**, **Spannung**) oder einen bestimmten Sound, auch einen eigenen. **Keine** bei der Musik heißt:
+  keine Musik und – solange die Effekte automatisch sind – auch kein automatischer Sound.
+- **Speichern** prüft den Clip neu (wie bisher); erst danach zeigt die Vorschau die Änderung.
+
+### Eigene Sounds
+
+Unter ***Einstellungen → Assets*** stehen alle Sounds und Musikstücke mit Rolle bzw. Stimmung, Länge, Herkunft
+(*mitgeliefert* oder *eigener*) und dem Hinweis **Content-ID-gefährdet**; jeden kannst du direkt anhören und mit dem
+Schalter freigeben oder sperren. Nur freigegebene spielen im Render.
+
+**Eigenen Sound hochladen:** In der Karte *Eigenen Sound hochladen* eine Datei wählen (WAV, MP3, M4A oder OGG,
+höchstens 25 MB), **Sound-Effekt** oder **Musik** wählen, dazu die **Rolle** (Impact, Riser, Whoosh, Spannung) bzw. die
+**Stimmung**, bei Bedarf **Content-ID-gefährdet** und **Gleich freigeben** einschalten, dann **Hochladen**. Der Server
+prüft, dass die Datei wirklich Ton in diesem Format ist und eine passende Länge hat (Effekte 0,1–30 s, Musik 3 s bis
+10 Minuten), und legt sie unter einem eigenen Namen in `assets/music/local/` ab. Danach kann Claude den Sound über seine
+Rolle wählen, und in der Freigabe steht er unter *Bestimmter Sound*. Eigene Sounds lassen sich mit dem Papierkorb
+wieder löschen; mitgelieferte nur sperren.
 
 ---
 
@@ -638,7 +704,7 @@ Was wo liegt (alles im Clipper-Ordner):
 | `data/automate.db` | Die Datenbank: dein Login, Quellen, Einstellungen, Jobs, Picks, die Liste der Videos, Kosten – **und alle Schlüssel** |
 | `exports/` | Die fertigen Shorts mit Titeln und Beschreibungen |
 | `jobs/` | Arbeitsdateien: Transkripte und Picks bleiben, große Quellvideos werden automatisch gelöscht |
-| `assets/music/local/` | Musik, die du im Dashboard freigegeben hast |
+| `assets/music/local/` | Deine hochgeladenen Sounds und Musik sowie deine Freigaben für Musik und Sounds |
 | `logs/` | Protokolle |
 
 **Ehrlich zu den Schlüsseln:** Der Anthropic-Schlüssel, der Fish-Audio-Schlüssel, Client-ID und Client-Secret von
@@ -688,8 +754,8 @@ als `data/automate.db` hineinlegen, Server wieder starten (`./start.sh` bzw. `�
   ```
 
   Zum Bestätigen `RESET` eintippen. Das löscht dein Konto (Passwort, 2FA, Wiederherstellungscodes, Sitzungen);
-  Quellen, Videos und Einstellungen bleiben, ebenso die API-Schlüssel und YouTube-/Instagram-Verbindungen (willst du die auch
-  löschen, hänge `--wipe-keys` an). Der Befehl zeigt danach einen neuen **Einrichtungs-Code** und den Link
+  Quellen, Videos und Einstellungen bleiben, ebenso die API-Schlüssel, die Meta-/Instagram-App-IDs und die
+  YouTube-/Instagram-Verbindungen (willst du die auch löschen, hänge `--wipe-keys` an). Der Befehl zeigt danach einen neuen **Einrichtungs-Code** und den Link
   *Einrichtung:* – öffne ihn und lege das Konto im Assistenten neu an. Der Server muss dafür nicht neu starten. Der
   Zugriff auf das Terminal dieses PCs ist hier der Beweis, dass du der Besitzer bist.
 
@@ -823,7 +889,7 @@ Alle im Clipper-Ordner (`cd ~/clipping-gta-6`):
 | `./start.sh --no-browser` | ohne den Browser zu öffnen |
 | `./start.sh --stimmen` / `--ohne-stimmen` | Stimmen-Trennung (Demucs) installieren / entfernen |
 | `uv run python -m automate doctor` | Systemcheck im Terminal |
-| `uv run python -m automate reset-login` | Login zurücksetzen (Passwort/2FA vergessen); zeigt einen neuen Einrichtungs-Code. Mit `--wipe-keys` auch alle API-Schlüssel löschen und YouTube/Instagram trennen |
+| `uv run python -m automate reset-login` | Login zurücksetzen (Passwort/2FA vergessen); zeigt einen neuen Einrichtungs-Code. Mit `--wipe-keys` auch alle API-Schlüssel und App-IDs löschen und YouTube/Instagram trennen |
 | `uv run python -m automate import-yaml` | Creator, Streams und Einstellungen aus den Repo-Dateien erneut übernehmen (fügt nur Fehlendes hinzu) |
 | `uv run python -m automate.autostart install` / `status` / `restart` / `remove` | Autostart |
 | `uv run python -m clipper schedule remove` | alte `clipper schedule`-Zeitpläne entfernen |
