@@ -1,6 +1,6 @@
 """Fakes for the orchestrator tests (no tests in here): a stand-in for runtime.run_clipper / run_bridge that plays
-each clipper command on the temp jobs/exports dirs, fake automate.agent and automate.youtube modules, and the
-temp-data-dir base class. Imported by tests/test_automate_{pipeline,scheduler,health}.py."""
+each clipper command on the temp jobs/exports dirs, fake automate.agent, automate.youtube and automate.instagram
+modules, and the temp-data-dir base class. Imported by tests/test_automate_{pipeline,scheduler,health}.py."""
 import json
 import os
 import sys
@@ -377,6 +377,66 @@ def make_youtube():
     return mod
 
 
+def make_instagram():
+    """A stand-in for automate.instagram with the real one's resume contract: the container and the publish marker
+    go through on_state as they happen, and a container published once answers every later attempt with its media
+    (never a second Reel). `script` items: an exception raised before the publish request, or one with
+    `after_publish = True` raised after it went out (a power cut, a lost answer); a callable is called first."""
+    mod = types.ModuleType("automate.instagram")
+
+    class InstagramError(Exception):
+        def __init__(self, message, *, retryable=False, code="instagram_error", slow=False):
+            super().__init__(message)
+            self.retryable, self.code, self.slow = retryable, code, slow
+
+    mod.InstagramError = InstagramError
+    mod.STATE_KEYS = ("ig_container", "ig_container_at", "ig_uploaded", "ig_publish_at", "ig_media")
+    mod.CONTAINER_TTL_S = 23 * 3600
+    mod.calls, mod.states, mod.script, mod.problems, mod.published = [], [], [], [], {}
+
+    def result(mid):
+        return {"external_id": mid, "media_id": mid, "url": f"https://www.instagram.com/reel/{mid}/"}
+
+    def publish(variant_id, account_id, options, *, state=None, on_state=None, on_progress=None, cancel=None,
+                log=None):
+        st = dict(state or {})
+        mod.calls.append((variant_id, account_id, dict(options)))
+        mod.states.append(dict(st))
+
+        def save(**changes):
+            st.update(changes)
+            on_state(dict(changes))
+        if st.get("ig_publish_at") and st.get("ig_container") in mod.published:
+            return result(mod.published[st["ig_container"]])
+        if not st.get("ig_container"):
+            save(ig_container=f"C{len(mod.calls)}", ig_container_at=time.time(), ig_uploaded=False)
+        if on_progress:
+            on_progress(100, 100)
+        save(ig_uploaded=True)
+        if log:
+            log("Instagram verarbeitet das Video …")
+        item = mod.script.pop(0) if mod.script else None
+        if callable(item):
+            item = item()
+        if isinstance(item, BaseException) and not getattr(item, "after_publish", False):
+            raise item
+        if cancel is not None and cancel.is_set():
+            raise InstagramError("Upload abgebrochen.", code="canceled")
+        save(ig_publish_at=time.time())
+        mid = f"M{len(mod.published) + 1}"
+        mod.published[st["ig_container"]] = mid
+        if isinstance(item, BaseException):
+            raise item
+        return result(mid)
+
+    mod.publish = publish
+    mod.file_problems = lambda variant: list(mod.problems)
+    mod.caption = lambda variant, video=None: variant.get("title") or ""
+    mod.connection_info = lambda account: {"kind": "instagram"}
+    mod.maintain = lambda now=None: []
+    return mod
+
+
 class PipelineCase(unittest.TestCase):
     """Temp data/jobs/exports dirs, the gta6 profile, an Anthropic key, and every outside layer faked."""
 
@@ -395,11 +455,12 @@ class PipelineCase(unittest.TestCase):
         store.ensure_profile("gta-rp", False)
         store.set_secret("anthropic_api_key", KEY)
         self.clip = FakeClipper()
-        self.agent, self.yt = make_agent(), make_youtube()
+        self.agent, self.yt, self.ig = make_agent(), make_youtube(), make_instagram()
         for patcher in (mock.patch.object(runtime, "run_clipper", self.clip.run_clipper),
                         mock.patch.object(runtime, "run_bridge", self.clip.run_bridge),
                         mock.patch.object(worker, "reap_orphans", lambda module, args: []),
-                        mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt}),
+                        mock.patch.dict(sys.modules, {"automate.agent": self.agent, "automate.youtube": self.yt,
+                                                      "automate.instagram": self.ig}),
                         mock.patch.object(health, "_live", None),
                         mock.patch.dict(health._sys_cache, {"at": 0.0, "data": None}),
                         mock.patch.dict(scheduler._hold, {"until": 0.0}),

@@ -1,5 +1,5 @@
-"""Videos: rendered shorts with their hook variants, the MP4 preview/download, "als gepostet markieren", YouTube
-upload and dub jobs.
+"""Videos: rendered shorts with their hook variants, the MP4 preview/download, "als gepostet markieren", uploads
+(YouTube, Instagram: one route, dispatched on the account's platform through social.PUBLISHERS) and dub jobs.
 
 Variant files are served only when the DB knows them and they resolve (symlinks included) to a regular .mp4 file
 below paths.exports_dir().
@@ -18,7 +18,6 @@ VARIANT_KEYS = ("id", "video_id", "rank", "hook", "hook_type", "arm", "title", "
                 "duration", "posts")
 VIDEO_KEYS = ("id", "profile", "lang", "day", "number", "title", "description", "sources", "archived", "created_at",
               "job_id", "pick_id")
-PRIVACY = ("private", "unlisted", "public")
 
 
 def variant_out(v):
@@ -117,23 +116,45 @@ def delete_post(post_id: int):
     return {"ok": True}
 
 
+@router.get("/variants/{variant_id}/upload/preview")
+def upload_preview(variant_id: int):
+    """What each platform would post for this variant (YouTube: title + description; Instagram: the caption) and
+    why it would refuse the file (Instagram's Reels rules), so the dialog can say so before anything is queued."""
+    v = _variant(variant_id)
+    return {p.platform: {"label": p.label, **p.preview(v)} for p in social.PUBLISHERS.values()}
+
+
 @router.post("/variants/{variant_id}/upload")
 def upload(variant_id: int, body: dict | None = Body(None)):
     _variant(variant_id)
     form = Form(body)
     account_id = form.int("account_id", required=True)
-    privacy = form.choice("privacy", PRIVACY, required=True, labels=("Privat", "Nicht gelistet", "Öffentlich"))
     force = form.bool("force", default=False)
+    raw = form.body.get("options")
+    if raw is not None and not isinstance(raw, dict):
+        form.error("options", "Muss ein Objekt sein.")
     form.check()
     account = store.get_account(account_id)
     if account is None:
         raise invalid({"account_id": "Dieses Konto gibt es nicht."})
-    if account["platform"] != "youtube" or not account["connected"] or not account.get("has_credentials"):
-        raise conflict("not_connected", f"„{account['label']}“ ist nicht mit YouTube verbunden. Bitte unter Konten "
+    pub = social.publisher(account["platform"])
+    if pub is None:
+        raise conflict("not_supported", f"Auf {social.PLATFORMS.get(account['platform'], account['platform'])} kann "
+                                        "das Dashboard nicht direkt hochladen – lade die MP4 selbst hoch und markiere "
+                                        "sie als gepostet.")
+    raw = dict(raw or {})
+    if "privacy" in form.body:  # YouTube's field, as before the platforms were generalised
+        raw["privacy"] = form.body["privacy"]
+    try:
+        options = pub.options(raw)
+    except social.OptionsError as e:
+        raise invalid(e.fields, e.message) from None
+    if not pub.connected(account) or not account.get("has_credentials"):
+        raise conflict("not_connected", f"„{account['label']}“ ist nicht mit {pub.label} verbunden. Bitte unter Konten "
                                         f"verbinden.")
     pipeline = need("pipeline")
     with mapped():
-        job_id = pipeline.enqueue_upload(variant_id, account_id, privacy, force=bool(force))
+        job_id = pipeline.enqueue_upload(variant_id, account_id, options, force=bool(force))
     return {"job_id": job_id}
 
 

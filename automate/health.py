@@ -23,9 +23,13 @@ videos a second time), job.failed.<id> (raised by the pipeline, resolved here on
 scan.failed.<profile> (raised and resolved by the scan itself), pick.footage.<pick id> (the pipeline sent a pick back
 to approval because its footage is taken; resolved here once the pick is decided), prices.unknown.<model> (store:
 usage of a model without a price row; resolved here once the row exists), service.restarted (the scheduler's
-watchdog restarted a dead thread; resolved here a day later).
+watchdog restarted a dead thread; resolved here a day later), instagram.disconnected.<account id> /
+instagram.expiring.<account id> (raised and resolved by automate/instagram.py; check_all runs its token upkeep:
+a long-lived Instagram token is refreshed weekly, a Facebook-login token checked daily, a failure retried after
+6 hours at the earliest, never in a loop).
 """
 import copy
+import importlib
 import importlib.util
 import platform
 import shutil
@@ -302,6 +306,11 @@ def _live_checks(put, now):
         "Transkription installiert ist; Details stehen in jobs/_live/reanalyze.log.", {"chunks": failed})
 
 
+def _social_tokens(now):
+    """Instagram tokens: refreshed / checked when due; their alerts are raised and resolved by instagram.py."""
+    importlib.import_module("automate.instagram").maintain(now)
+
+
 def check_all(now=None):
     """Raise or resolve every alert this module owns; returns what changed (and records a `health` run)."""
     now = time.time() if now is None else now
@@ -376,6 +385,10 @@ def check_all(now=None):
             elif key == "service.restarted" and now - float((a.get("details") or {}).get("at") or 0) > 86400:
                 store.resolve_alert(key)
     except Exception as e:  # a broken check must not stop the others next time; it shows in the run
+        problems.append(repr(e)[:300])
+    try:
+        _social_tokens(now)
+    except Exception as e:
         problems.append(repr(e)[:300])
     active = store.list_alerts()
     after = {a["key"] for a in active}

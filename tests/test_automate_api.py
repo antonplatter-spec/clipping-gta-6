@@ -57,7 +57,7 @@ def fake_modules():
     pipeline.update_pick_data = mock.Mock(side_effect=lambda pid, changes: (
         store.update_pick(pid, data={**store.get_pick(pid)["data"], **changes}), {}))
     pipeline.enqueue_dub = mock.Mock(side_effect=lambda vid, lang: store.create_job("dub", "gta6"))
-    pipeline.enqueue_upload = mock.Mock(side_effect=lambda vid, aid, privacy, force=False:
+    pipeline.enqueue_upload = mock.Mock(side_effect=lambda vid, aid, options, force=False:
                                         store.create_job("upload", "gta6"))
     pipeline.retry_job = mock.Mock(side_effect=lambda jid: store.update_job(jid, status="queued"))
     pipeline.cancel_job = mock.Mock(side_effect=lambda jid: store.update_job(jid, status="canceled"))
@@ -591,6 +591,18 @@ class SecurityTests(ApiCase):
         creds = {"access_token": "ya29.SECRETaccess", "refresh_token": "1//SECRETrefresh", "expires_at": 1e10,
                  "scope": "x", "token_type": "Bearer"}
         aid = store.add_account("youtube", "Main", connected=True, external_id="UC1", credentials=creds)
+        ig = {"instagram_app_id": "111122223333444", "instagram_app_secret": "abcdefSECRETinstagram0123456789ab",
+              "meta_app_id": "555566667777888", "meta_app_secret": "abcdefSECRETmeta0123456789abcdef"}
+        for name, value in ig.items():
+            store.set_secret(name, value)
+        ig_creds = {"api": "instagram", "access_token": "IGAASECRETinstagramtoken0123456789", "ig_user_id": "1784",
+                    "username": "gta6clips", "obtained_at": 1.0, "expires_at": 1e10, "expiry_known": True}
+        fb_creds = {"api": "facebook", "access_token": "EAASECRETpagetoken0123456789", "ig_user_id": "1785",
+                    "username": "fbclips", "page_name": "GTA Clips", "expires_at": None}
+        store.add_account("instagram", "@gta6clips", connected=True, external_id="1784", credentials=ig_creds)
+        store.add_account("instagram", "@fbclips", connected=True, external_id="1785", credentials=fb_creds)
+        store.create_job("upload", "gta6", params={"variant_id": 1, "account_id": aid, "platform": "instagram",
+                                                   "ig_container": "C1", "ig_publish_at": 2.0})
         store.set_meta("totp.pending", {"user_id": self.uid, "secret": "PENDINGTOTPSECRETXYZ", "at": time.time()})
         user = store.get_user()
         jid = store.create_job("source", "gta6", clipper_job="job1", source_url="https://www.youtube.com/watch?v=x")
@@ -599,7 +611,9 @@ class SecurityTests(ApiCase):
         store.add_variant(vid, self.root / "exports/gta6/2026-11-17/video 1/a.mp4", hook="a", title="t")
         store.raise_alert("disk.low", "warning", "wenig Platz")
         store.add_usage(jid, "select", "claude-sonnet-5-5", 100, 10)
-        values = list(secrets.values()) + [creds["access_token"], creds["refresh_token"], user["password_hash"],
+        values = list(secrets.values()) + list(ig.values()) + [ig_creds["access_token"], fb_creds["access_token"],
+                                                                 "SECRETinstagram", "SECRETmeta", "SECRETpage"] \
+            + [creds["access_token"], creds["refresh_token"], user["password_hash"],
                                            user["totp_secret"], "PENDINGTOTPSECRETXYZ", c.token_hash,
                                            *user["recovery_codes"], "GOCSPX", "ya29."]
         records = []
@@ -626,6 +640,11 @@ class SecurityTests(ApiCase):
         keys = c.get("/api/keys").json()["items"]
         self.assertEqual({k["masked"] for k in keys}, {"sk-a…6789", "fish…6789"})
         self.assertTrue(c.get("/api/social/youtube/app").json()["client_id_set"])
+        d = c.get("/api/social/instagram/app").json()
+        self.assertTrue(d["app_id_set"] and d["app_secret_set"] and d["meta_app_id_set"] and d["meta_app_secret_set"])
+        accounts = c.get("/api/social/accounts").json()["items"]
+        self.assertEqual(sorted(a["connection"]["kind"] for a in accounts if a["platform"] == "instagram"),
+                         ["facebook", "instagram"])
         for line in records:
             for v in values:
                 self.assertNotIn(v, line)
@@ -911,6 +930,38 @@ class VideoTests(ApiCase):
         self.var = store.add_variant(self.vid, folder / "a.mp4", hook="Hook *eins*", title="GTA 6 Titel",
                                      hashtags=["#gta6"], predicted=1.4)
 
+    def test_instagram_upload_and_the_preview(self):
+        self.pipeline.enqueue_upload.side_effect = lambda *a, **k: store.create_job("upload", "gta6")
+        ig = store.add_account("instagram", "@gta6clips")
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": ig})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "not_connected"))
+        self.assertIn("nicht mit Instagram verbunden", r.json()["error"]["message"])
+        store.update_account(ig, connected=True, credentials={"api": "instagram", "access_token": "IGAAx"})
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": ig, "privacy": "public"})
+        self.assertEqual((r.status_code, set(r.json()["error"]["fields"])), (422, {"privacy"}))  # a YouTube thing
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": ig, "options": {"share_to_feed": 1}})
+        self.assertEqual(set(r.json()["error"]["fields"]), {"share_to_feed"})
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": ig, "options": "x"})
+        self.assertEqual(set(r.json()["error"]["fields"]), {"options"})
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": ig, "options": {"share_to_feed": False}})
+        self.assertIsInstance(r.json()["job_id"], int)
+        self.pipeline.enqueue_upload.assert_called_with(self.var, ig, {"share_to_feed": False}, force=False)
+        self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": ig})
+        self.pipeline.enqueue_upload.assert_called_with(self.var, ig, {"share_to_feed": True}, force=False)
+        tt = store.add_account("tiktok", "TT")
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": tt})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "not_supported"))
+        d = self.c.get(f"/api/variants/{self.var}/upload/preview").json()
+        self.assertEqual(set(d), {"youtube", "instagram"})
+        self.assertEqual((d["youtube"]["label"], d["youtube"]["title"]), ("YouTube", "GTA 6 Titel"))
+        self.assertTrue(d["youtube"]["description"].endswith("#Shorts"))
+        self.assertTrue(d["instagram"]["caption"].startswith("GTA 6 Titel"))
+        self.assertIn("keine gültige MP4-Datei", " ".join(d["instagram"]["problems"]))  # b"mp4" is not a video
+        self.assertEqual(self.c.get("/api/variants/999/upload/preview").status_code, 404)
+        p = self.c.get("/api/social/platforms").json()
+        self.assertEqual([(x["platform"], [o["key"] for o in x["options"]]) for x in p["items"]],
+                         [("youtube", ["privacy"]), ("instagram", ["share_to_feed"])])
+
     def test_list_get_archive(self):
         d = self.c.get("/api/videos").json()
         self.assertEqual(d["total"], 1)
@@ -945,16 +996,18 @@ class VideoTests(ApiCase):
         store.update_account(yt, connected=True, credentials={"access_token": "a", "refresh_token": "r"})
         r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "unlisted"})
         self.assertIsInstance(r.json()["job_id"], int)
-        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, "unlisted", force=False)
-        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "unlisted",
+        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, {"privacy": "unlisted"}, force=False)
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "options": {"privacy": "unlisted"},
                                                                   "force": True})
-        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, "unlisted", force=True)  # the owner confirmed
+        self.pipeline.enqueue_upload.assert_called_with(self.var, yt, {"privacy": "unlisted"}, force=True)  # confirmed
         self.pipeline.enqueue_upload.side_effect = lambda *a, **k: (_ for _ in ()).throw(
             PipelineError("Diese Variante ist schon auf „YT“ hochgeladen.", "already_posted", 409))
         r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "unlisted"})
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "already_posted"))
-        self.assertEqual(self.c.post(f"/api/variants/{self.var}/upload",
-                                     json={"account_id": yt, "privacy": "secret"}).status_code, 422)
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt, "privacy": "secret"})
+        self.assertEqual((r.status_code, list(r.json()["error"]["fields"])), (422, ["privacy"]))
+        r = self.c.post(f"/api/variants/{self.var}/upload", json={"account_id": yt})
+        self.assertEqual(r.json()["error"]["fields"], {"privacy": "Bitte auswählen."})
         r = self.c.post(f"/api/videos/{self.vid}/dub", json={"lang": "es"})
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "fish_key_missing"))
         store.set_secret("fish_api_key", "fishkey0123456789")
@@ -1126,8 +1179,9 @@ class SocialApiTests(ApiCase):
     def test_accounts_crud(self):
         r = self.c.post("/api/social/accounts", json={"platform": "tiktok", "label": "Haupt", "handle": "@me"})
         a = r.json()
-        self.assertEqual(set(a), {"id", "platform", "label", "handle", "profile", "connected", "external_id", "notes"})
-        self.assertFalse(a["connected"])
+        self.assertEqual(set(a), {"id", "platform", "label", "handle", "profile", "connected", "external_id", "notes",
+                                  "can_upload", "connection"})
+        self.assertEqual((a["connected"], a["can_upload"], a["connection"]), (False, False, None))
         r = self.c.post("/api/social/accounts", json={"platform": "myspace", "label": "", "profile": "nope"})
         self.assertEqual(set(r.json()["error"]["fields"]), {"platform", "label", "profile"})
         r = self.c.patch(f"/api/social/accounts/{a['id']}", json={"label": "Neu", "profile": "gta6", "notes": "x"})
@@ -1154,6 +1208,27 @@ class SocialApiTests(ApiCase):
         r = self.c.put("/api/social/youtube/app", json={"client_secret": None})
         self.assertFalse(r.json()["client_secret_set"])
         self.assertEqual(self.c.put("/api/social/youtube/app", json={}).status_code, 422)
+
+    def test_instagram_app_and_token_routes_validate_before_calling_meta(self):
+        d = self.c.get("/api/social/instagram/app").json()
+        self.assertEqual((d["app_id_set"], d["meta_app_id_set"], d["oauth_available"], d["redirect_uri"]),
+                         (False, False, False, None))
+        self.assertEqual(d["graph_version"], "v26.0")
+        r = self.c.put("/api/social/instagram/app", json={"app_id": "12345678901234", "app_secret": "abc"})
+        self.assertEqual(set(r.json()["error"]["fields"]), {"app_secret"})
+        self.assertFalse(store.secret_info("instagram_app_id")["set"])  # nothing saved when one field is bad
+        for body in ({}, {"access_token": ""}, {"access_token": 5}, {"access_token": "IGAAx", "account_id": "a"}):
+            self.assertEqual(self.c.post("/api/social/instagram/token", json=body).status_code, 422, body)
+        r = self.c.post("/api/social/instagram/token", json={"access_token": "has space token 0123456789"})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (422, "instagram_token_format"))
+        self.assertEqual(self.c.post("/api/social/instagram/token", json={"access_token": "IGAAx0123456789012345",
+                                                                          "account_id": 999}).status_code, 404)
+        r = self.c.post("/api/social/instagram/connect", json={})
+        self.assertEqual(r.json()["error"]["code"], "instagram_needs_https")
+        self.assertEqual(self.c.post("/api/social/instagram/accounts/999/check").status_code, 404)
+        tt = store.add_account("tiktok", "TT")
+        r = self.c.post(f"/api/social/instagram/accounts/{tt}/check")
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (409, "not_connected"))
 
 
 if __name__ == "__main__":

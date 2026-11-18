@@ -9,7 +9,7 @@ at what is already on disk, so finished work is never redone):
     live_chunk  select -> gate -> approval | render (waiting_approval) -> finished (`clipper live done`, then done)
     render      render (one pick -> one `video N` folder -> videos + variants rows)
     dub         dub (`dub segments` -> agent.translate_dub -> `dub render` -> a video with `lang`)
-    upload      upload (youtube.upload_variant -> the posts row)
+    upload      upload (the account's platform publisher, social.PUBLISHERS: YouTube or Instagram -> the posts row)
 
 A parent (source / live_chunk) stays `waiting_approval` while any pick is undecided (stage approval) or an approved
 pick is still rendering (stage render); `settle_parent` finishes it once every pick is decided and every approved
@@ -45,8 +45,10 @@ Public (API):
     scan_running(profile=None) -> bool
     approve_pick(pick_id) -> render job id ; reject_pick(pick_id, reason=None) -> pick row
     update_pick_data(pick_id, changes) -> (pick row, check_report)       raises PickCheckFailed on fails
-    enqueue_dub(video_id, lang) -> job id ; enqueue_upload(variant_id, account_id, privacy, force=False) -> job id
-                                             (409 already_posted when posted there before, unless force)
+    enqueue_dub(video_id, lang) -> job id
+    enqueue_upload(variant_id, account_id, options, force=False) -> job id   options: the platform's (YouTube:
+                                             {"privacy"} or the privacy string; Instagram: {"share_to_feed"});
+                                             409 already_posted when posted there before, unless force
     retry_job(job_id) -> job row ; cancel_job(job_id) -> job row
     on_settings_changed(keys) ; resume_waiting(force=False) -> [job ids]
     source_expires_at(job) -> float | None   when `clipper cleanup` deletes the job's source.mp4 (None: gone / never)
@@ -98,17 +100,15 @@ T_SELECT = 60 * 60
 T_CHECK, T_RANK = 300, 900
 T_RENDER, STALL_RENDER = 3 * 3600, 90 * 60
 T_DUB_SEGMENTS, T_TRANSLATE, T_DUB_RENDER = 3600, 30 * 60, 3 * 3600
-T_UPLOAD = 4 * 3600
 T_VERIFY = 300
 DISK_WAIT_S = 15 * 60
 T_LIVE_DONE, T_CLEANUP, T_WATCH = 300, 1800, 3600
 
 KIND_DE = {"source": "Quelle", "live_chunk": "Live-Stück", "render": "Rendern", "dub": "Synchronisation",
-           "upload": "YouTube-Upload"}
+           "upload": "Upload"}
 CLIP_TYPES = ("reaction", "comedy", "news", "gameplay", "showcase", "scenario")
 HOOK_STYLES = ("bold", "box", "label", "none")
 CAPTION_STYLES = ("boxed", "bold", "comic")
-PRIVACY = ("private", "unlisted", "public")
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")
 SECTION_RE = re.compile(r"^(\d{1,2}(?::\d{1,2}){0,2})-(\d{1,2}(?::\d{1,2}){0,2})$")
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([\w-]{11})(?![\w-])")
@@ -186,8 +186,16 @@ def _agent():
     return importlib.import_module("automate.agent")
 
 
-def _youtube():
-    return importlib.import_module("automate.youtube")
+def _social():
+    return importlib.import_module("automate.social")
+
+
+def _kind_label(job):
+    """"Rendern", "YouTube-Upload", "Instagram-Upload" … for alerts."""
+    if job.get("kind") == "upload":
+        pub = _social().publisher((job.get("params") or {}).get("platform") or "youtube")
+        return f"{pub.label if pub else 'Social-Media'}-Upload"
+    return KIND_DE.get(job.get("kind"), job.get("kind"))
 
 
 def _wake():
@@ -836,7 +844,7 @@ def _after_failure(job, message):
 def raise_failed_alert(job, message):
     what = job.get("title") or job.get("clipper_job") or job.get("source_url") or ""
     store.raise_alert(f"job.failed.{job['id']}", "error",
-                      f"Job #{job['id']} ({KIND_DE.get(job['kind'], job['kind'])}"
+                      f"Job #{job['id']} ({_kind_label(job)}"
                       + (f" „{what[:80]}“" if what else "") + f") ist fehlgeschlagen: {message} "
                       f"Unter Jobs → #{job['id']} kannst du ihn erneut versuchen.",
                       {"job_id": job["id"], "kind": job["kind"], "stage": job.get("stage")})
@@ -1572,47 +1580,59 @@ def _stage_dub(run, job):
 # ---------------------------------------------------------------- stage: upload
 
 def _stage_upload(run, job):
+    """One publish call of the account's platform (social.Publisher). The resume state it reports (YouTube's
+    session, Instagram's container and publish marker) is written into the job's params the moment it exists, and a
+    retry, a restart or a new upload of the same variant hands it back, so finished work is asked for, not redone."""
     params = job.get("params") or {}
     post = store.get_post(params.get("post_id") or 0)
     if post and post["status"] == "posted":
         return {"status": "done", "progress": "Schon hochgeladen"}
-    yt = _youtube()
-    run.progress("Lade auf YouTube hoch …", force=True)
+    pub = _social().publisher(params.get("platform") or "youtube")
+    if pub is None:
+        raise StageError(f"Für „{params.get('platform')}“ gibt es kein direktes Hochladen.", retryable=False)
+    run.upload_label = pub.uploading
+    run.progress(f"{pub.uploading} …", force=True)
+    state = {k: params[k] for k in pub.STATE_KEYS if params.get(k) is not None}
 
-    def keep_session(uri):  # before the first byte: a retry after a crash asks this session instead of re-uploading
-        run.update(params={**(run.job.get("params") or {}), "upload_session": uri})
-    if params.get("upload_session"):
-        run.event("Frage YouTube zuerst, wie weit der letzte Versuch kam (kein doppelter Upload)")
+    def keep(changes):  # before the step it protects: a retry after a crash asks Instagram/YouTube first
+        run.update(params={**(run.job.get("params") or {}), **changes})
+    note = pub.resume_note(state)
+    if note:
+        run.event(note)
     try:
-        res = run.call(yt.upload_variant, params["variant_id"], params["account_id"], params["privacy"],
-                       on_progress=run.on_progress, cancel=run.cancel, timeout=T_UPLOAD,
-                       session=params.get("upload_session"), on_session=keep_session)
-    except yt.YouTubeError as e:
+        res = run.call(pub.publish, params["variant_id"], params["account_id"], pub.options_of(params),
+                       state=state, on_state=keep, on_progress=run.on_progress, cancel=run.cancel, log=run.log,
+                       timeout=pub.TIMEOUT, progress=lambda line: line[:200])
+    except pub.errors() as e:
         if getattr(e, "code", "") == "canceled" and run.cancel.is_set():
             raise Canceled(run.reason or "cancel") from None
-        raise StageError(str(e), retryable=bool(getattr(e, "retryable", False))) from None
-    _record_upload(run, job, params, res)
+        raise StageError(str(e), retryable=bool(getattr(e, "retryable", False)),
+                         slow=bool(getattr(e, "slow", False))) from None
+    _record_upload(run, job, params, res, pub)
     return None
 
 
-def _record_upload(run, job, params, res):
-    """The video is on YouTube: its post says so whatever happened to the job meanwhile. A cancel that arrived while
-    the last bytes went out is too late to undo the upload, so the job ends `done` (not canceled with the video
-    forgotten); a job another worker holds by now is left to it (it resumes the same session)."""
-    url = res.get("url") or res.get("video_id")
+def _record_upload(run, job, params, res, pub):
+    """The video is online: its post says so whatever happened to the job meanwhile. A cancel that arrived after
+    the last bytes (YouTube) or the publish request (Instagram) went out is too late to undo, so the job ends `done`
+    (not canceled with the video forgotten); a job another worker holds by now is left to it (it resumes the same
+    session / container)."""
+    external = res.get("external_id") or res.get("video_id")
+    url = res.get("url") or external
     late = False
     with store.transaction():
         if params.get("post_id"):
-            store.update_post(params["post_id"], status="posted", external_id=res.get("video_id"), url=res.get("url"),
+            store.update_post(params["post_id"], status="posted", external_id=external, url=res.get("url"),
                               error=None)
         cur = store.get_job(job["id"]) or {}
         late = cur.get("status") == "canceled"
         if late or (cur.get("status") == "running" and cur.get("locked_by") == run.worker_id):
-            store.update_job(job["id"], status="done", stage="finished", error=None, progress=f"Hochgeladen: {url}",
+            store.update_job(job["id"], status="done", stage="finished", error=None,
+                             progress=f"Hochgeladen: {url}" if url else "Veröffentlicht",
                              result={**(job.get("result") or {}), **res})
     if late:
-        run.event("Der Abbruch kam zu spät: das Video war schon vollständig bei YouTube", "warning")
-    run.event(f"Auf YouTube: {url}")
+        run.event(pub.too_late, "warning")
+    run.event(pub.done(url) if url else f"Auf {pub.label} veröffentlicht (Link nicht ermittelbar)")
 
 
 _STAGES = {
@@ -1715,33 +1735,47 @@ def enqueue_dub(video_id, lang):
     return jid
 
 
-def _earlier_session(variant_id, account_id, privacy):
-    """The resumable session of an earlier upload of this variant to this account (failed or canceled, same
-    privacy), so a new upload asks it first: if that one actually finished, YouTube returns its video instead of a
-    second copy being created."""
+def _earlier_state(pub, variant_id, account_id, options):
+    """Resume state of an earlier failed or canceled upload of this variant to this account, newest first, so a new
+    upload asks it first: if that one actually finished (YouTube: its session; Instagram: its container or the
+    publish it sent), the existing video is recorded instead of a second copy being created."""
     for j in store.list_jobs(kind="upload", status=["failed", "canceled"], limit=1000)[0]:
         p = j.get("params") or {}
-        if (p.get("variant_id"), p.get("account_id"), p.get("privacy")) == (variant_id, account_id, privacy) \
-                and p.get("upload_session"):
-            return p["upload_session"]
-    return None
+        if (p.get("variant_id"), p.get("account_id")) != (variant_id, account_id) \
+                or (p.get("platform") or "youtube") != pub.platform:
+            continue
+        state = pub.carry(p, options)
+        if state:
+            return state
+    return {}
 
 
-def enqueue_upload(variant_id, account_id, privacy, force=False):
-    """A YouTube upload job (and its post, status uploading). Refused while the variant is uploading to that account,
-    and when it is already posted there unless `force` (the owner confirmed a second, identical video)."""
-    if privacy not in PRIVACY:
-        raise PipelineError("Sichtbarkeit: privat, nicht gelistet oder öffentlich.", "invalid_privacy", 422,
-                            {"privacy": "private, unlisted oder public"})
+def enqueue_upload(variant_id, account_id, options=None, force=False):
+    """An upload job for the account's platform (and its post, status uploading). Refused while the variant is
+    uploading to that account, and when it is already posted there unless `force` (the owner confirmed a second,
+    identical video). The platform checks its options and the variant's file first (Instagram: the Reels rules)."""
     variant = store.get_variant(variant_id)
     if not variant:
         raise PipelineError("Diese Variante gibt es nicht.", "not_found", 404)
     account = store.get_account(account_id)
     if not account:
         raise PipelineError("Dieses Konto gibt es nicht.", "not_found", 404)
-    if account["platform"] != "youtube" or not account.get("connected"):
-        raise PipelineError("Das Konto ist nicht mit YouTube verbunden (Konten → YouTube verbinden).",
+    social = _social()
+    pub = social.publisher(account["platform"])
+    if pub is None:
+        raise PipelineError(f"Auf {social.PLATFORMS.get(account['platform'], account['platform'])} kann das Dashboard "
+                            "nicht direkt hochladen – lade die MP4 selbst hoch und markiere sie als gepostet.",
+                            "not_supported", 409)
+    try:
+        options = pub.options(options)
+    except social.OptionsError as e:
+        raise PipelineError(e.message, e.code, 422, e.fields) from None
+    if not pub.connected(account):
+        raise PipelineError(f"Das Konto ist nicht mit {pub.label} verbunden (Konten → {pub.label} verbinden).",
                             "not_connected", 409)
+    problems = pub.problems(variant)
+    if problems:
+        raise PipelineError(f"{pub.label} nimmt diese Datei nicht an: {' '.join(problems)}", "unsupported_media", 422)
     video = store.get_video(variant["video_id"])
     pick = store.get_pick((video or {}).get("pick_id") or 0)
     with store.transaction():
@@ -1754,13 +1788,14 @@ def enqueue_upload(variant_id, account_id, privacy, force=False):
             raise PipelineError(f"Diese Variante ist schon auf „{account['label']}“ hochgeladen"
                                 + (f" ({where})" if where else "") + ". Ein zweiter Upload erzeugt dort ein zweites, "
                                 "identisches Video.", "already_posted", 409)
-        session = None if done else _earlier_session(variant_id, account_id, privacy)
-        post_id = store.add_post(variant_id, "youtube", account_id=account_id, status="uploading", privacy=privacy)
+        carry = {} if done else _earlier_state(pub, variant_id, account_id, options)
+        post_id = store.add_post(variant_id, pub.platform, account_id=account_id, status="uploading",
+                                 privacy=options.get("privacy"))
         jid = store.create_job("upload", (video or {}).get("profile") or store.get_setting("ui.default_profile"),
                                parent_id=(pick or {}).get("job_id"), title=variant.get("title"),
                                priority=PRIORITY["upload"], progress="Wartet",
-                               params={"variant_id": variant_id, "account_id": account_id, "privacy": privacy,
-                                       "post_id": post_id, **({"upload_session": session} if session else {}),
+                               params={"variant_id": variant_id, "account_id": account_id, "platform": pub.platform,
+                                       **pub.job_params(options), "post_id": post_id, **carry,
                                        **({"forced": True} if done else {})})
     _wake()
     return jid

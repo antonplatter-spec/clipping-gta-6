@@ -7,7 +7,7 @@ import {
   PageHeader, Button, IconButton, Badge, Icon, Loading, ErrorState, Empty, TextField, SelectField, Segmented, Modal,
   CopyButton, LazyMount, Pager, Toggle, Spinner, FormError, Callout,
 } from '../ui.js';
-import { hookTypeLabel, factorTone, PLATFORMS, PRIVACY, LANGUAGES, langLabel } from '../labels.js';
+import { hookTypeLabel, factorTone, PLATFORMS, LANGUAGES, langLabel } from '../labels.js';
 import { loadProfiles } from '../store.js';
 
 const LIMIT = 20;
@@ -29,6 +29,7 @@ export function VideosPage({ route }) {
   const list = useData(() => api.listVideos({ ...filters, posted: filters.posted === '' ? undefined : Number(filters.posted), limit: LIMIT, offset }),
     [fkey, offset], { interval: poll });
   const accounts = useData(() => api.listAccounts().then(api.itemsOf), []);
+  const platforms = useData(() => api.getPlatforms().then(api.itemsOf), []);
   const profiles = useData(() => loadProfiles(), []);
   const items = (list.data && list.data.items) || [];
   const uploading = items.some((v) => (v.variants || []).some((x) => (x.posts || []).some((p) => p.status === 'uploading')));
@@ -67,12 +68,18 @@ export function VideosPage({ route }) {
       : html`<div class="stack-lg">
           ${groups.map((g) => html`<section class="stack" key=${g.day} aria-labelledby=${`day-${g.day}`}>
             <div class="day-head"><h2 id=${`day-${g.day}`}>${fmt.day(g.day)}</h2><span class="muted">${g.day} · ${fmt.plural(g.videos.length, 'Video', 'Videos')}</span></div>
-            ${g.videos.map((v) => html`<${VideoCard} key=${v.id} video=${v} accounts=${accounts.data || []} focus=${Number(q.video) === v.id}
+            ${g.videos.map((v) => html`<${VideoCard} key=${v.id} video=${v} accounts=${uploadAccounts(accounts.data, platforms.data)} focus=${Number(q.video) === v.id}
               onChanged=${() => refreshVideo(v.id)} onArchived=${() => drop(v.id)} />`)}
           </section>`)}
           <${Pager} total=${list.data.total} limit=${LIMIT} offset=${offset} onChange=${(o) => { setOffset(o); window.scrollTo(0, 0); }} />
         </div>`}
   </div>`;
+}
+
+/** Every account, each marked with `upload`: the platform's upload schema when it can upload there now, else null. */
+function uploadAccounts(accounts, platforms) {
+  const byId = Object.fromEntries((platforms || []).map((p) => [p.platform, p]));
+  return (accounts || []).map((a) => ({ ...a, upload: a.can_upload && byId[a.platform] ? byId[a.platform] : null }));
 }
 
 function VideoCard({ video, accounts, focus, onChanged, onArchived }) {
@@ -129,12 +136,12 @@ function VideoCard({ video, accounts, focus, onChanged, onArchived }) {
 function VariantCard({ v, accounts, onPost, onUpload, onChanged }) {
   const [descOpen, setDescOpen] = useState(false);
   const [removing, setRemoving] = useState(null);
-  const ytConnected = accounts.some((a) => a.platform === 'youtube' && a.connected);
+  const canUpload = accounts.some((a) => a.upload);
   const noHook = v.arm === 'no-hook' || !v.hook;
   const accountLabel = (id) => { const a = accounts.find((x) => x.id === id); return a ? a.label : null; };
   const removePost = async (p) => {
     const ok = await confirmDialog({ title: 'Markierung entfernen?', confirmLabel: 'Entfernen', danger: true,
-      message: p.status === 'posted' && p.platform === 'youtube' && p.external_id ? 'Das Video bleibt auf YouTube online – nur die Markierung im Dashboard wird entfernt.' : 'Die Variante gilt dann wieder als nicht gepostet.' });
+      message: p.status === 'posted' && p.account_id && (p.external_id || p.url) ? `Das Video bleibt auf ${PLATFORMS[p.platform] || p.platform} online – nur die Markierung im Dashboard wird entfernt.` : 'Die Variante gilt dann wieder als nicht gepostet.' });
     if (!ok) return;
     setRemoving(p.id);
     try { await api.deletePost(p.id); onChanged(); } catch (err) { toast.fail(err); } finally { setRemoving(null); }
@@ -174,7 +181,7 @@ function VariantCard({ v, accounts, onPost, onUpload, onChanged }) {
     <div class="variant-actions">
       <${Button} size="sm" icon="download" href=${`${v.file_url}${v.file_url.includes('?') ? '&' : '?'}download=1`} download>MP4<//>
       <${Button} size="sm" icon="check-check" onClick=${onPost}>Als gepostet markieren<//>
-      ${ytConnected && html`<${Button} size="sm" icon="upload" onClick=${onUpload}>Auf YouTube hochladen<//>`}
+      ${canUpload && html`<${Button} size="sm" icon="upload" onClick=${onUpload}>Hochladen<//>`}
     </div>
   </div>`;
 }
@@ -213,23 +220,45 @@ function PostModal({ v, accounts, onClose, onDone }) {
   <//>`;
 }
 
-// Uploading a variant that is already on the chosen channel makes a second, identical video there: the server refuses
+// Uploading a variant that is already on the chosen account makes a second, identical post there: the server refuses
 // it (409 already_posted) unless the owner confirms here, which sends `force: true`.
 function confirmSecondUpload(account, post) {
   const where = post && post.url ? ` (${post.url})` : '';
+  const site = account ? PLATFORMS[account.platform] || account.platform : 'der Plattform';
   return confirmDialog({
-    title: 'Schon auf diesem Kanal', confirmLabel: 'Trotzdem hochladen', danger: true,
-    message: `Diese Variante ist schon auf „${account ? account.label : 'diesem Kanal'}“ hochgeladen${where}. Ein zweiter Upload erzeugt dort ein zweites, identisches Video. Nur hochladen, wenn das wirklich gewollt ist – zum Beispiel, weil du das erste auf YouTube gelöscht hast.`,
+    title: 'Schon auf diesem Konto', confirmLabel: 'Trotzdem hochladen', danger: true,
+    message: `Diese Variante ist schon auf „${account ? account.label : 'diesem Konto'}“ gepostet${where}. Ein zweiter Upload erzeugt dort einen zweiten, identischen Beitrag. Nur hochladen, wenn das wirklich gewollt ist – zum Beispiel, weil du den ersten auf ${site} gelöscht hast.`,
   });
 }
 
+const UPLOAD_NOTES = {
+  youtube: 'Titel, Beschreibung und Hashtags dieser Variante werden übernommen.',
+  instagram: 'Nach dem Hochladen verarbeitet Instagram das Video einige Minuten; erst dann wird der Reel veröffentlicht und hier verlinkt.',
+};
+
+/** One field of a platform's upload options (GET /api/social/platforms), rendered from its schema. */
+function UploadOption({ option, value, onChange }) {
+  if (option.type === 'boolean') {
+    return html`<${Toggle} checked=${!!value} onChange=${onChange} label=${option.label} description=${option.help} />`;
+  }
+  return html`<div class="field"><span class="field-label">${option.label}</span>
+    <${Segmented} label=${option.label} value=${value} onChange=${onChange} options=${option.choices || []} />
+    ${option.help && html`<p class="field-help">${option.help}</p>`}</div>`;
+}
+
 function UploadModal({ v, accounts, onClose, onDone }) {
-  const yt = accounts.filter((a) => a.platform === 'youtube' && a.connected);
-  const [accountId, setAccountId] = useState(yt[0] ? String(yt[0].id) : '');
-  const [privacy, setPrivacy] = useState('private');
+  const usable = accounts.filter((a) => a.upload);
+  const [accountId, setAccountId] = useState(usable[0] ? String(usable[0].id) : '');
+  const [values, setValues] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const account = yt.find((a) => String(a.id) === String(accountId));
+  const preview = useData(() => api.uploadPreview(v.id), [v.id]);
+  const account = usable.find((a) => String(a.id) === String(accountId));
+  const platform = account ? account.upload : null;
+  const key = (o) => `${platform.platform}.${o.key}`;
+  const options = platform ? Object.fromEntries(platform.options.map((o) => [o.key, key(o) in values ? values[key(o)] : o.default])) : {};
+  const pv = preview.data && account ? preview.data[account.platform] : null;
+  const problems = (pv && pv.problems) || [];
   const posted = (v.posts || []).find((p) => p.status === 'posted' && String(p.account_id) === String(accountId));
   const submit = async () => {
     setBusy(true); setError(null);
@@ -239,29 +268,35 @@ function UploadModal({ v, accounts, onClose, onDone }) {
         if (!(await confirmSecondUpload(account, posted))) return;
         force = true;
       }
+      const body = { account_id: Number(accountId), options };
       let res;
       try {
-        res = await api.uploadVariant(v.id, { account_id: Number(accountId), privacy, ...(force ? { force: true } : {}) });
+        res = await api.uploadVariant(v.id, { ...body, ...(force ? { force: true } : {}) });
       } catch (err) {
         if (err.code !== 'already_posted' || force) throw err;
         if (!(await confirmSecondUpload(account, null))) return;  // posted meanwhile (another tab, a late upload)
-        res = await api.uploadVariant(v.id, { account_id: Number(accountId), privacy, force: true });
+        res = await api.uploadVariant(v.id, { ...body, force: true });
       }
       toast.success(`Upload gestartet (Job #${res.job_id}).`, { action: { href: `#/jobs?job=${res.job_id}`, label: 'Job ansehen' } });
       onDone(); onClose();
     } catch (err) { setError(err); } finally { setBusy(false); }
   };
-  return html`<${Modal} title="Auf YouTube hochladen" onClose=${onClose}
-    footer=${html`<${Button} variant="ghost" onClick=${onClose}>Abbrechen<//><${Button} variant="primary" icon="upload" busy=${busy} disabled=${!accountId} onClick=${submit}>Hochladen<//>`}>
+  const site = account ? PLATFORMS[account.platform] || account.platform : '';
+  return html`<${Modal} title=${account ? `Auf ${site} hochladen` : 'Hochladen'} onClose=${onClose}
+    footer=${html`<${Button} variant="ghost" onClick=${onClose}>Abbrechen<//><${Button} variant="primary" icon="upload" busy=${busy} disabled=${!accountId || problems.length > 0} onClick=${submit}>Hochladen<//>`}>
     <${FormError} error=${error} />
-    <div class="stack-sm"><span class="field-label">Titel</span><p class="text-2">${v.title}</p></div>
-    <${SelectField} label="YouTube-Konto" value=${accountId} onChange=${setAccountId}
-      options=${yt.map((a) => ({ value: a.id, label: `${a.label}${a.handle ? ` (${a.handle})` : ''}` }))} />
-    ${posted && html`<${Callout} tone="warning">Diese Variante ist auf diesem Kanal schon online. Hochladen fragt noch einmal nach.<//>`}
-    <div class="field"><span class="field-label">Sichtbarkeit</span>
-      <${Segmented} label="Sichtbarkeit" value=${privacy} onChange=${setPrivacy} options=${Object.entries(PRIVACY).map(([value, label]) => ({ value, label }))} />
-      <p class="field-help">Tipp: erst „Privat“ hochladen, in YouTube Studio prüfen, dann veröffentlichen.</p></div>
-    <${Callout} tone="info">Der Upload läuft als Job im Hintergrund. Titel, Beschreibung und Hashtags dieser Variante werden übernommen.<//>
+    <${SelectField} label="Konto" value=${accountId} onChange=${setAccountId}
+      options=${usable.map((a) => ({ value: a.id, label: `${PLATFORMS[a.platform] || a.platform}: ${a.label}${a.handle && a.handle !== a.label ? ` (${a.handle})` : ''}` }))} />
+    ${posted && html`<${Callout} tone="warning">Diese Variante ist auf diesem Konto schon online. Hochladen fragt noch einmal nach.<//>`}
+    ${platform && platform.options.map((o) => html`<${UploadOption} key=${key(o)} option=${o} value=${options[o.key]}
+      onChange=${(val) => setValues((x) => ({ ...x, [key(o)]: val }))} />`)}
+    ${!pv ? (preview.error ? null : html`<${Loading} lines=${2} label="Lade die Vorschau …" />`)
+      : pv.caption != null ? html`<div class="stack-sm"><span class="field-label">Text des Reels <span class="muted small">(${pv.caption.length} von 2.200 Zeichen)</span></span>
+          <div class="caption-preview">${pv.caption}</div></div>`
+      : html`<div class="stack-sm"><span class="field-label">Titel</span><p class="text-2">${pv.title}</p></div>`}
+    ${problems.length > 0 && html`<${Callout} tone="danger" title=${`${site} nimmt diese Datei nicht an`}>
+      <ul class="plain-list">${problems.map((t) => html`<li>${t}</li>`)}</ul><//>`}
+    ${account && html`<${Callout} tone="info">Der Upload läuft als Job im Hintergrund. ${UPLOAD_NOTES[account.platform] || ''}<//>`}
   <//>`;
 }
 

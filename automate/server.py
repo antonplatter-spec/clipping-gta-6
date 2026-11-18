@@ -12,7 +12,8 @@ Security, enforced in one pure ASGI middleware so it covers the API, the static 
     this machine's names and IPs; the --public-url host. Anything else -> 403.
   - Origin, when a browser sends one, must be this same origin (or the public URL) -> else 403; for /api, a
     `Sec-Fetch-Site` of cross-site/same-site is refused too (another site, or another port on localhost, can't
-    embed or drive the API), except the YouTube OAuth callback, which is a top-level navigation from Google.
+    embed or drive the API), except the OAuth callbacks (YouTube, Instagram), top-level navigations from Google
+    and Meta.
   - CSRF: POST/PUT/PATCH/DELETE under /api need `X-Requested-With: automate` (a cross-origin page can't set it
     without a CORS preflight, which this server never allows) -> else 403.
   - Request bodies above MAX_BODY -> 413.
@@ -50,6 +51,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__, db, settings
 from .api import build_router
 from .api.common import ApiError, map_exception
+from .instagram import CALLBACK_PATH as INSTAGRAM_CALLBACK
 from .youtube import CALLBACK_PATH
 
 log = logging.getLogger("automate.server")
@@ -59,6 +61,7 @@ MAX_BODY = 4 * 1024 * 1024  # research.override may hold a long playbook
 MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 SHUTDOWN_JOIN_S = 20
+OAUTH_CALLBACKS = (CALLBACK_PATH, INSTAGRAM_CALLBACK)
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
        "font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
        "frame-ancestors 'none'")
@@ -224,7 +227,7 @@ class SecurityMiddleware:
         api = path == "/api" or path.startswith("/api/")
         if api:
             site = headers.get("sec-fetch-site")
-            if site in ("cross-site", "same-site") and not (path == CALLBACK_PATH and method == "GET"):
+            if site in ("cross-site", "same-site") and not (path in OAUTH_CALLBACKS and method == "GET"):
                 return await self._reject(send, 403, "cross_site",
                                           "Diese Anfrage kommt von einer fremden Webseite und wurde blockiert.")
             if method in MUTATING and headers.get("x-requested-with") != "automate":

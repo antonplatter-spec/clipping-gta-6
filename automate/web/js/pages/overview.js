@@ -75,7 +75,8 @@ function Alerts({ alerts }) {
   </section>`;
 }
 
-// Every alert key the backend raises (health.py, pipeline.py, youtube.py, api/auth.py) and where to fix it.
+// Every alert key the backend raises (health.py, pipeline.py, youtube.py, instagram.py, api/auth.py) and where to
+// fix it.
 export function alertLink(a) {
   const k = a.key || '';
   if (k.startsWith('key.')) return { href: '#/kosten', label: 'Schlüssel eintragen' };
@@ -87,7 +88,7 @@ export function alertLink(a) {
   if (k.startsWith('live.')) return { href: '#/quellen', label: 'Streams' };
   if (k.startsWith('scan.failed.')) return { href: '#/system', label: 'Systemcheck' };
   if (k.startsWith('disk.')) return { href: '#/system', label: 'Speicher' };
-  if (k.startsWith('youtube.')) return { href: '#/konten', label: 'Konten' };
+  if (k.startsWith('youtube.') || k.startsWith('instagram.')) return { href: '#/konten', label: 'Konten' };
   if (k.startsWith('pick.footage.')) return { href: `#/freigabe?pick=${k.split('.').pop()}`, label: 'Zur Freigabe' };
   if (k.startsWith('prices.')) return { href: '#/einstellungen/claude', label: 'Preise' };
   if (k === 'schedule.old' || k === 'service.restarted') return { href: '#/system', label: 'System' };

@@ -42,6 +42,10 @@
 //     `/#/konten?youtube=error&message=<urlencoded German text>`.
 // 11. Tool rows in GET /api/system may carry `required` (bool) and `purpose` (German, what the tool is for).
 // 12. GET /api/keys and GET /api/social/accounts use the general list shape `{items, total}` (§7 wrote `[...]`).
+// 13. Round 2: uploads go to YouTube or Instagram through one route (POST /api/variants/{id}/upload with the
+//     platform's `options`); GET /api/social/platforms lists the platforms and their option fields, Account gains
+//     `can_upload` and `connection`, and the Instagram connection has its own routes (section "Upload platforms and
+//     Instagram" at the end of this file).
 //
 // Decided here where §7 is silent (the backend implements exactly these; details at each function):
 //  - POST /api/login → State. Wrong credentials → 401 `invalid_credentials` (the client does not redirect on it).
@@ -550,10 +554,11 @@ export const sheetUrl = (jobId, name) => `${BASE}/jobs/${jobId}/sheets/${encodeU
  * @property {number} variant_id
  * @property {number|null} account_id
  * @property {Platform} platform
- * @property {"posted"|"uploading"|"failed"} status  uploading = YouTube upload job still running
+ * @property {"posted"|"uploading"|"failed"} status  uploading = an upload job (YouTube, Instagram) still running
  * @property {string|null} external_id
- * @property {string|null} url
- * @property {"private"|"unlisted"|"public"|null} privacy
+ * @property {string|null} url    for uploads: the YouTube video / the Instagram Reel's permalink (null when Instagram
+ *   published it but the link could not be read)
+ * @property {"private"|"unlisted"|"public"|null} privacy  YouTube only (Instagram posts: null)
  * @property {string|null} note
  * @property {string|null} error   German, for failed uploads
  * @property {number} created_at
@@ -625,14 +630,19 @@ export const markPosted = (variantId, body) => request('POST', `/variants/${vari
 export const deletePost = (id) => request('DELETE', `/posts/${id}`);
 
 /**
- * POST /api/variants/{id}/upload — YouTube upload as a job (creates a Post with status "uploading").
- * Account not connected → 409 `not_connected`; the variant is uploading to that account right now → 409
- * `already_uploading`; it is already posted to that account → 409 `already_posted` unless `force: true` (send it
- * only after the owner confirmed a second, identical video on that channel). A new upload first asks the resumable
- * session of an earlier failed/canceled upload of the same variant, account and privacy, so a video that reached
- * YouTube anyway is recorded instead of uploaded again.
+ * POST /api/variants/{id}/upload — CHANGED (round 2): one route for every platform the account can upload to
+ * (YouTube, Instagram), as a job (creates a Post with status "uploading"). `options` are the platform's own fields
+ * (GET /api/social/platforms): YouTube `{privacy}`, Instagram `{share_to_feed}` (default true). The old top-level
+ * `privacy` is still accepted for YouTube. A bad option → 422 with `fields`; a platform without direct upload → 409
+ * `not_supported`; account not connected → 409 `not_connected`; the variant is uploading to that account right
+ * now → 409 `already_uploading`; it is already posted to that account → 409 `already_posted` unless `force: true`
+ * (send it only after the owner confirmed a second, identical post there); Instagram refuses the file (Reels rules)
+ * → 422 `unsupported_media` (German reasons in `message`). A new upload first asks what an earlier failed/canceled
+ * upload of the same variant and account left (YouTube: its session; Instagram: its container, or the publish it
+ * sent), so a video that went online anyway is recorded instead of posted again.
  * @param {number} variantId
- * @param {{account_id: number, privacy: "private"|"unlisted"|"public", force?: boolean}} body
+ * @param {{account_id: number, options?: Object<string, any>, privacy?: "private"|"unlisted"|"public",
+ *   force?: boolean}} body
  * @returns {Promise<{job_id: number}>}
  */
 export const uploadVariant = (variantId, body) => request('POST', `/variants/${variantId}/upload`, { body });
@@ -925,14 +935,16 @@ export const testKey = (name) => request('POST', `/keys/${name}/test`);
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * @typedef {Object} Account  credentials (OAuth tokens) are never returned
+ * @typedef {Object} Account  credentials (OAuth tokens, Instagram tokens) are never returned
  * @property {number} id
  * @property {Platform} platform
  * @property {string} label
- * @property {string|null} handle
+ * @property {string|null} handle     YouTube: the channel handle; Instagram: "@username"
  * @property {string|null} profile    which clipper profile posts here (null = any)
- * @property {boolean} connected      YouTube: OAuth tokens present and valid; other platforms: always false
- * @property {string|null} external_id  YouTube channel id
+ * @property {boolean} connected      YouTube/Instagram: a connection is stored; other platforms: always false
+ * @property {boolean} can_upload     ADDITION (round 2): connected and its credentials are present
+ * @property {InstagramConnection|null} connection  ADDITION (round 2): Instagram only, non-secret token facts
+ * @property {string|null} external_id  YouTube channel id / Instagram user id
  * @property {string|null} notes
  */
 
@@ -985,8 +997,103 @@ export const putYoutubeApp = (body) => request('PUT', '/social/youtube/app', { b
  */
 export const youtubeConnect = (body = {}) => request('POST', '/social/youtube/connect', { body });
 
-/** POST /api/social/accounts/{id}/disconnect — revokes/forgets tokens. @returns {Promise<Account>} */
+/** POST /api/social/accounts/{id}/disconnect — revokes (YouTube) and forgets the tokens. @returns {Promise<Account>} */
 export const disconnectAccount = (id) => request('POST', `/social/accounts/${id}/disconnect`);
+
+// ---------------------------------------------------------------------------------------------------------------
+// Upload platforms and Instagram (round 2: Reels publishing; backend automate/social.py, automate/instagram.py)
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * One option of a platform's upload dialog.
+ * @typedef {Object} UploadOption
+ * @property {string} key                e.g. "privacy" (YouTube), "share_to_feed" (Instagram)
+ * @property {"choice"|"boolean"} type
+ * @property {string} label              German
+ * @property {any} default
+ * @property {{value: string, label: string}[]} [choices]   type "choice"
+ * @property {string} [help]             German
+ */
+
+/** @typedef {{platform: Platform, label: string, options: UploadOption[]}} UploadPlatform */
+
+/** GET /api/social/platforms — the platforms the dashboard uploads to. @returns {Promise<{items: UploadPlatform[], total: number}>} */
+export const getPlatforms = () => request('GET', '/social/platforms');
+
+/**
+ * GET /api/variants/{id}/upload/preview — what each platform would post: `{youtube: {label, title, description,
+ * problems}, instagram: {label, caption, problems}}`; `problems` are German reasons the platform would refuse the
+ * file (Instagram's Reels rules: codec, length, size, …), [] = fine.
+ * @returns {Promise<Object<string, {label: string, title?: string, description?: string, caption?: string, problems: string[]}>>}
+ */
+export const uploadPreview = (variantId) => request('GET', `/variants/${variantId}/upload/preview`);
+
+/**
+ * Non-secret facts about an Instagram connection (Account.connection).
+ * @typedef {Object} InstagramConnection
+ * @property {"instagram"|"facebook"} kind   which login the token comes from (Instagram Login / Facebook Page)
+ * @property {string|null} username
+ * @property {number|null} expires_at        null = no expiry (Facebook Page token)
+ * @property {boolean} expires_estimated     true = a pasted token whose age is unknown: expires at the latest then
+ * @property {number|null} refreshed_at      last automatic refresh
+ * @property {number|null} checked_at        last time Meta confirmed the token
+ * @property {string|null} refresh_error     German, the last failed refresh/check (the token is kept)
+ * @property {string|null} page_name         Facebook Page (kind "facebook")
+ */
+
+/**
+ * @typedef {Object} InstagramApp   the ids only as masked hints; secrets are write-only
+ * @property {boolean} app_id_set           Instagram app id (Instagram Login, OAuth)
+ * @property {boolean} app_secret_set
+ * @property {string|null} app_id_hint
+ * @property {boolean} meta_app_id_set      Meta app id (the Facebook-Page path: exchanges the pasted token)
+ * @property {boolean} meta_app_secret_set
+ * @property {string|null} meta_app_id_hint
+ * @property {string|null} redirect_uri     null = OAuth unavailable (needs an HTTPS --public-url)
+ * @property {boolean} oauth_available
+ * @property {string} oauth_note            German
+ * @property {string} graph_version         e.g. "v26.0"
+ * @property {string[]} permissions         Instagram Login scopes
+ * @property {string[]} fb_permissions      Graph API Explorer permissions for the Facebook-Page path
+ */
+
+/** GET /api/social/instagram/app @returns {Promise<InstagramApp>} */
+export const getInstagramApp = () => request('GET', '/social/instagram/app');
+
+/**
+ * PUT /api/social/instagram/app — send any of the four; `null` clears it. Bad format → 422 `fields`.
+ * @param {{app_id?: string|null, app_secret?: string|null, meta_app_id?: string|null, meta_app_secret?: string|null}} body
+ * @returns {Promise<InstagramApp>}
+ */
+export const putInstagramApp = (body) => request('PUT', '/social/instagram/app', { body });
+
+/**
+ * POST /api/social/instagram/token — the paste path (write-only): an Instagram-Login token ("IG…", app dashboard) or
+ * a Facebook user token ("EAA…", Graph API Explorer; needs the Meta app id/secret). Validated at Meta first; returns
+ * the connected account(s) (the Facebook path connects every Page's Instagram account it finds). Refused token →
+ * 422 with `fields.access_token` (`instagram_token_invalid`, `instagram_not_professional`, `instagram_no_account`,
+ * `instagram_permission`, `instagram_wrong_account`, `instagram_token_format`); Meta app missing → 409
+ * `instagram_app_missing`; Meta unreachable → 502 `instagram_unreachable`.
+ * @param {{access_token: string, account_id?: number}} body
+ * @returns {Promise<{items: Account[], total: number}>}
+ */
+export const instagramToken = (body) => request('POST', '/social/instagram/token', { body });
+
+/**
+ * POST /api/social/instagram/connect — OAuth (Instagram Login); the dashboard navigates to `auth_url`. Only with an
+ * HTTPS --public-url (else 409 `instagram_needs_https`); app id/secret missing → 409 `instagram_app_missing`. The
+ * callback sends the browser to `/#/konten?instagram=connected&account=<id>` or `?instagram=error&message=…`.
+ * @param {{account_id?: number}} [body]
+ * @returns {Promise<{auth_url: string}>}
+ */
+export const instagramConnect = (body = {}) => request('POST', '/social/instagram/connect', { body });
+
+/**
+ * POST /api/social/instagram/accounts/{id}/check — asks Meta whether the token still works (refreshes it when due).
+ * Dead token → 409 `instagram_disconnected` (the account is disconnected, an alert raised).
+ * @returns {Promise<Account>}
+ */
+export const instagramCheck = (id) => request('POST', `/social/instagram/accounts/${id}/check`);
 
 // ---------------------------------------------------------------------------------------------------------------
 // System

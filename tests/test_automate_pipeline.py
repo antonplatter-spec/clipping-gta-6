@@ -1,6 +1,7 @@
 """automate.pipeline + automate.worker: whole job lifecycles through the real store, with the clipper subprocesses,
-the bridge, Claude and YouTube faked (tests/test_automate_pipeline_fakes.py). Covers approval paths, waiting
-states, retry/backoff, cancel, restart recovery at every stage, live chunks, dubs, uploads and concurrency."""
+the bridge, Claude, YouTube and Instagram faked (tests/test_automate_pipeline_fakes.py). Covers approval paths,
+waiting states, retry/backoff, cancel, restart recovery at every stage, live chunks, dubs, uploads to every platform
+(one flow, dispatched on the account's platform) and concurrency."""
 import json
 import os
 import signal
@@ -1083,6 +1084,165 @@ class UploadTests(Helpers):
         self.drive(kinds=("upload",))
         self.assertEqual(self.yt.sessions[-1], "https://upload.example/session-1")
         self.assertEqual(store.list_posts(var)[-1]["status"], "posted")
+
+
+class InstagramUploadTests(Helpers):
+    """The same upload flow for Instagram: dispatch on the account's platform, its own options and file check, the
+    resume state in the job's params, and the same never-twice guarantees as YouTube's."""
+
+    def setup_variant(self, n=0):
+        _, _, video = self.rendered_video()
+        acc = store.add_account("instagram", "@gta6clips", connected=True, credentials={"access_token": "IGx"})
+        return video["variants"][n]["id"], acc
+
+    def test_an_instagram_account_gets_the_instagram_publisher(self):
+        var, acc = self.setup_variant()
+        up = pipeline.enqueue_upload(var, acc, {"share_to_feed": False})
+        job = self.job(up)
+        self.assertEqual((job["params"]["platform"], job["params"]["options"]), ("instagram", {"share_to_feed": False}))
+        self.assertNotIn("privacy", job["params"])
+        self.assertEqual(store.list_posts(var)[0]["platform"], "instagram")
+        self.drive(kinds=("upload",))
+        post = store.list_posts(var)[0]
+        self.assertEqual((post["status"], post["external_id"], post["url"], post["privacy"]),
+                         ("posted", "M1", "https://www.instagram.com/reel/M1/", None))
+        self.assertEqual(self.ig.calls, [(var, acc, {"share_to_feed": False})])
+        self.assertEqual(self.yt.calls, [])
+        job = self.job(up)
+        self.assertEqual((job["status"], job["progress"]), ("done", "Hochgeladen: https://www.instagram.com/reel/M1/"))
+        self.assertEqual((job["params"]["ig_container"], bool(job["params"]["ig_publish_at"])), ("C1", True))
+        messages = [e["message"] for e in store.job_events(up)]
+        self.assertIn("Instagram verarbeitet das Video …", messages)
+        self.assertIn("Auf Instagram: https://www.instagram.com/reel/M1/", messages)
+
+    def test_options_file_and_connection_are_checked_before_queueing(self):
+        var, acc = self.setup_variant()
+        for options, field in (("public", "privacy"), ({"privacy": "public"}, "privacy"),
+                               ({"share_to_feed": "yes"}, "share_to_feed")):
+            with self.assertRaises(pipeline.PipelineError) as e:
+                pipeline.enqueue_upload(var, acc, options)
+            self.assertEqual((e.exception.status, list(e.exception.fields)), (422, [field]))
+        self.assertEqual(pipeline.enqueue_upload(var, acc, None) and self.job(
+            store.list_jobs(kind="upload")[0][0]["id"])["params"]["options"], {"share_to_feed": True})  # default
+        self.drive(kinds=("upload",))
+        var2 = store.get_video(store.get_variant(var)["video_id"])["variants"][1]["id"]
+        self.ig.problems = ["Das Video ist 2 s lang – ein Reel muss mindestens 3 s lang sein."]
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.enqueue_upload(var2, acc, {})
+        self.assertEqual((e.exception.code, e.exception.status), ("unsupported_media", 422))
+        self.assertIn("Instagram nimmt diese Datei nicht an: Das Video ist 2 s lang", e.exception.message)
+        self.assertEqual(store.list_posts(var2), [])
+        self.ig.problems = []
+        off = store.add_account("instagram", "Aus")
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.enqueue_upload(var2, off, {})
+        self.assertEqual(e.exception.code, "not_connected")
+        tt = store.add_account("tiktok", "TT", connected=True)
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.enqueue_upload(var2, tt, {})
+        self.assertEqual(e.exception.code, "not_supported")
+
+    def test_a_posted_variant_goes_to_the_same_instagram_account_again_only_when_forced(self):
+        var, acc = self.setup_variant()
+        pipeline.enqueue_upload(var, acc, {})
+        self.drive(kinds=("upload",))
+        with self.assertRaises(pipeline.PipelineError) as e:
+            pipeline.enqueue_upload(var, acc, {})
+        self.assertEqual(e.exception.code, "already_posted")
+        self.assertIn("(https://www.instagram.com/reel/M1/)", e.exception.message)
+        yt = store.add_account("youtube", "Main", connected=True, credentials={"access_token": "x"})
+        pipeline.enqueue_upload(var, yt, "public")  # the same variant on YouTube: fine
+        forced = pipeline.enqueue_upload(var, acc, {}, force=True)
+        self.assertTrue(self.job(forced)["params"]["forced"])
+        self.assertNotIn("ig_container", self.job(forced)["params"])  # a new Reel on purpose: nothing carried
+        self.drive(kinds=("upload",))
+        self.assertEqual([p["status"] for p in store.list_posts(var)], ["posted"] * 3)
+        self.assertEqual(len(self.ig.published), 2)
+
+    def test_a_power_cut_after_the_publish_request_resumes_without_a_second_reel(self):
+        var, acc = self.setup_variant()
+
+        class PowerCut(BaseException):
+            after_publish = True
+        self.ig.script = [PowerCut()]
+        up = pipeline.enqueue_upload(var, acc, {})
+        with self.assertRaises(PowerCut):
+            self.drive(kinds=("upload",))
+        params = self.job(up)["params"]
+        self.assertTrue(params["ig_container"] and params["ig_publish_at"])  # written before the request left
+        pipeline.release_stale(0)  # the next server start
+        self.drive(kinds=("upload",))
+        self.assertEqual(self.ig.states[-1]["ig_container"], params["ig_container"])
+        self.assertEqual(len(self.ig.published), 1)
+        post = store.list_posts(var)[0]
+        self.assertEqual((post["status"], post["external_id"]), ("posted", "M1"))
+        self.assertTrue(any("kein doppelter Reel" in e["message"] for e in store.job_events(up)))
+
+    def test_a_new_upload_carries_what_an_earlier_failed_one_left(self):
+        var, acc = self.setup_variant()
+        lost = self.ig.InstagramError("Verbindung verloren")
+        lost.after_publish = True
+        self.ig.script = [lost]  # the publish went out, the answer never came, the job failed
+        first = pipeline.enqueue_upload(var, acc, {"share_to_feed": True})
+        self.drive(kinds=("upload",))
+        self.assertEqual(self.job(first)["status"], "failed")
+        again = pipeline.enqueue_upload(var, acc, {"share_to_feed": False})  # other options: still looked up first
+        self.assertEqual(self.job(again)["params"]["ig_publish_at"], self.job(first)["params"]["ig_publish_at"])
+        self.drive(kinds=("upload",))
+        self.assertEqual((len(self.ig.published), store.list_posts(var)[-1]["status"]), (1, "posted"))
+        # a container that was only created (no publish sent) is reused with the same options, not with others
+        var2 = store.get_video(store.get_variant(var)["video_id"])["variants"][1]["id"]
+        self.ig.script = [self.ig.InstagramError("Instagram verarbeitet zu lange", retryable=False)]
+        failed = pipeline.enqueue_upload(var2, acc, {"share_to_feed": True})
+        self.drive(kinds=("upload",))
+        cid = self.job(failed)["params"]["ig_container"]
+        other = pipeline.enqueue_upload(var2, acc, {"share_to_feed": False})
+        self.assertNotIn("ig_container", self.job(other)["params"])
+        pipeline.cancel_job(other)
+        same = pipeline.enqueue_upload(var2, acc, {"share_to_feed": True})
+        self.assertEqual(self.job(same)["params"]["ig_container"], cid)
+
+    def test_a_cancel_after_the_publish_request_keeps_the_reel(self):
+        var, acc = self.setup_variant()
+        up = pipeline.enqueue_upload(var, acc, {})
+        real = self.ig.publish
+
+        def publish(*a, on_state, **kw):
+            def saved(changes):
+                on_state(changes)
+                if "ig_publish_at" in changes:
+                    pipeline.cancel_job(up)  # "Abbrechen" a moment after the publish request left
+            return real(*a, on_state=saved, **kw)
+        self.ig.publish = publish
+        self.drive(kinds=("upload",))
+        post = store.list_posts(var)[0]
+        self.assertEqual((post["status"], post["external_id"], post["error"]), ("posted", "M1", None))
+        self.assertEqual(self.job(up)["status"], "done")
+        self.assertTrue(any("der Reel war schon veröffentlicht" in e["message"] for e in store.job_events(up)))
+
+    def test_a_cancel_before_the_publish_request_publishes_nothing(self):
+        var, acc = self.setup_variant()
+        up = pipeline.enqueue_upload(var, acc, {})
+        self.ig.script = [lambda: pipeline.cancel_job(up)]
+        self.drive(kinds=("upload",))
+        self.assertEqual((self.job(up)["status"], self.ig.published), ("canceled", {}))
+        self.assertEqual(store.list_posts(var)[0]["status"], "failed")
+
+    def test_errors_retry_or_fail_with_the_platform_in_the_alert(self):
+        var, acc = self.setup_variant()
+        self.ig.script = [self.ig.InstagramError("Instagram bremst gerade", retryable=True, slow=True),
+                          self.ig.InstagramError("Dem Zugriff fehlt eine Berechtigung", retryable=False)]
+        up = pipeline.enqueue_upload(var, acc, {})
+        before = time.time()
+        self.drive(kinds=("upload",))
+        job = self.job(up)
+        self.assertEqual((job["status"], job["attempts"]), ("queued", 1))
+        self.assertGreaterEqual(job["not_before"], before + pipeline.SLOW_BACKOFF_S[0])  # a rate limit waits longer
+        self.drive(kinds=("upload",), now=time.time() + 3600)
+        self.assertEqual(self.job(up)["status"], "failed")
+        alert = store.get_alert(f"job.failed.{up}")
+        self.assertIn("(Instagram-Upload", alert["message"])
+        self.assertEqual(store.list_posts(var)[0]["error"], "Dem Zugriff fehlt eine Berechtigung")
 
 
 class ConcurrencyTests(Helpers):

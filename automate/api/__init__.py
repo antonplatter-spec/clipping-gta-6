@@ -8,7 +8,7 @@ subprocesses and HTTP to Google never block the event loop.
 
 Modules: auth (state, setup, login, account), dashboard (overview, automation, alerts, jobs, scan, system), picks,
 videos, sources (profiles, creators, streams), config (settings, watchlist, research, assets), keys (costs, API
-keys), social (accounts, YouTube); common (errors, validation), files (safe file serving with Range).
+keys), social (accounts, YouTube, Instagram); common (errors, validation), files (safe file serving with Range).
 """
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -16,7 +16,8 @@ from . import auth, config, dashboard, keys, picks, social, sources, videos
 from .common import ApiError, not_found
 
 PUBLIC_ROUTES = frozenset({("GET", "/api/state"), ("POST", "/api/setup"), ("POST", "/api/setup/confirm"),
-                           ("POST", "/api/login"), ("GET", "/api/social/youtube/callback")})
+                           ("POST", "/api/login"), ("GET", "/api/social/youtube/callback"),
+                           ("GET", "/api/social/instagram/callback")})
 
 
 def guard(request: Request, response: Response):

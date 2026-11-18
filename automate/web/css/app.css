@@ -893,3 +893,11 @@ a.tile:hover { border-color: var(--border-strong); background: var(--surface-2);
 .toggle-row.compact .toggle-label { font-weight: 500; color: var(--text-2); font-size: 13px; }
 .toggle-state { color: var(--text-2); font-size: 13px; font-weight: 500; align-self: center; }
 .toggle-row:has(.toggle-label.sr-only) { align-items: center; gap: 8px; }
+
+/* ------------------------------------------------------------------ uploads (YouTube, Instagram) */
+
+.caption-preview { font-size: 13px; line-height: 1.5; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); }
+.plain-list { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.list-main .issue { margin-top: 4px; }
+.callout-text { overflow-wrap: anywhere; }  /* a redirect URI in a note must not widen the page on a phone */
+.tabs.tabs-wrap { flex-wrap: wrap; overflow-x: visible; }

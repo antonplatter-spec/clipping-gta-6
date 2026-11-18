@@ -1,19 +1,24 @@
-"""Konten: social-media accounts and the YouTube connection (Google OAuth client, connect, callback, disconnect).
+"""Konten: social-media accounts, the YouTube connection (Google OAuth client, connect, callback, disconnect), the
+Instagram connection (Meta app ids, paste a token, OAuth connect + callback, check) and the platforms' upload options.
 
-The OAuth callback is a public route (Google's redirect carries no session cookie: see automate/social.py); it is
-validated by the single-use `state` and answers with a small German HTML page that sends the browser back to the
-dashboard origin the owner started from: `/#/konten?youtube=connected` or `?youtube=error&message=…`.
+The OAuth callbacks are public routes (the provider's redirect carries no session cookie: see automate/social.py);
+each is validated by its single-use `state` and answers with a small German HTML page that sends the browser back to
+the dashboard origin the owner started from: `/#/konten?youtube=connected` / `?instagram=connected` or
+`?<platform>=error&message=…`. Instagram's OAuth needs an HTTPS --public-url (Meta takes no http redirect, as far
+as we could check); pasting a token works without any redirect.
 """
 import html
+import ipaddress
 import logging
 import re
+from contextlib import contextmanager
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import HTMLResponse
 
-from .. import settings, social, store, youtube
-from .common import Form, conflict, invalid, mapped, not_found, public
+from .. import instagram, settings, social, store, youtube
+from .common import ApiError, Form, conflict, invalid, mapped, not_found, public
 
 log = logging.getLogger("automate.api")
 router = APIRouter()
@@ -90,6 +95,13 @@ def disconnect(account_id: int):
     return social.public(social.disconnect(account_id))
 
 
+@router.get("/social/platforms")
+def platforms():
+    """The platforms the dashboard can upload to, with their option fields (the upload dialog renders them)."""
+    items = social.platforms()
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/social/youtube/app")
 def get_app(request: Request):
     return social.youtube_app(redirect_uri(request))
@@ -138,8 +150,8 @@ def connect(request: Request, body: dict | None = Body(None)):
     return {"auth_url": url}
 
 
-def _page(target, ok, message):
-    title = "YouTube verbunden" if ok else "YouTube-Verbindung fehlgeschlagen"
+def _page(target, ok, message, platform="YouTube"):
+    title = f"{platform} verbunden" if ok else f"{platform}-Verbindung fehlgeschlagen"
     t = html.escape(target, quote=True)
     body = (f"<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -180,3 +192,145 @@ def callback(request: Request, code: str | None = None, state: str | None = None
     label = account.get("label") or "YouTube"
     return _page(f"{origin}/#/konten?youtube=connected&account={account['id']}", True,
                  f"„{label}“ ist jetzt verbunden. Du wirst zum Dashboard zurückgeleitet …")
+
+
+# ---------------------------------------------------------------- Instagram
+
+IG_ERROR_STATUS = {"not_found": 404, "not_connected": 409, "instagram_app_missing": 409, "invalid": 422,
+                   "instagram_token_format": 422, "instagram_token_invalid": 422, "instagram_not_professional": 422,
+                   "instagram_no_account": 422, "instagram_permission": 422, "instagram_wrong_account": 422,
+                   "instagram_disconnected": 409, "session_expired": 401}
+IG_FIELD_ERRORS = ("instagram_token_format", "instagram_token_invalid", "instagram_not_professional",
+                   "instagram_no_account", "instagram_permission", "instagram_wrong_account")
+APP_FIELDS = {"app_id": "instagram_app_id", "app_secret": "instagram_app_secret", "meta_app_id": "meta_app_id",
+              "meta_app_secret": "meta_app_secret"}
+
+
+@contextmanager
+def ig_mapped(field=None):
+    """InstagramError -> ApiError (German message; a token that was refused also as the field's error)."""
+    try:
+        yield
+    except instagram.InstagramError as e:
+        status = IG_ERROR_STATUS.get(e.code, 502)
+        fields = {field: str(e)} if field and e.code in IG_FIELD_ERRORS else None
+        raise ApiError(status, e.code, str(e), fields=fields) from None
+
+
+def _is_ip(name):
+    try:
+        ipaddress.ip_address(name.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def instagram_redirect_uri(request):
+    """Where Meta may send the browser back: only an HTTPS --public-url on a host name, else None (OAuth off)."""
+    cfg = request.app.state.config
+    p = getattr(cfg, "public", None)
+    if p is not None and p.scheme == "https" and p.hostname and not _is_ip(p.hostname):
+        return f"{cfg.public_origin}{instagram.CALLBACK_PATH}"
+    return None
+
+
+@router.get("/social/instagram/app")
+def get_instagram_app(request: Request):
+    return social.instagram_app(instagram_redirect_uri(request))
+
+
+@router.put("/social/instagram/app")
+def put_instagram_app(request: Request, body: dict | None = Body(None)):
+    form = Form(body)
+    if not any(form.has(f) for f in APP_FIELDS):
+        form.error("app_id", "Mindestens einen Wert angeben.")
+    changes = {}
+    for field, secret in APP_FIELDS.items():
+        if not form.has(field):
+            continue
+        value = form.str(field, max_len=300, nullable=True) or None
+        if value:
+            try:
+                value = settings.validate_secret(secret, value)
+            except settings.SettingsError as e:
+                form.error(field, next(iter(e.errors.values())))
+        changes[secret] = value
+    form.check()
+    for name, value in changes.items():
+        store.set_secret(name, value)
+    return social.instagram_app(instagram_redirect_uri(request))
+
+
+@router.post("/social/instagram/token")
+def instagram_token(body: dict | None = Body(None)):
+    """The paste path: validates the token at Meta, then stores it (write-only) on the matching or a new account."""
+    form = Form(body)
+    token = form.str("access_token", required=True, max_len=4096, label="Das Token")
+    account_id = form.int("account_id", nullable=True)
+    form.check()
+    if account_id is not None:
+        a = _account(account_id)
+        if a["platform"] != "instagram":
+            raise invalid({"account_id": "Nur Instagram-Konten lassen sich so verbinden."})
+    with ig_mapped("access_token"):
+        rows = instagram.connect_token(token, account_id=account_id)
+    items = [social.public(a) for a in rows]
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/social/instagram/connect")
+def instagram_connect(request: Request, body: dict | None = Body(None)):
+    form = Form(body)
+    account_id = form.int("account_id", nullable=True)
+    form.check()
+    if account_id is not None and _account(account_id)["platform"] != "instagram":
+        raise invalid({"account_id": "Nur Instagram-Konten lassen sich verbinden."})
+    redirect = instagram_redirect_uri(request)
+    if redirect is None:
+        raise conflict("instagram_needs_https", social.OAUTH_NEEDS_HTTPS)
+    if not store.get_secret("instagram_app_id") or not store.get_secret("instagram_app_secret"):
+        raise conflict("instagram_app_missing", "Bitte zuerst Instagram-App-ID und Instagram-App-Geheimcode "
+                                                "eintragen.")
+    origin = f"{request.url.scheme}://{request.headers.get('host')}"  # the Host passed the allow-list
+    with ig_mapped():
+        url = social.instagram_connect_url(request.state.auth["token_hash"], account_id=account_id,
+                                           return_origin=origin, redirect_uri=redirect)
+    return {"auth_url": url}
+
+
+@router.get("/social/instagram/callback")
+@public
+def instagram_callback(request: Request, code: str | None = None, state: str | None = None,
+                       error: str | None = None):
+    entry = social.take_state(state, platform="instagram") if state else None
+    origin = (entry or {}).get("return_origin") or f"{request.url.scheme}://{request.headers.get('host')}"
+
+    def fail(message):
+        return _page(f"{origin}/#/konten?instagram=error&message={quote(message)}", False, message, "Instagram")
+
+    if entry is None:
+        return fail("Der Verbindungslink ist abgelaufen oder wurde schon benutzt. Bitte im Dashboard erneut „Mit "
+                    "Instagram anmelden“ klicken.")
+    if error:
+        return fail("Du hast den Zugriff bei Instagram nicht erlaubt." if error == "access_denied"
+                    else f"Instagram hat die Anmeldung abgebrochen ({error[:60]}).")
+    if not code or len(code) > 2000:
+        return fail("Instagram hat keinen Anmeldecode geschickt.")
+    try:
+        account = social.finish_instagram(entry, code.split("#")[0])
+    except instagram.InstagramError as e:
+        return fail(str(e))
+    except Exception:
+        log.exception("Instagram OAuth callback failed")
+        return fail("Interner Fehler beim Verbinden. Details stehen im Server-Log.")
+    return _page(f"{origin}/#/konten?instagram=connected&account={account['id']}", True,
+                 f"„{account.get('label') or 'Instagram'}“ ist jetzt verbunden. Du wirst zum Dashboard "
+                 f"zurückgeleitet …", "Instagram")
+
+
+@router.post("/social/instagram/accounts/{account_id}/check")
+def instagram_check(account_id: int):
+    """"Verbindung prüfen": asks Meta whether the token still works (and refreshes it when it is due)."""
+    _account(account_id)
+    with ig_mapped():
+        return social.public(instagram.check_account(account_id))
