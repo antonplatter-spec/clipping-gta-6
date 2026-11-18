@@ -253,6 +253,7 @@ class FakeTools(TempData):
         self.bridge_calls.append((op, payload))
         if op == "music_library":
             return {"tracks": [{"id": "boom", "kind": "hit", "usable": True},
+                               {"id": "thud", "kind": "hit", "role": "impact", "usable": False},  # switched off
                                {"id": "quirky", "kind": "music", "mood": "funny", "usable": True},
                                {"id": "skyrim", "kind": "music", "mood": "epic", "usable": False}]}
         if op == "check":
@@ -487,6 +488,7 @@ class LoopTests(FakeTools):
                      "hit sounds by role", "impact: boom", "40 in total", "46 s of video", "Fix rounds: 3 rejected",
                      "caption_position auto", "sound_level normal"):
             self.assertIn(want, facts)
+        self.assertNotIn("thud", facts)  # a switched-off sound isn't offered to Claude
         self.assertIn("#1 strong · 10.0-31.0 s (21 s)", content[1]["text"])
         self.assertIn("S1 scenario", content[1]["text"])
         self.assertEqual(sum(1 for b in content if b["type"] == "image"), 3)  # cand_01, scen_01, cand_02
