@@ -33,6 +33,7 @@ EDGE_S = 0.4          # no beat in the first or last 0.4 s
 SHOUT_DB = 8.0        # what a shouted word ("!") counts as when no jump is measured there (enough for strong only)
 MERGE_S = 0.5         # a shout and a jump this close are one beat
 WHY_DE = {"payoff": "Pointe der Story", "jump": "Lautstärkesprung", "shout": "geschriener Satz"}
+LEVEL_DE = {"off": "aus", "subtle": "dezent", "normal": "normal", "strong": "stark"}
 
 
 def level_of(pick, cfg):
@@ -161,7 +162,7 @@ def plan_beats(words, dur, payoff, level, levels=None, hop=HOP, music_ok=True):
     for k, b in enumerate(beats):
         main = k == 0
         t = b["t"]
-        entry = {"t": t, "why": b["why"], "strength": round(b["strength"], 1) if b["why"] != "payoff" else None,
+        entry = {"t": t, "why": b["why"], "strength": round(b["strength"], 1) if b["why"] == "jump" else None,
                  "roles": []}
         if main and lim["riser"]:
             fx.append({"t": t, "type": "hit", "role": "riser", "auto": True, "max_pre": lim["riser"]})
@@ -181,16 +182,16 @@ def plan_beats(words, dur, payoff, level, levels=None, hop=HOP, music_ok=True):
     return {"fx": fx, "windows": windows, "beats": info, "level": level}
 
 
-def describe(level, beats, used=None):
+def describe(level, beats):
     """One German line for the dashboard: 'Sound: normal – Riser + Impact bei 9,5 s (Pointe der Story), …'."""
     if level == "off":
         return "Sound: aus (keine automatischen Effekte)"
     if not beats:
-        return f"Sound: {level} – kein Moment laut genug für einen Effekt"
+        return f"Sound: {LEVEL_DE.get(level, level)} – kein Moment laut genug für einen Effekt"
     parts = []
     for b in beats:
         what = " + ".join({"riser": "Riser", "impact": "Impact"}[r] for r in b["roles"])
         bed = " mit Spannungs-Bett" if b.get("bed") else ""
         why = WHY_DE[b["why"]] + (f" +{b['strength']:.0f} dB" if b.get("strength") else "")
         parts.append(f"{what}{bed} bei {b['t']:.1f} s".replace(".", ",") + f" ({why})")
-    return f"Sound: {level} – " + "; ".join(parts)
+    return f"Sound: {LEVEL_DE.get(level, level)} – " + "; ".join(parts)

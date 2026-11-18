@@ -13,9 +13,11 @@ UNDER_SPEECH_DB, FADE_S, SPEECH_PAD_S = -18.0, 0.3, 0.15
 # a riser ENDS on it (its beat is the end of the file, or `beat_at` seconds in), a tension bed runs up to it.
 ROLES = ("impact", "riser", "whoosh", "tension")
 LEGACY_ROLES = {"hit": "impact", "boom": "impact", "whoosh": "whoosh"}  # the first three, from before roles
-# Level of each role relative to the clip's own loudness (LU above the bed's integrated loudness, at the loudest
-# 400 ms of the sound): an impact lands a little above the talking, a riser builds to about its level.
-ROLE_LU = {"impact": 4.0, "riser": 1.0, "whoosh": -2.0, "tension": -8.0}
+# Level of each sound relative to the clip's own loudness (LU above the bed's integrated loudness, measured at the
+# loudest 400 ms of an effect, over the whole of a music track): an impact lands about as loud as the talking peaks,
+# a riser builds to just under it, music sits under the talk (and ducks 18 dB more while someone talks). Measured
+# on the stand-ins: hotter than this and the final -14 LUFS pass has to turn the talking down to make room.
+ROLE_LU = {"impact": 2.0, "riser": -2.0, "whoosh": -3.0, "tension": -10.0, "music": -5.0}
 SFX_DUCK_DB = -10.0       # risers and tension beds under speech (music ducks -18 dB)
 MAX_GAIN_DB, MIN_GAIN_DB = 6.0, -24.0
 HIT_TAIL_S = 2.0          # a one-shot's length when the file's can't be read
@@ -152,13 +154,38 @@ def peak_loudness(track):
     return _peaks[key]
 
 
+_lufs = {}
+
+
+def track_loudness(track):
+    """A music track's integrated loudness (library `lufs` first, else measured once)."""
+    if track.get("lufs") is not None:
+        return float(track["lufs"])
+    p = track["path"]
+    try:
+        key = (str(p), p.stat().st_mtime)
+    except OSError:
+        return None
+    if key not in _lufs:
+        try:
+            res = subprocess.run(["ffmpeg", "-nostats", "-i", str(p), "-af", "ebur128", "-f", "null", "-"],
+                                 capture_output=True, text=True, timeout=120)
+            found = re.findall(r"I:\s+(-?[\d.]+) LUFS", res.stderr)
+            _lufs[key] = float(found[-1]) if found else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            _lufs[key] = None
+    return _lufs[key]
+
+
 def level_gain(track, bed_lufs, offset_db=0.0):
     """dB that puts a sound at its role's level relative to the bed (0 when either loudness is unknown)."""
-    peak = peak_loudness(track) if bed_lufs is not None else None
-    if peak is None or bed_lufs is None:
+    if bed_lufs is None:
         return 0.0
-    want = bed_lufs + ROLE_LU.get(role(track), 0.0) + offset_db
-    return round(min(max(want - peak, MIN_GAIN_DB), MAX_GAIN_DB), 1)
+    own = track_loudness(track) if track.get("kind") == "music" else peak_loudness(track)
+    if own is None:
+        return 0.0
+    want = bed_lufs + ROLE_LU.get(role(track) or "music", 0.0) + offset_db
+    return round(min(max(want - own, MIN_GAIN_DB), MAX_GAIN_DB), 1)
 
 
 def clip_windows(pick, dur):
@@ -205,7 +232,8 @@ def plan(pick, words, fx, dur, cfg, seed="", lib=None, extra=None, bed_lufs=None
     for w in clip_windows(pick, dur) + list(extra or []):
         t = choose(lib, cfg, "music", w["mood"], f"{seed}:{w['s']}") if w.get("mood") else None
         if t:
-            out.append((t, w["s"], w["e"] - w["s"], "music"))
+            gain = level_gain(t, bed_lufs, level_db if w.get("fallback") else 0.0)
+            out.append(({**t, "gain_db": gain} if gain else t, w["s"], w["e"] - w["s"], "music"))
         elif w.get("sound") or w.get("fallback"):  # a tension bed, or no approved track in that mood
             t = choose(lib, cfg, "hit", seed=f"{seed}:{w['s']}", want=w.get("sound"), role_=w.get("fallback"))
             if t and role(t) == "tension":

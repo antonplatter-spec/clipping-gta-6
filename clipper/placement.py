@@ -124,6 +124,12 @@ def validate(pick):
     return out
 
 
+def config_errors(cfg):
+    """Config defaults that can't be used (they count as auto): one line each, for a warning."""
+    return [f"{key}: {cfg[key]!r} isn't one of: {allowed(key)} (using auto)" for key in KEYS
+            if cfg.get(key) is not None and not valid(key, cfg[key])]
+
+
 def family_looks(style):
     return [k for k, v in captions.LOOKS.items() if v["family"] == style]
 
@@ -171,7 +177,7 @@ def slots(geo, reserve):
     may use, and what it covers ("game", "blur" or "seam"). `reserve` = the hook banner's (top, bottom) or None."""
     split = geo["layout"] == "split"
     floor = max(SAFE_TOP, geo["face_guard"] + 8 if split else SAFE_TOP)
-    under_hook = max(floor, reserve[1] + 16) if reserve else floor
+    under_hook = max(floor, reserve[1] + 28) if reserve else floor
     gy0, gy1 = geo["game"]
     out = {}
     if split:
@@ -226,7 +232,9 @@ def analyse(frames, boundaries=()):
     edges = dx + dy
     for y in boundaries:
         edges[:, max(0, y // SCALE - 1):y // SCALE + 1] = 0
-    motion = np.abs(np.diff(luma, axis=0)).mean(0) if len(luma) > 1 else np.zeros(luma.shape[1:], np.float32)
+    steps = np.abs(np.diff(luma, axis=0))
+    steps = steps[steps.reshape(len(steps), -1).max(1) > 0]  # two samples on one keyframe (a long GOP) aren't motion
+    motion = steps.mean(0) if len(steps) else np.zeros(luma.shape[1:], np.float32)
     static = (((edges > 0.12).mean(0) >= 0.85) & (luma.std(0) < 0.04)).astype(np.float32)
     cb = 128 - 37.797 * r - 74.203 * g + 112.0 * b
     cr = 128 + 112.0 * r - 93.786 * g - 18.214 * b

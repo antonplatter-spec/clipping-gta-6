@@ -141,6 +141,8 @@ python3 -m clipper report "<markdown>"         # add a run report to exports/<pr
 python3 -m clipper schedule install --time 09:00   # CLI-only fallback scheduler
 python3 -m clipper render <id> --picks picks.json   # exports/<profile>/<date>/video N/<hook>.mp4
 python3 -m clipper render <id> --picks picks.json --top-hooks 1   # only the best-ranked hook (or CLIPPER_TOP_HOOKS=1 in .env)
+python3 -m clipper preview <id> --pick 1 [--at 4.5]   # one still as it will render (frame + hook + caption) + where they sit and why (JSON)
+python3 -m clipper.sfx                         # synthesize the riser/impact/braam/... sounds in assets/music again (CC0, identical files)
 python3 -m clipper simulate picks.json          # rank hook variants with a simulated swipe test
 python3 -m clipper check picks.json --job <id>  # research rules + fail picks reusing exported footage
 python3 -m clipper find "moment of truth"       # one line across every stream of the last 6 h (multi-streamer edits)

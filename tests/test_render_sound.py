@@ -79,10 +79,12 @@ class BeatFindingTests(unittest.TestCase):
         x[int(9.0 / sound.HOP):int(10.0 / sound.HOP)] = -8.0
         x[int(17.5 / sound.HOP):int(18.0 / sound.HOP)] = -14.0
         plan = sound.plan_beats(words, 20.0, None, "normal", x)
-        self.assertEqual([b["t"] for b in plan["beats"]], [9.0, 17.5])
+        main, other = [b["t"] for b in plan["beats"]]
+        self.assertAlmostEqual(main, 9.0, delta=0.15)
+        self.assertAlmostEqual(other, 17.5, delta=0.15)  # a loud syllable right before it can start the rise
         roles = [(f["t"], f.get("role"), f.get("tag")) for f in plan["fx"] if f["type"] == "hit"]
-        self.assertEqual(roles, [(9.0, "riser", None), (9.0, "impact", "big"), (17.5, "impact", "boom")])
-        self.assertEqual([f["t"] for f in plan["fx"] if f["type"] == "flash"], [9.0])  # white flash on the main beat
+        self.assertEqual(roles, [(main, "riser", None), (main, "impact", "big"), (other, "impact", "boom")])
+        self.assertEqual([f["t"] for f in plan["fx"] if f["type"] == "flash"], [main])  # white flash on the main beat
         self.assertEqual(plan["windows"], [{"s": 2.65, "e": 9.15, "mood": "suspense", "fallback": "tension"}])
         sub = sound.plan_beats(words, 20.0, None, "subtle", x)
         self.assertEqual([(f.get("role"), f.get("tag")) for f in sub["fx"] if f["type"] == "hit"], [("impact", "boom")])
@@ -143,8 +145,10 @@ class PlacingTests(unittest.TestCase):
 
     def test_sounds_are_levelled_against_the_bed(self):
         t = {"kind": "hit", "role": "impact", "peak_lufs": -10.0, "path": Path("x")}
-        self.assertEqual(music.level_gain(t, -24.0), -10.0)        # impact 4 LU over a -24 LUFS bed: -20
-        self.assertEqual(music.level_gain(t, -24.0, 2.0), -8.0)    # strong
+        self.assertEqual(music.level_gain(t, -24.0), -12.0)        # impact 2 LU over a -24 LUFS bed: -22
+        self.assertEqual(music.level_gain(t, -24.0, 2.0), -10.0)   # strong
+        song = {"kind": "music", "lufs": -17.0, "path": Path("x")}
+        self.assertEqual(music.level_gain(song, -24.0), -12.0)     # music 5 LU under the bed: -29
         self.assertEqual(music.level_gain(t, None), 0.0)
         self.assertEqual(music.level_gain(t, -60.0), music.MIN_GAIN_DB)
         self.assertEqual(music.level_gain(t, 0.0), music.MAX_GAIN_DB)
@@ -199,6 +203,7 @@ class PrepareClipTests(unittest.TestCase):
 
     def prep(self, pick, cfg=None, words=()):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(render.subprocess, "run"), \
+                mock.patch.object(render.speakers, "diarized_words", return_value=None), \
                 mock.patch.object(render.captions, "write_overlay", return_value="caps"):
             return render.prepare_clip(Path(d), {"start": 0.0, "end": 20.0, **pick}, list(words),
                                        {"separate_voices": False, **(cfg or {})}, Path(d))

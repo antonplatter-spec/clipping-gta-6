@@ -203,3 +203,54 @@ class GainTests(unittest.TestCase):
         self.assertEqual(dub.match_gain(-14.0, -50.0), -15.0)   # clamped: never buried
         self.assertEqual(dub.match_gain(-30.0, -5.0), 10.0)     # clamped: never blown out
         self.assertEqual(dub.match_gain(-14.0, None), 0.0)      # an old cache without loudness: unchanged
+
+
+class DubRenderTests(unittest.TestCase):
+    """`dub render` still renders through the shared placement and encode path (voice separation and Fish Audio
+    are faked; ffmpeg is real, so this skips without it)."""
+
+    @unittest.skipUnless(__import__("shutil").which("ffmpeg") and __import__("shutil").which("ffprobe"), "needs ffmpeg")
+    def test_dub_renders_1080x1920_with_the_original_placement(self):
+        import json
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from clipper import render
+        from tests.test_render_placement import make_job
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            job = make_job(root)
+            pick = {"start": 0.0, "end": 6.0, "clip_type": "reaction", "hook_style": "bold", "caption_style": "boxed",
+                    "layout": {"type": "split", "face": [0.72, 0.64, 0.26, 0.33]},
+                    "hooks": ["Why did Kai *scream*?", "Kai was NOT ready", "Me when the car *explodes*"],
+                    "titles": ["Why Did Kai Scream In GTA 6?"], "description": "Kai screams.", "hashtags": ["#gta6"]}
+            (job / "picks.json").write_text(json.dumps([pick]))
+            segs = [{"i": 0, "s": 0.2, "e": 2.2, "text": "yo look at this car", "spk": 0, "hz": 120, "db": -20.0},
+                    {"i": 1, "s": 3.5, "e": 5.4, "text": "NO WAY!", "spk": 0, "hz": 130, "db": -10.0}]
+            (job / "dub-lines-0-6.json").write_text(json.dumps(segs))
+            stems = []
+            for name, f in (("vocals.wav", 200), ("game.wav", 60)):
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency={f}:d=6",
+                                "-ac", "2", "-ar", "44100", str(root / name)], check=True)
+                stems.append(root / name)
+
+            def fish(text, ref_audio, ref_text, out, model):
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:d=1.5",
+                                "-ar", "44100", str(out)], check=True)
+
+            tr = {"lang": "es", "lines": ["mira este coche", "¡NO PUEDE SER!"],
+                  "hooks": ["¿Por qué gritó *Kai*?", "Kai NO estaba listo", "Yo cuando el coche *explota*"],
+                  "titles": ["¿Por Qué Gritó Kai En GTA 6?"], "description": "Kai grita."}
+            with mock.patch.object(dub, "clip_audio", return_value=tuple(stems)), \
+                    mock.patch.object(dub, "fish_clone", side_effect=fish), \
+                    mock.patch.object(render, "EXPORTS", root / "exports"):
+                out = dub.render_dub(job, 1, "es", tr, {"no_hook_share": 0, "profile": "gta6"})
+            self.assertEqual(len(out["variants"]), 3)
+            for v in out["variants"]:
+                self.assertEqual((v["check"]["width"], v["check"]["height"]), (1080, 1920))
+                self.assertAlmostEqual(v["check"]["lufs"], -14.0, delta=1.0)
+            manifest = json.loads((Path(out["folder"]) / "upload.json").read_text())
+            self.assertEqual({m["lang"] for m in manifest}, {"es"})
+            self.assertEqual(manifest[0]["placement"]["layout"], "split")
+            self.assertTrue(manifest[0]["placement"]["text_de"].startswith("Untertitel:"))
